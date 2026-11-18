@@ -418,6 +418,76 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    public void UsingCleanupIsHiddenButExplicitCleanupAndControlFlowRemain()
+    {
+        var result = Diagram(File("""
+            using System;
+            class Demo
+            {
+                void Run()
+                {
+                    using var resource = Open();
+                    try
+                    {
+                        using (var second = Open())
+                        {
+                            if (Check()) return;
+                            Work();
+                        }
+                        After();
+                    }
+                    finally { Explicit(); resource.Dispose(); }
+                }
+                IDisposable Open() => null!;
+                bool Check() => true;
+                void Work() { }
+                void After() { }
+                void Explicit() { }
+            }
+            """));
+        Assert.IsFalse(result.Nodes.Any(node => node.Label == "null"));
+        Assert.Contains(node => node.Label == "Demo.Open()", result.Nodes);
+        Assert.Contains(node => node.Label == "Demo.Work()", result.Nodes);
+        Assert.Contains(node => node.Label == "Demo.After()", result.Nodes);
+        Assert.Contains(node => node.Label == "finally", result.Nodes);
+        Assert.Contains(node => node.Label == "Demo.Explicit()", result.Nodes);
+        Assert.Contains(node => node.Label == "IDisposable.Dispose() · 実行時に決定", result.Nodes);
+        var returnNode = Single(result, "return");
+        var returnPath = PathFrom(result, returnNode).Select(node => node.Label).ToArray();
+        CollectionAssert.Contains(returnPath, "Demo.Explicit()");
+        CollectionAssert.Contains(returnPath, "End");
+    }
+
+    [TestMethod]
+    public void AwaitUsingCleanupIsHiddenAndExplicitAwaitRemains()
+    {
+        var result = Diagram(File("""
+            using System;
+            using System.Threading.Tasks;
+            class Demo
+            {
+                async Task Run()
+                {
+                    await using (var resource = Open())
+                    {
+                        await Work();
+                    }
+                    await After();
+                }
+                IAsyncDisposable Open() => null!;
+                Task Work() => Task.CompletedTask;
+                Task After() => Task.CompletedTask;
+            }
+            """));
+        Assert.AreEqual(2, result.Nodes.Count(node => node.Label == "await"));
+        Assert.Contains(node => node.Label == "Demo.Open()", result.Nodes);
+        Assert.Contains(node => node.Label == "Demo.Work()", result.Nodes);
+        Assert.Contains(node => node.Label == "Demo.After()", result.Nodes);
+        Assert.DoesNotContain(node => node.Label.Contains("DisposeAsync") || node.Label.Contains("finally")
+            || node.Label == "null" || node.Label.Contains("巻き戻し"), result.Nodes);
+    }
+
+    [TestMethod]
     public void FinallyRunsBeforeDistinctReturnAndNormalContinuations()
     {
         var result = Diagram(File("""

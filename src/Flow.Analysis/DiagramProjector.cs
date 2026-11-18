@@ -25,6 +25,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private readonly List<FlowEdge> edges = [];
     private readonly HashSet<string> transparent = [];
     private readonly List<RegionEntry> regionEntries = [];
+    private readonly HashSet<ControlFlowRegion> usingFinallyRegions = [];
     private readonly Dictionary<CaptureId, IOperation> captures = new();
     private readonly HashSet<CaptureId> ambiguousCaptures = [];
     private ILookup<ControlFlowRegion?, BasicBlock> unreachableBlocks = null!;
@@ -64,6 +65,15 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                 switchStarts[block.Ordinal] = input;
         }
 
+        foreach (var block in graph.Blocks)
+        {
+            var region = EnclosingFinally(block.EnclosingRegion);
+            if (region is null) continue;
+            if (block.Operations.SelectMany(operation => operation.DescendantsAndSelf())
+                .OfType<IInvocationOperation>().Any(IsImplicitUsingDispose))
+                usingFinallyRegions.Add(region);
+        }
+
         CollectRegions(graph.Root, null);
         unreachableBlocks = graph.Blocks.Where(block => !block.IsReachable)
             .ToLookup(block => EnclosingFinally(block.EnclosingRegion));
@@ -85,6 +95,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private void CollectRegions(ControlFlowRegion region, ControlFlowRegion? enclosingFinally)
     {
         RuntimeHelpers.EnsureSufficientExecutionStack();
+        if (usingFinallyRegions.Contains(region)) return;
         switch (region.Kind)
         {
             case ControlFlowRegionKind.Catch when region.EnclosingRegion?.Kind != ControlFlowRegionKind.FilterAndHandler:
@@ -108,7 +119,8 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private void AddRegionEntries(ControlFlowRegion? enclosingFinally, int context)
     {
         foreach (var block in unreachableBlocks[enclosingFinally])
-            GetBlock(new State(block.Ordinal, context));
+            if (EnclosingFinally(block.EnclosingRegion) is not { } region || !usingFinallyRegions.Contains(region))
+                GetBlock(new State(block.Ordinal, context));
 
         foreach (var entry in regionEntries.Where(entry => entry.EnclosingFinally == enclosingFinally))
         {
@@ -326,8 +338,22 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         return false;
     }
 
+    private static bool IsImplicitUsingDispose(IInvocationOperation call)
+    {
+        if (!call.IsImplicit || call.TargetMethod.Name is not ("Dispose" or "DisposeAsync")) return false;
+        return call.Syntax switch
+        {
+            VariableDeclaratorSyntax { Parent.Parent: UsingStatementSyntax } => true,
+            VariableDeclaratorSyntax { Parent.Parent: LocalDeclarationStatementSyntax declaration } =>
+                !declaration.UsingKeyword.IsKind(SyntaxKind.None),
+            ExpressionSyntax { Parent: UsingStatementSyntax statement } expression => statement.Expression == expression,
+            _ => false
+        };
+    }
+
     private string RunFinally(ControlFlowRegion region, string resume, int parent)
     {
+        if (usingFinallyRegions.Contains(region)) return resume;
         RuntimeHelpers.EnsureSufficientExecutionStack();
         var continuation = new Continuation(region, resume, parent);
         if (!contextIds.TryGetValue(continuation, out var id))
