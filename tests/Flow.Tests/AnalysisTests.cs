@@ -63,7 +63,7 @@ public sealed class AnalysisTests(TestContext testContext)
             }
             """));
         var conditions = result.Nodes.Where(node => node.Kind == NodeKind.Condition).Select(node => node.Label).ToArray();
-        CollectionAssert.AreEquivalent(new[] { "Check()？", "Other(3)？" }, conditions);
+        CollectionAssert.AreEquivalent(new[] { "Check()", "Other(3)" }, conditions);
         Assert.DoesNotContain("  ·  L", MermaidWriter.Write(result, includeSourceLines: false));
         StringAssert.Contains(MermaidWriter.Write(result), "  ·  L");
     }
@@ -161,7 +161,7 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.AreEqual("Demo.Check()", check.Label);
         var firstCondition = Next(result, check);
         var nullCheck = Next(result, firstCondition, "False");
-        Assert.AreEqual("null？", nullCheck.Label);
+        Assert.AreEqual("null", nullCheck.Label);
         var make = Next(result, nullCheck, "True");
         Assert.AreEqual("Demo.Make()", make.Label);
         var nextCheck = Next(result, make);
@@ -380,9 +380,9 @@ public sealed class AnalysisTests(TestContext testContext)
             """));
         var input = Single(result, "switch (Read(status))");
         Assert.AreEqual(input, Next(result, Single(result, "Demo.Read()")));
-        var first = Single(result, "case 0 に一致？");
-        var second = Single(result, "case 1 に一致？");
-        var guard = Single(result, "when Allowed()？");
+        var first = Single(result, "case 0 に一致");
+        var second = Single(result, "case 1 に一致");
+        var guard = Single(result, "when Allowed()");
         Assert.IsTrue(first.IsCaseTest);
         Assert.IsTrue(guard.IsCaseTest);
         var annotations = new NodeAnnotations { GrayRoots = [first.Id] };
@@ -410,7 +410,7 @@ public sealed class AnalysisTests(TestContext testContext)
             }
             """));
         var input = Single(result, "switch ((input + Read()))");
-        var test = Single(result, "case 3m に一致？");
+        var test = Single(result, "case 3m に一致");
         Assert.IsTrue(test.IsCaseTest);
         Assert.AreEqual(test, Next(result, input));
         Assert.HasCount(2, result.Nodes.Where(node => node.Label == "Demo.Read()"));

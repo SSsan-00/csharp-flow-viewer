@@ -577,17 +577,17 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         if (value is null)
             return "条件";
         if (test is CaseSwitchLabelSyntax constant)
-            return "case " + ShortLabel(constant.Value) + " に一致？";
+            return "case " + ShortLabel(constant.Value) + " に一致";
         if (test is CasePatternSwitchLabelSyntax pattern)
-            return "case " + ShortLabel(pattern.Pattern) + " に一致？";
+            return "case " + ShortLabel(pattern.Pattern) + " に一致";
         if (test is SwitchExpressionArmSyntax arm)
-            return "case " + ShortLabel(arm.Pattern) + " に一致？";
+            return "case " + ShortLabel(arm.Pattern) + " に一致";
         if (value is IIsNullOperation)
-            return "null？";
+            return "null";
         if (value.Syntax is ExpressionSyntax expression)
-            return (expression.Parent is WhenClauseSyntax ? "when " : "") + ShortLabel(expression) + "？";
+            return (expression.Parent is WhenClauseSyntax ? "when " : "") + ShortLabel(expression) + "";
 
-        return value is IIsPatternOperation or IIsTypeOperation ? "パターン／型に一致？" : "条件";
+        return value is IIsPatternOperation or IIsTypeOperation ? "パターン／型に一致" : "条件";
     }
 
     private static string ShortLabel(SyntaxNode syntax)
