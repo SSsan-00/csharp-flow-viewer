@@ -3,12 +3,12 @@ using Flow.Mermaid;
 using Flow.Model;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using Xunit;
-using Xunit.Abstractions;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace Flow.Tests;
 
-public sealed class AnalysisTests(ITestOutputHelper output)
+[TestClass]
+public sealed class AnalysisTests(TestContext testContext)
 {
     private static readonly MetadataReference[] References =
         ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
@@ -23,19 +23,19 @@ public sealed class AnalysisTests(ITestOutputHelper output)
         var compilation = CSharpCompilation.Create("Fictional", trees, References,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         if (!allowErrors)
-            Assert.Empty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+            Assert.IsEmpty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
         return new SourceFile(compilation.GetSemanticModel(tree));
     }
 
     private static FlowDiagram Diagram(SourceFile file, string method = "Run") =>
-        file.Analyze(Assert.Single(file.Methods, item => item.Name == method).Id);
+        file.Analyze(Assert.ContainsSingle(file.Methods.Where(item => item.Name == method)).Id);
 
     private static FlowNode Single(FlowDiagram diagram, string label) =>
-        Assert.Single(diagram.Nodes, node => node.Label == label);
+        Assert.ContainsSingle(diagram.Nodes.Where(node => node.Label == label));
 
     private static FlowNode Next(FlowDiagram diagram, FlowNode from, string? branch = null) =>
-        diagram.Nodes.Single(node => node.Id == Assert.Single(diagram.Edges, edge =>
-            edge.From == from.Id && edge.Label == branch && edge.IsReachable).To);
+        diagram.Nodes.Single(node => node.Id == Assert.ContainsSingle(diagram.Edges.Where(edge =>
+            edge.From == from.Id && edge.Label == branch && edge.IsReachable)).To);
 
     private static IEnumerable<FlowNode> PathFrom(FlowDiagram diagram, FlowNode from)
     {
@@ -50,7 +50,7 @@ public sealed class AnalysisTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [TestMethod]
     public void ShortCircuitAndTernaryFollowRoslynPolarity()
     {
         var result = Diagram(File("""
@@ -69,17 +69,17 @@ public sealed class AnalysisTests(ITestOutputHelper output)
         var c = Single(result, "Demo.C()");
         var yes = Single(result, "Demo.Yes()");
         var no = Single(result, "Demo.No()");
-        Assert.Equal(b, Next(result, Next(result, a), "True"));
-        Assert.Equal(c, Next(result, Next(result, a), "False"));
-        Assert.Equal(yes, Next(result, Next(result, b), "True"));
-        Assert.Equal(c, Next(result, Next(result, b), "False"));
-        Assert.Equal(yes, Next(result, Next(result, c), "True"));
-        Assert.Equal(no, Next(result, Next(result, c), "False"));
-        Assert.Equal("return", Next(result, yes).Label);
-        Assert.Equal("End", Next(result, Next(result, no)).Label);
+        Assert.AreEqual(b, Next(result, Next(result, a), "True"));
+        Assert.AreEqual(c, Next(result, Next(result, a), "False"));
+        Assert.AreEqual(yes, Next(result, Next(result, b), "True"));
+        Assert.AreEqual(c, Next(result, Next(result, b), "False"));
+        Assert.AreEqual(yes, Next(result, Next(result, c), "True"));
+        Assert.AreEqual(no, Next(result, Next(result, c), "False"));
+        Assert.AreEqual("return", Next(result, yes).Label);
+        Assert.AreEqual("End", Next(result, Next(result, no)).Label);
     }
 
-    [Fact]
+    [TestMethod]
     public void AssignmentsKeepReceiverIndexGetterRhsAndSetterInOrder()
     {
         var result = Diagram(File("""
@@ -103,25 +103,25 @@ public sealed class AnalysisTests(ITestOutputHelper output)
             """));
         var hiddenWrite = result.Nodes.Where(node => node.Label == "Demo.Save()").MinBy(node => node.Source!.Line)!;
         var receiver = Next(result, hiddenWrite);
-        Assert.Equal("Demo.Receiver()", receiver.Label);
+        Assert.AreEqual("Demo.Receiver()", receiver.Label);
         var index = Next(result, receiver);
-        Assert.Equal("Demo.Index()", index.Label);
+        Assert.AreEqual("Demo.Index()", index.Label);
         var check = Next(result, index);
-        Assert.Equal("Demo.Check()", check.Label);
+        Assert.AreEqual("Demo.Check()", check.Label);
         var condition = Next(result, check);
         var saved = Next(result, condition, "True");
-        Assert.Equal("Demo.Save()", saved.Label);
+        Assert.AreEqual("Demo.Save()", saved.Label);
         var setter = Next(result, saved);
-        Assert.EndsWith(" · set", setter.Label);
-        Assert.NotNull(setter.TargetMethod);
-        Assert.Equal(setter, Next(result, condition, "False"));
-        Assert.Equal("Demo.P · get", Next(result, setter).Label);
-        Assert.Equal("Demo.Save()", Next(result, Next(result, setter)).Label);
-        Assert.Equal("Demo.P · set", Next(result, Next(result, Next(result, setter))).Label);
+        StringAssert.EndsWith(setter.Label, " · set");
+        Assert.IsNotNull(setter.TargetMethod);
+        Assert.AreEqual(setter, Next(result, condition, "False"));
+        Assert.AreEqual("Demo.P · get", Next(result, setter).Label);
+        Assert.AreEqual("Demo.Save()", Next(result, Next(result, setter)).Label);
+        Assert.AreEqual("Demo.P · set", Next(result, Next(result, Next(result, setter))).Label);
         Assert.DoesNotContain("555", MermaidWriter.Write(result));
     }
 
-    [Fact]
+    [TestMethod]
     public void PropertyEvaluationSurvivesLoweredCompoundAndCoalescingAssignments()
     {
         var result = Diagram(File("""
@@ -143,17 +143,17 @@ public sealed class AnalysisTests(ITestOutputHelper output)
             }
             """));
         var getter = Single(result, "Demo.P · get");
-        Assert.Equal("Demo.Check()", Next(result, getter).Label);
+        Assert.AreEqual("Demo.Check()", Next(result, getter).Label);
         var stringGetter = Single(result, "Demo.S · get");
         var nullCheck = Next(result, stringGetter);
-        Assert.Equal("null？", nullCheck.Label);
-        Assert.Equal("Demo.Make()", Next(result, nullCheck, "True").Label);
-        Assert.Equal("Demo.S · set", Next(result, Single(result, "Demo.Make()")).Label);
+        Assert.AreEqual("null？", nullCheck.Label);
+        Assert.AreEqual("Demo.Make()", Next(result, nullCheck, "True").Label);
+        Assert.AreEqual("Demo.S · set", Next(result, Single(result, "Demo.Make()")).Label);
         var referenceGetter = Single(result, "Demo.R · get");
-        Assert.Equal("Demo.Check()", Next(result, referenceGetter).Label);
+        Assert.AreEqual("Demo.Check()", Next(result, referenceGetter).Label);
     }
 
-    [Fact]
+    [TestMethod]
     public void ExpressionBodiedGetterHasItsOwnDiagram()
     {
         var file = File("""
@@ -167,15 +167,15 @@ public sealed class AnalysisTests(ITestOutputHelper output)
             """);
         var result = Diagram(file);
         var getters = result.Nodes.Where(node => node.Label.EndsWith(" · get", StringComparison.Ordinal)).ToArray();
-        Assert.Equal(2, getters.Length);
+        Assert.AreEqual(2, getters.Length);
         foreach (var getter in getters)
         {
-            Assert.NotNull(getter.TargetMethod);
-            Assert.Contains(file.Analyze(getter.TargetMethod.Value).Nodes, node => node.Label == "Demo.GetCount()");
+            Assert.IsNotNull(getter.TargetMethod);
+            Assert.Contains(node => node.Label == "Demo.GetCount()", file.Analyze(getter.TargetMethod.Value).Nodes);
         }
     }
 
-    [Fact]
+    [TestMethod]
     public void ExplicitKnownThrowRunsFinallyBeforeMatchingUnfilteredCatch()
     {
         var result = Diagram(File("""
@@ -197,11 +197,11 @@ public sealed class AnalysisTests(ITestOutputHelper output)
                 void Handle() {}
             }
             """));
-        Assert.Equal(["throw", "finally", "Demo.Cleanup()", "catch · System.ArgumentException", "Demo.Handle()", "End"],
-            PathFrom(result, Single(result, "throw")).Select(node => node.Label));
+        CollectionAssert.AreEqual(new[] { "throw", "finally", "Demo.Cleanup()", "catch · System.ArgumentException", "Demo.Handle()", "End" },
+            PathFrom(result, Single(result, "throw")).Select(node => node.Label).ToArray());
     }
 
-    [Fact]
+    [TestMethod]
     public void AllLoopKindsExposeCorrectContinueBreakAndReturnDestinations()
     {
         var result = Diagram(File("""
@@ -243,17 +243,17 @@ public sealed class AnalysisTests(ITestOutputHelper output)
             }
             """));
         var transfers = result.Nodes.Where(node => node.Label == "continue").OrderBy(node => node.Source!.Line).ToArray();
-        Assert.Equal(4, transfers.Length);
-        Assert.Equal("Demo.Update()", Next(result, transfers[0]).Label);
-        Assert.Equal("Demo.Check()", Next(result, Next(result, transfers[0])).Label);
-        Assert.Contains("MoveNext()", Next(result, transfers[1]).Label);
-        Assert.Equal("Demo.Check()", Next(result, transfers[2]).Label);
-        Assert.Equal("Demo.Check()", Next(result, transfers[3]).Label);
-        Assert.Contains("GetEnumerator()", Next(result, Single(result, "break")).Label);
-        Assert.Equal("End", Next(result, Single(result, "return")).Label);
+        Assert.AreEqual(4, transfers.Length);
+        Assert.AreEqual("Demo.Update()", Next(result, transfers[0]).Label);
+        Assert.AreEqual("Demo.Check()", Next(result, Next(result, transfers[0])).Label);
+        StringAssert.Contains(Next(result, transfers[1]).Label, "MoveNext()");
+        Assert.AreEqual("Demo.Check()", Next(result, transfers[2]).Label);
+        Assert.AreEqual("Demo.Check()", Next(result, transfers[3]).Label);
+        StringAssert.Contains(Next(result, Single(result, "break")).Label, "GetEnumerator()");
+        Assert.AreEqual("End", Next(result, Single(result, "return")).Label);
     }
 
-    [Fact]
+    [TestMethod]
     public void SwitchAndNestedLoopBreakKeepTheirOwnDestinations()
     {
         var result = Diagram(File("""
@@ -282,16 +282,16 @@ public sealed class AnalysisTests(ITestOutputHelper output)
                 void EndLoop() {}
             }
             """));
-        Assert.Equal("Demo.Tail()", Next(result, Next(result, Single(result, "Demo.One()"))).Label);
-        Assert.Equal("Demo.Tail()", Next(result, Next(result, Single(result, "Demo.Other()"))).Label);
-        Assert.Equal("Demo.Again()", Next(result, Next(result, Single(result, "Demo.Two()"))).Label);
-        Assert.Equal("Demo.EndLoop()", Next(result, Next(result, Single(result, "Demo.Again()")), "False").Label);
+        Assert.AreEqual("Demo.Tail()", Next(result, Next(result, Single(result, "Demo.One()"))).Label);
+        Assert.AreEqual("Demo.Tail()", Next(result, Next(result, Single(result, "Demo.Other()"))).Label);
+        Assert.AreEqual("Demo.Again()", Next(result, Next(result, Single(result, "Demo.Two()"))).Label);
+        Assert.AreEqual("Demo.EndLoop()", Next(result, Next(result, Single(result, "Demo.Again()")), "False").Label);
         var guard = Next(result, Single(result, "Demo.Check()"));
-        Assert.Equal("Demo.One()", Next(result, guard, "True").Label);
-        Assert.NotEqual("Demo.One()", Next(result, guard, "False").Label);
+        Assert.AreEqual("Demo.One()", Next(result, guard, "True").Label);
+        Assert.AreNotEqual("Demo.One()", Next(result, guard, "False").Label);
     }
 
-    [Fact]
+    [TestMethod]
     public void FinallyRunsBeforeDistinctReturnAndNormalContinuations()
     {
         var result = Diagram(File("""
@@ -319,16 +319,16 @@ public sealed class AnalysisTests(ITestOutputHelper output)
                 void Done() {}
             }
             """));
-        Assert.Equal(["Demo.Value()", "return", "finally", "Demo.Inner()", "finally", "Demo.Outer()", "End"],
-            PathFrom(result, Single(result, "Demo.Value()")).Select(node => node.Label));
-        Assert.Equal(["throw", "finally", "Demo.Inner()", "finally", "Demo.Outer()", "呼び出し元へ例外を伝播"],
-            PathFrom(result, Single(result, "throw")).Select(node => node.Label));
-        Assert.Contains(result.Nodes.Where(node => node.Label == "Demo.Inner()"), node =>
-            PathFrom(result, node).Any(step => step.Label == "Demo.Done()"));
-        Assert.Contains(result.Notices, message => message.Contains("例外探索"));
+        CollectionAssert.AreEqual(new[] { "Demo.Value()", "return", "finally", "Demo.Inner()", "finally", "Demo.Outer()", "End" },
+            PathFrom(result, Single(result, "Demo.Value()")).Select(node => node.Label).ToArray());
+        CollectionAssert.AreEqual(new[] { "throw", "finally", "Demo.Inner()", "finally", "Demo.Outer()", "呼び出し元へ例外を伝播" },
+            PathFrom(result, Single(result, "throw")).Select(node => node.Label).ToArray());
+        Assert.Contains(node => PathFrom(result, node).Any(step => step.Label == "Demo.Done()"),
+            result.Nodes.Where(node => node.Label == "Demo.Inner()"));
+        Assert.Contains(message => message.Contains("例外探索"), result.Notices);
     }
 
-    [Fact]
+    [TestMethod]
     public void FilterFalseDoesNotJumpToAnInventedHandlerAndRethrowMapsToSource()
     {
         var source = File("""
@@ -351,14 +351,14 @@ public sealed class AnalysisTests(ITestOutputHelper output)
         var result = Diagram(source);
         var check = Next(result, Single(result, "Demo.Check()"));
         var rethrow = Next(result, check, "True");
-        Assert.Equal("throw · 再スロー", rethrow.Label);
-        Assert.Equal("throw", source.Text.Substring(rethrow.Source!.Offset, rethrow.Source.Length));
-        Assert.Contains("フィルター不成立", Next(result, check, "False").Label);
-        Assert.Contains(PathFrom(result, rethrow), node => node.Label == "Demo.Cleanup()");
-        Assert.Contains(result.Nodes, node => node.Label.StartsWith("catch · System.Exception"));
+        Assert.AreEqual("throw · 再スロー", rethrow.Label);
+        Assert.AreEqual("throw", source.Text.Substring(rethrow.Source!.Offset, rethrow.Source.Length));
+        StringAssert.Contains(Next(result, check, "False").Label, "フィルター不成立");
+        Assert.Contains(node => node.Label == "Demo.Cleanup()", PathFrom(result, rethrow));
+        Assert.Contains(node => node.Label.StartsWith("catch · System.Exception"), result.Nodes);
     }
 
-    [Fact]
+    [TestMethod]
     public void SameFileSymbolsResolveByOverloadButDynamicAndExternalCallsDoNot()
     {
         var source = File("""
@@ -383,20 +383,21 @@ public sealed class AnalysisTests(ITestOutputHelper output)
 
         var diagram = Diagram(source);
         var calls = diagram.Nodes.Where(node => node.Label == "Demo.Pick()").OrderBy(node => node.Source!.Line).ToArray();
-        Assert.Equal(2, calls.Length);
-        Assert.Equal(2, calls.Select(node => node.TargetMethod).Distinct().Count());
-        Assert.All(calls, node => Assert.NotNull(node.TargetMethod));
-        Assert.Null(Single(diagram, "Demo.Virtual() · 実行時に決定").TargetMethod);
-        Assert.Null(Single(diagram, "Other.External()").TargetMethod);
-        Assert.Null(Single(diagram, "呼び出し · 実行時に決定").TargetMethod);
-        Assert.Contains(diagram.Nodes, node => node.Label.EndsWith("Local()") && node.TargetMethod is not null);
+        Assert.AreEqual(2, calls.Length);
+        Assert.AreEqual(2, calls.Select(node => node.TargetMethod).Distinct().Count());
+        foreach (var call in calls)
+            Assert.IsNotNull(call.TargetMethod);
+        Assert.IsNull(Single(diagram, "Demo.Virtual() · 実行時に決定").TargetMethod);
+        Assert.IsNull(Single(diagram, "Other.External()").TargetMethod);
+        Assert.IsNull(Single(diagram, "呼び出し · 実行時に決定").TargetMethod);
+        Assert.Contains(node => node.Label.EndsWith("Local()") && node.TargetMethod is not null, diagram.Nodes);
         var pick = source.Analyze(calls[0].TargetMethod!.Value);
-        Assert.Equal(source.Methods.Single(method => method.Name == "Run").Id,
+        Assert.AreEqual(source.Methods.Single(method => method.Name == "Run").Id,
             pick.Nodes.Single(node => node.Label == "Demo.Run()").TargetMethod);
-        Assert.NotEmpty(Diagram(source, "Local").Nodes);
+        Assert.IsNotEmpty(Diagram(source, "Local").Nodes);
     }
 
-    [Fact]
+    [TestMethod]
     public void UnresolvedInvocationAndDeadBranchAreVisible()
     {
         var result = Diagram(File("""
@@ -410,13 +411,13 @@ public sealed class AnalysisTests(ITestOutputHelper output)
                 void End() {}
             }
             """, allowErrors: true));
-        Assert.True(result.IsPartial);
-        Assert.False(Single(result, "呼び出し · 未解決").IsReachable);
-        Assert.Contains(result.Edges, edge => edge.Label == "True" && !edge.IsReachable);
-        Assert.True(Single(result, "Demo.End()").IsReachable);
+        Assert.IsTrue(result.IsPartial);
+        Assert.IsFalse(Single(result, "呼び出し · 未解決").IsReachable);
+        Assert.Contains(edge => edge.Label == "True" && !edge.IsReachable, result.Edges);
+        Assert.IsTrue(Single(result, "Demo.End()").IsReachable);
     }
 
-    [Fact]
+    [TestMethod]
     public void MermaidSnapshotRoundTripsThroughBrowserFixture()
     {
         var file = File(""""""
@@ -430,16 +431,16 @@ public sealed class AnalysisTests(ITestOutputHelper output)
             """""");
         var result = Diagram(file);
         var fixture = MermaidWriter.Write(result);
-        Assert.Contains("保存", fixture);
-        Assert.Contains("#34;", fixture);
-        Assert.Contains("#124;", fixture);
+        StringAssert.Contains(fixture, "保存");
+        StringAssert.Contains(fixture, "#34;");
+        StringAssert.Contains(fixture, "#124;");
         Assert.DoesNotContain("<script>", fixture);
-        Assert.Equal(fixture, MermaidWriter.Write(Diagram(file)));
+        Assert.AreEqual(fixture, MermaidWriter.Write(Diagram(file)));
         if (Environment.GetEnvironmentVariable("CFV_MERMAID_FIXTURE") is { } export)
             System.IO.File.WriteAllText(export, fixture);
     }
 
-    [Fact]
+    [TestMethod]
     public void TwentyThousandLinesWithManyMethodsAndOneLargeMethod()
     {
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -449,8 +450,8 @@ public sealed class AnalysisTests(ITestOutputHelper output)
         var listed = stopwatch.Elapsed;
         var small = smallFile.Analyze(smallFile.Methods[^1].Id);
         var smallTime = stopwatch.Elapsed - listed;
-        Assert.Equal(4_000, smallFile.Methods.Count);
-        Assert.Contains(small.Nodes, node => node.Label == "return");
+        Assert.AreEqual(4_000, smallFile.Methods.Count);
+        Assert.Contains(node => node.Label == "return", small.Nodes);
         stopwatch.Restart();
         var big = "class Huge { void Work() {}\nvoid Run(bool flag) {\n" +
             string.Concat(Enumerable.Repeat("if (flag)\n{\n Work();\n}\n\n", 4_000)) + "}}";
@@ -459,9 +460,9 @@ public sealed class AnalysisTests(ITestOutputHelper output)
         var large = Diagram(largeFile);
         var largeTime = stopwatch.Elapsed - largeListed;
         var mermaid = MermaidWriter.Write(large);
-        Assert.Equal(4_000, large.Nodes.Count(node => node.Kind == NodeKind.Call));
-        Assert.Equal(4_000, large.Nodes.Count(node => node.Kind == NodeKind.Condition));
-        output.WriteLine($"Many: list {listed.TotalMilliseconds:F0} ms, CFG {smallTime.TotalMilliseconds:F0} ms. " +
+        Assert.AreEqual(4_000, large.Nodes.Count(node => node.Kind == NodeKind.Call));
+        Assert.AreEqual(4_000, large.Nodes.Count(node => node.Kind == NodeKind.Condition));
+        testContext.WriteLine($"Many: list {listed.TotalMilliseconds:F0} ms, CFG {smallTime.TotalMilliseconds:F0} ms. " +
             $"Huge: list {largeListed.TotalMilliseconds:F0} ms, CFG {largeTime.TotalMilliseconds:F0} ms, " +
             $"{large.Nodes.Count} nodes / {large.Edges.Count} edges / {mermaid.Length} chars.");
     }

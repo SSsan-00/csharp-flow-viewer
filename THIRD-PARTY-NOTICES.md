@@ -11,6 +11,6 @@
 | Newtonsoft.Json | 13.0.3, MIT | licenses/Newtonsoft.Json.txt |
 | Mermaid and modules linked into the browser bundle | Mermaid 12.3.0, MIT. Modules carry their own license terms | tools/preview/THIRD-PARTY-LICENSES.txt |
 
-The WebView2 Evergreen Runtime and the target project's .NET SDK / MSBuild installation are obtained separately from their distributors. Development-only npm tooling and xUnit are outside the application bundle.
+The WebView2 Evergreen Runtime and the target project's .NET SDK / MSBuild installation are obtained separately from their distributors. Development-only npm tooling and MSTest are outside the application bundle.
 
 The Windows executable embeds these notices, accessible via **ライセンス** in the application. The Mermaid notice is generated from the actual esbuild input list. When changing the .NET runtime version used for publication, update its notices from the corresponding runtime packages and WPF release.

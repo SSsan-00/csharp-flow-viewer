@@ -1,12 +1,13 @@
 using System.Diagnostics;
 using Flow.Analysis;
-using Xunit;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace Flow.Tests;
 
+[TestClass]
 public sealed class ProjectTests
 {
-    [Fact]
+    [TestMethod]
     public async Task ProjectEvaluationAppliesFrameworkConfigurationReferencesAndFileInclusion()
     {
         var root = Path.Combine(Path.GetTempPath(), "cfv-tests-" + Guid.NewGuid());
@@ -61,24 +62,24 @@ public sealed class ProjectTests
             using var restore = Process.Start(restoreStart)!;
             var restoreLog = await restore.StandardOutput.ReadToEndAsync();
             await restore.WaitForExitAsync();
-            Assert.True(restore.ExitCode == 0, restoreLog);
+            Assert.IsTrue(restore.ExitCode == 0, restoreLog);
 
             var settings = await ProjectLoader.InspectAsync(path, TestContextToken);
-            Assert.Contains(settings.Options, option => option is { Configuration: "Review", TargetFramework: "net9.0" });
-            Assert.Contains(settings.Options, option => option is { Configuration: "Debug", TargetFramework: "netstandard2.1" });
+            Assert.Contains(option => option is { Configuration: "Review", TargetFramework: "net9.0" }, settings.Options);
+            Assert.Contains(option => option is { Configuration: "Debug", TargetFramework: "netstandard2.1" }, settings.Options);
             using var current = await ProjectLoader.OpenAsync(path, new ProjectOptions("Review", "net9.0"), TestContextToken);
-            var file = await current.ReadAsync(Assert.Single(current.Files), TestContextToken);
-            Assert.Contains(file.Methods, method => method.Name == "InNine");
-            Assert.Contains(file.Methods, method => method.Name == "InReview");
-            Assert.DoesNotContain(file.Methods, method => method.Name == "InStandard");
-            Assert.DoesNotContain(file.Notices.Concat(current.Notices), message => message.Contains("解析は部分的"));
-            Assert.Null(Assert.Single(file.Analyze(file.Methods[0].Id).Nodes,
-                node => node.Label == "Service.Save()").TargetMethod);
+            var file = await current.ReadAsync(Assert.ContainsSingle(current.Files), TestContextToken);
+            Assert.Contains(method => method.Name == "InNine", file.Methods);
+            Assert.Contains(method => method.Name == "InReview", file.Methods);
+            Assert.DoesNotContain(method => method.Name == "InStandard", file.Methods);
+            Assert.DoesNotContain(message => message.Contains("解析は部分的"), file.Notices.Concat(current.Notices));
+            Assert.IsNull(Assert.ContainsSingle(file.Analyze(file.Methods[0].Id).Nodes
+                .Where(node => node.Label == "Service.Save()")).TargetMethod);
 
             using var standard = await ProjectLoader.OpenAsync(path, new ProjectOptions("Debug", "netstandard2.1"), TestContextToken);
-            var standardFile = await standard.ReadAsync(Assert.Single(standard.Files), TestContextToken);
-            Assert.Contains(standardFile.Methods, method => method.Name == "InStandard");
-            Assert.DoesNotContain(standardFile.Methods, method => method.Name == "InReview");
+            var standardFile = await standard.ReadAsync(Assert.ContainsSingle(standard.Files), TestContextToken);
+            Assert.Contains(method => method.Name == "InStandard", standardFile.Methods);
+            Assert.DoesNotContain(method => method.Name == "InReview", standardFile.Methods);
         }
         finally
         {
