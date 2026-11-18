@@ -32,7 +32,7 @@ public partial class TraceSettingsDialog : Window
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
         {
-            ShowFailure("正しい正規表現を文字列の配列で記述した JSON ファイルを選択してください。");
+            ShowFailure("メソッド名や有効な正規表現を文字列の配列で記述した JSON ファイルを選択してください。");
         }
     }
 

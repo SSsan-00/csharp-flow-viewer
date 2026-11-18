@@ -169,6 +169,31 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    [DataRow("Math.Abs")]
+    [DataRow("System.Math.Abs")]
+    public void DottedExclusionNamesMatchLiteralSeparators(string name)
+    {
+        var file = File("""
+            using System;
+            class Demo
+            {
+                int Run() => Math.Abs(-1) + MathXAbs() + SystemXMath.Abs();
+                int MathXAbs() => 2;
+            }
+            static class SystemXMath
+            {
+                public static int Abs() => 3;
+            }
+            """);
+        var method = file.Methods.Single(entry => entry.Name == "Run");
+        var result = file.Analyze(method.Id, excludedCalls: new CallExclusions([name]));
+
+        Assert.DoesNotContain(node => node.Label == "Math.Abs()", result.Nodes);
+        Assert.Contains(node => node.Label == "Demo.MathXAbs()", result.Nodes);
+        Assert.Contains(node => node.Label == "SystemXMath.Abs()", result.Nodes);
+    }
+
+    [TestMethod]
     public void RegexExclusionsKeepArgumentEvaluationAndBranches()
     {
         var file = File("""
