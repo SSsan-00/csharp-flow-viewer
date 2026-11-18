@@ -69,7 +69,11 @@ try {
   assert.deepEqual(annotation.value, { id: picked.value, action: "mark" });
   await page.evaluate(id => window.flowPreview({ type: "annotations", marked: [id], gray: [] }), picked.value);
   assert.equal(await graph.locator(".marked").count(), 1);
+  const markedShape = condition.locator(":scope > rect, :scope > polygon, :scope > path, :scope > circle").first();
+  assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
+  assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).stroke), "rgb(123, 82, 0)");
   await page.evaluate(id => window.flowPreview({ type: "annotations", marked: [], gray: [id] }), picked.value);
+  assert.notEqual(await markedShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
   assert.equal(await graph.locator(".grayed").count(), 1);
 
   await page.evaluate(() => {

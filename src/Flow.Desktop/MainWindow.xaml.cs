@@ -135,6 +135,27 @@ public partial class MainWindow : Window
         finally { if (!closed) SetBusy(false); }
     }
 
+    private async void ReloadProject(object sender, RoutedEventArgs args)
+    {
+        if (busy || path is null) return;
+        var previousFile = (FilesBox.SelectedItem as ProjectFile)?.Path;
+        var previousOptions = SettingsBox.SelectedItem as ProjectOptions;
+        SetBusy(true);
+        try
+        {
+            var settings = await ProjectLoader.InspectAsync(path, lifetime.Token);
+            if (closed) return;
+            SdkLabel.Text = ".NET SDK " + settings.SdkVersion;
+            SettingsBox.ItemsSource = settings.Options;
+            var options = settings.Options.FirstOrDefault(item => item == previousOptions) ?? settings.Options[0];
+            SettingsBox.SelectedItem = options;
+            await LoadProject(options, previousFile);
+        }
+        catch (Exception exception) when (!closed) { ShowFailure(exception, "プロジェクトを再読み込みできません"); }
+        catch (Exception) when (closed) { }
+        finally { if (!closed) SetBusy(false); }
+    }
+
     private async void ProjectOptionsChanged(object sender, SelectionChangedEventArgs args)
     {
         if (busy || path is null || SettingsBox.SelectedItem is not ProjectOptions options) return;
@@ -552,6 +573,7 @@ public partial class MainWindow : Window
     {
         busy = value;
         OpenButton.IsEnabled = !value;
+        ReloadButton.IsEnabled = !value && path is not null;
         TraceSettingsButton.IsEnabled = !value;
         SettingsBox.IsEnabled = !value && SettingsBox.Items.Count > 1;
         BrowserPane.IsEnabled = !value;

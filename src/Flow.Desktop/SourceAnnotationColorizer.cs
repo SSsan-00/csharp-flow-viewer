@@ -15,6 +15,8 @@ internal sealed class SourceAnnotationColorizer : DocumentColorizingTransformer
     private readonly TextSegmentCollection<AnnotationSpan> ranges = new();
     private static readonly Brush DarkGray = Solid(0x8b, 0x94, 0xa6);
     private static readonly Brush LightGray = Solid(0x66, 0x70, 0x83);
+    private static readonly Brush DarkGrayBackground = Solid(0x45, 0x49, 0x53);
+    private static readonly Brush LightGrayBackground = Solid(0xd3, 0xd6, 0xdd);
     private static readonly Brush DarkMark = Solid(0x60, 0x47, 0x1a);
     private static readonly Brush LightMark = Solid(0xff, 0xe5, 0xa1);
 
@@ -53,7 +55,10 @@ internal sealed class SourceAnnotationColorizer : DocumentColorizingTransformer
                 if (span.Marked)
                     element.TextRunProperties.SetBackgroundBrush(Dark ? DarkMark : LightMark);
                 else
+                {
+                    element.TextRunProperties.SetBackgroundBrush(Dark ? DarkGrayBackground : LightGrayBackground);
                     element.TextRunProperties.SetForegroundBrush(Dark ? DarkGray : LightGray);
+                }
             });
         }
     }

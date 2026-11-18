@@ -25,6 +25,7 @@
     <Border Grid.Row="1" Style="{StaticResource Panel}" Margin="0,0,0,8" Padding="7,3">
       <DockPanel>
         <Button DockPanel.Dock="Left" x:Name="OpenButton" Content="プロジェクトを開く…" Click="OpenProject" ToolTip="Ctrl+O" Margin="0,0,12,0"/>
+        <Button DockPanel.Dock="Left" x:Name="ReloadButton" Content="再読み込み" Click="ReloadProject" ToolTip="プロジェクトを再読み込み" Margin="0,0,12,0" IsEnabled="False"/>
         <ComboBox DockPanel.Dock="Right" x:Name="SettingsBox" Width="180" Margin="12,0,0,0"
                   AutomationProperties.Name="構成と対象フレームワーク" SelectionChanged="ProjectOptionsChanged" IsEnabled="False"/>
         <TextBlock DockPanel.Dock="Right" x:Name="SdkLabel" Style="{StaticResource Muted}" VerticalAlignment="Center"/>

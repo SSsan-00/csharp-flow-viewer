@@ -62,13 +62,13 @@ public partial class MainWindow
         editorPress = args.GetPosition(Editor.TextArea.TextView);
     }
 
-    private void EditorClicked(object sender, MouseButtonEventArgs args)
+    private async void EditorClicked(object sender, MouseButtonEventArgs args)
     {
         var start = editorPress;
         editorPress = null;
         var view = Editor.TextArea.TextView;
         var point = args.GetPosition(view);
-        if (busy || diagram is null || start is not { } pressed
+        if (busy || source is null || start is not { } pressed
             || Math.Abs(pressed.X - point.X) > SystemParameters.MinimumHorizontalDragDistance
             || Math.Abs(pressed.Y - point.Y) > SystemParameters.MinimumVerticalDragDistance
             || !new Rect(view.RenderSize).Contains(point)
@@ -76,6 +76,17 @@ public partial class MainWindow
             return;
 
         var offset = Editor.Document.GetOffset(position.Location);
+        var target = source.Methods
+            .Where(entry => offset >= entry.Source.Offset && offset < entry.Source.Offset + entry.Source.Length)
+            .MinBy(entry => entry.Source.Length);
+        if (target is null) return;
+        if (method?.Id != target.Id)
+        {
+            await SelectMethodAsync(target.Id);
+            if (closed) return;
+            Editor.Select(offset, 0);
+            Editor.ScrollTo(position.Line, position.Column);
+        }
         if (NodesForClick(offset, position.Line) is { } node)
             JumpToPreviewNode(node, navigateSource: false);
     }

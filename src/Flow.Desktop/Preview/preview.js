@@ -18,6 +18,7 @@
   let generation = 0, version = 0, drag, suppressClick;
   let menuNode, fittedRevision;
   let queue = Promise.resolve();
+  const originalStyles = new WeakMap();
   const send = (type, value) => host?.postMessage({ type, value, version });
   const sendZoom = () => send("zoom", Number((scale * 100).toPrecision(3)));
 
@@ -183,6 +184,21 @@
       for (const node of graph.querySelectorAll("[data-flow-id]")) {
         node.classList.toggle("marked", marks.has(node.dataset.flowId));
         node.classList.toggle("grayed", gray.has(node.dataset.flowId));
+        for (const shape of node.querySelectorAll(":scope > rect, :scope > polygon, :scope > path, :scope > circle")) {
+          if (!originalStyles.has(shape)) {
+            const properties = ["fill", "stroke", "stroke-width"];
+            originalStyles.set(shape, properties.map(name => [name, shape.style.getPropertyValue(name), shape.style.getPropertyPriority(name)]));
+          }
+          for (const [name, value, priority] of originalStyles.get(shape)) {
+            if (value) shape.style.setProperty(name, value, priority);
+            else shape.style.removeProperty(name);
+          }
+          if (marks.has(node.dataset.flowId)) {
+            shape.style.setProperty("fill", "var(--mark-fill)", "important");
+            shape.style.setProperty("stroke", "var(--mark-stroke)", "important");
+            shape.style.setProperty("stroke-width", "4px", "important");
+          }
+        }
       }
     }
   }
