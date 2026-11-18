@@ -35,18 +35,15 @@ public sealed class SourceFile
                 BaseMethodDeclarationSyntax method => model.GetDeclaredSymbol(method, token),
                 AccessorDeclarationSyntax accessor => model.GetDeclaredSymbol(accessor, token),
                 LocalFunctionStatementSyntax local => model.GetDeclaredSymbol(local, token),
-                PropertyDeclarationSyntax { ExpressionBody: not null } property => model.GetDeclaredSymbol(property, token)?.GetMethod,
-                IndexerDeclarationSyntax { ExpressionBody: not null } indexer => model.GetDeclaredSymbol(indexer, token)?.GetMethod,
                 _ => null
             };
-            if (symbol is null)
+            if (symbol is null || symbol.MethodKind is MethodKind.PropertyGet or MethodKind.PropertySet)
                 continue;
 
             declarations.Add(node.SpanStart, node);
             if (node is BaseMethodDeclarationSyntax { Body: not null } or BaseMethodDeclarationSyntax { ExpressionBody: not null }
                 or AccessorDeclarationSyntax { Body: not null } or AccessorDeclarationSyntax { ExpressionBody: not null }
-                or LocalFunctionStatementSyntax { Body: not null } or LocalFunctionStatementSyntax { ExpressionBody: not null }
-                or PropertyDeclarationSyntax { ExpressionBody: not null } or IndexerDeclarationSyntax { ExpressionBody: not null })
+                or LocalFunctionStatementSyntax { Body: not null } or LocalFunctionStatementSyntax { ExpressionBody: not null })
                 targets.Add(node.SpanStart);
             var signature = symbol.ToDisplayString(SignatureFormat);
             methods.Add(new MethodEntry(node.SpanStart, symbol.Name, signature, Range(node.Span)));
@@ -67,7 +64,7 @@ public sealed class SourceFile
     public IReadOnlyList<MethodEntry> Methods { get; }
     public IReadOnlyList<string> Notices { get; }
 
-    public FlowDiagram Analyze(int methodId, CancellationToken token = default)
+    public FlowDiagram Analyze(int methodId, CancellationToken token = default, CallExclusions? excludedCalls = null)
     {
         var node = declarations[methodId];
         try
@@ -76,7 +73,7 @@ public sealed class SourceFile
             var graph = CreateGraph(instrument.Model, instrument.Declaration, token);
             if (graph is null)
                 return new FlowDiagram([], [], ["Roslyn CFG を取得できません。抽象メソッド、自動プロパティ、宣言のみのメソッド、または未対応の本体を確認してください。"], true);
-            return new DiagramProjector(graph, instrument, Range, targets, token)
+            return new DiagramProjector(graph, instrument, Range, targets, token, excludedCalls)
                 .Build(Range(node.Span), Notices.Any(notice => notice.StartsWith("解析は部分的", StringComparison.Ordinal)));
         }
         catch (InsufficientExecutionStackException)
@@ -100,13 +97,7 @@ public sealed class SourceFile
             return outer is not null && symbol is not null && outer.LocalFunctions.Contains(symbol, SymbolEqualityComparer.Default)
                 ? outer.GetLocalFunctionControlFlowGraph(symbol, token) : null;
         }
-        node = node switch
-        {
-            PropertyDeclarationSyntax { ExpressionBody: { } expression } => expression,
-            IndexerDeclarationSyntax { ExpressionBody: { } expression } => expression,
-            _ => node
-        };
-        if (node is not (BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or ArrowExpressionClauseSyntax))
+        if (node is not (BaseMethodDeclarationSyntax or AccessorDeclarationSyntax))
             return null;
         try { return ControlFlowGraph.Create(node, model, token); }
         catch (ArgumentException) { return null; }

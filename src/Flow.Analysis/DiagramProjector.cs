@@ -10,7 +10,7 @@ using Microsoft.CodeAnalysis.Text;
 namespace Flow.Analysis;
 
 internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers markers,
-    Func<TextSpan, SourceRange> range, IReadOnlySet<int> targets, CancellationToken token)
+    Func<TextSpan, SourceRange> range, IReadOnlySet<int> targets, CancellationToken token, CallExclusions? excludedCalls)
 {
     private readonly record struct State(int Block, int Context);
     private sealed record Continuation(ControlFlowRegion Region, string Resume, int Parent);
@@ -143,10 +143,11 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         Route(block.FallThroughSuccessor);
         return;
 
-        void Append(IEnumerable<Visible> operations)
+        void Append(IEnumerable<Visible?> operations)
         {
-            foreach (var operation in operations)
+            foreach (var candidate in operations)
             {
+                if (candidate is not { } operation) continue;
                 var next = Add(operation, block.IsReachable);
                 edges.Add(new FlowEdge(last, next, IsReachable: block.IsReachable));
                 last = next;
@@ -340,7 +341,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         return false;
     }
 
-    private IEnumerable<Visible> Evaluate(IOperation operation)
+    private IEnumerable<Visible?> Evaluate(IOperation operation)
     {
         token.ThrowIfCancellationRequested();
         RuntimeHelpers.EnsureSufficientExecutionStack();
@@ -350,10 +351,10 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         {
             foreach (var item in EvaluateStorage(capture.Value))
                 yield return item;
-            // A spill of a compound or ref-returning lvalue is evaluated
+            // A spill of a compound lvalue is evaluated
             // before control enters the right-hand side of the assignment.
-            if (compoundLocations.Contains(capture.Id) || IsRefReturningProperty(capture.Value))
-                foreach (var item in AccessProperty(capture.Value, write: false))
+            if (compoundLocations.Contains(capture.Id))
+                foreach (var item in AccessDynamicStorage(capture.Value, write: false))
                     yield return item;
             yield break;
         }
@@ -362,8 +363,8 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         {
             // Roslyn's ??= lowering reads the value through the captured
             // location once, then reuses the location for the optional write.
-            if (!compoundLocations.Contains(location.Id) && !IsRefReturningProperty(location))
-                foreach (var item in AccessProperty(location, write: false))
+            if (!compoundLocations.Contains(location.Id))
+                foreach (var item in AccessDynamicStorage(location, write: false))
                     yield return item;
             yield break;
         }
@@ -372,17 +373,15 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         {
             foreach (var item in EvaluateStorage(assignment.Target))
                 yield return item;
-            if (assignment.Target is not IFlowCaptureReferenceOperation &&
-                (assignment is ICompoundAssignmentOperation || IsRefReturningProperty(assignment.Target)))
-                foreach (var item in AccessProperty(assignment.Target, write: false))
+            if (assignment.Target is not IFlowCaptureReferenceOperation && assignment is ICompoundAssignmentOperation)
+                foreach (var item in AccessDynamicStorage(assignment.Target, write: false))
                     yield return item;
             foreach (var item in Evaluate(assignment.Value))
                 yield return item;
             if (assignment is ICompoundAssignmentOperation { OperatorMethod: { } op })
                 yield return Call(op, operation, op.Name);
-            if (!IsRefReturningProperty(assignment.Target))
-                foreach (var item in AccessProperty(assignment.Target, write: true))
-                    yield return item;
+            foreach (var item in AccessDynamicStorage(assignment.Target, write: true))
+                yield return item;
             if (assignment is IDeconstructionAssignmentOperation)
                 MarkPartial("分解代入に伴う暗黙のメソッドやセッターを完全には表示できません。");
             yield break;
@@ -392,13 +391,12 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         {
             foreach (var item in EvaluateStorage(increment.Target))
                 yield return item;
-            foreach (var item in AccessProperty(increment.Target, write: false))
+            foreach (var item in AccessDynamicStorage(increment.Target, write: false))
                 yield return item;
             if (increment.OperatorMethod is { } op)
                 yield return Call(op, operation, op.Name);
-            if (!IsRefReturningProperty(increment.Target))
-                foreach (var item in AccessProperty(increment.Target, write: true))
-                    yield return item;
+            foreach (var item in AccessDynamicStorage(increment.Target, write: true))
+                yield return item;
             yield break;
         }
 
@@ -425,6 +423,8 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                 if (keyword != "throw")
                     yield return new Visible(NodeKind.Transfer, keyword, transfer);
                 break;
+            case IInvocationOperation { TargetMethod.MethodKind: MethodKind.PropertyGet or MethodKind.PropertySet }:
+                break;
             case IInvocationOperation call:
                 yield return Call(call.TargetMethod, call, Name(call.TargetMethod) + "()", call.IsVirtual, call.Instance?.Type);
                 break;
@@ -436,10 +436,6 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                 break;
             case IObjectCreationOperation creation when creation.Constructor is { } ctor:
                 yield return Call(ctor, creation, "new " + ctor.ContainingType.Name + "()");
-                break;
-            case IPropertyReferenceOperation:
-                foreach (var item in AccessProperty(operation, write: false))
-                    yield return item;
                 break;
             case IConversionOperation { OperatorMethod: { } conversion }:
                 yield return Call(conversion, operation, conversion.Name);
@@ -473,7 +469,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         }
     }
 
-    private IEnumerable<Visible> EvaluateStorage(IOperation target)
+    private IEnumerable<Visible?> EvaluateStorage(IOperation target)
     {
         if (target is IFlowCaptureReferenceOperation)
             yield break;
@@ -482,29 +478,16 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                 yield return item;
     }
 
-    private IEnumerable<Visible> AccessProperty(IOperation target, bool write)
+    private IEnumerable<Visible?> AccessDynamicStorage(IOperation target, bool write)
     {
         target = ResolveStorage(target);
         if (target is IDynamicMemberReferenceOperation or IDynamicIndexerAccessOperation)
-        {
             yield return new Visible(NodeKind.Call, write ? "書き込み · 実行時に決定" : "読み取り · 実行時に決定", OperationSource(target));
-            yield break;
-        }
-        if (target is not IPropertyReferenceOperation property)
-            yield break;
-        var accessor = write ? property.Property.SetMethod : property.Property.GetMethod;
-        if (accessor is null)
-            yield break;
-        var label = Name(property.Property) + (write ? " · set" : " · get");
-        yield return Call(accessor, property, label, IsVirtual(accessor, property.Instance), property.Instance?.Type);
     }
 
     private static bool IsVirtual(IMethodSymbol method, IOperation? instance) =>
         instance?.Syntax.IsKind(SyntaxKind.BaseExpression) != true &&
         (method.IsVirtual || method.IsOverride || method.IsAbstract || method.ContainingType.TypeKind == TypeKind.Interface);
-
-    private bool IsRefReturningProperty(IOperation target) =>
-        ResolveStorage(target) is IPropertyReferenceOperation { Property: { ReturnsByRef: true } };
 
     private IOperation ResolveStorage(IOperation target)
     {
@@ -513,25 +496,42 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
             return target;
         if (!ambiguousCaptures.Contains(reference.Id))
             return captured;
-        MarkPartial("分岐で変更される代入先があります。セッターの呼び出し先を一意に解決できません。");
+        MarkPartial("分岐で変更される代入先があります。書き込み先を一意に解決できません。");
         return target;
     }
 
-    private Visible Call(IMethodSymbol method, IOperation operation, string label, bool virtualCall = false, ITypeSymbol? receiver = null)
+    private const string ExclusionTimeout = "追跡対象外の正規表現が時間内に評価できなかったため、以降の呼び出しには除外設定を適用していません。";
+
+    private static readonly SymbolDisplayFormat QualifiedTypeName = new(
+        typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces);
+
+    private Visible? Call(IMethodSymbol method, IOperation operation, string label, bool virtualCall = false, ITypeSymbol? receiver = null)
     {
+        var definition = method.ReducedFrom ?? method;
+        if (excludedCalls is { Patterns.Count: > 0 } && !notices.Contains(ExclusionTimeout))
+        {
+            try
+            {
+                if (excludedCalls.Matches(definition.Name, definition.ContainingType.Name,
+                    definition.ContainingType.ToDisplayString(QualifiedTypeName)))
+                    return null;
+            }
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+            {
+                MarkPartial(ExclusionTimeout);
+            }
+        }
+
         var dispatched = method.MethodKind == MethodKind.DelegateInvoke || method.IsStatic && method.IsAbstract ||
             virtualCall && !method.IsSealed && !method.ContainingType.IsSealed &&
             !(receiver?.IsSealed == true && SymbolEqualityComparer.Default.Equals(receiver, method.ContainingType));
         int? target = null;
         if (!dispatched)
         {
-            var definition = method.ReducedFrom ?? method;
             definition = definition.PartialImplementationPart ?? definition;
             if (definition.OriginalDefinition.DeclaringSyntaxReferences.FirstOrDefault(s => s.SyntaxTree == markers.Model.SyntaxTree) is { } syntax)
             {
                 var declaration = syntax.GetSyntax(token);
-                if (declaration is ArrowExpressionClauseSyntax && declaration.Parent is BasePropertyDeclarationSyntax property)
-                    declaration = property;
                 var offset = markers.OriginalSpan(declaration.Span).Start;
                 if (targets.Contains(offset))
                     target = offset;

@@ -1,0 +1,19 @@
+<Window x:Class="Flow.Desktop.TraceSettingsDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="追跡対象外の関数" Width="520" Height="390" MinWidth="410" MinHeight="300"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{DynamicResource WindowBrush}" Foreground="{DynamicResource TextBrush}">
+  <DockPanel Margin="14">
+    <TextBlock DockPanel.Dock="Top" Margin="0,0,0,10" TextWrapping="Wrap"
+               Text="正規表現を 1 行に 1 つ入力してください。Math.* は Math クラスのメソッドを除外します。メソッド名または型名付きのメソッド名に全体一致します。"/>
+    <DockPanel DockPanel.Dock="Bottom" Margin="0,10,0,0" LastChildFill="False">
+      <Button DockPanel.Dock="Left" Content="JSON を読み込む…" Click="Import" Margin="0,0,6,0"/>
+      <Button DockPanel.Dock="Left" Content="JSON を書き出す…" Click="Export"/>
+      <Button DockPanel.Dock="Right" Content="保存" IsDefault="True" Click="Save"/>
+      <Button DockPanel.Dock="Right" Content="キャンセル" IsCancel="True" Margin="0,0,6,0"/>
+    </DockPanel>
+    <TextBox x:Name="Names" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
+             FontFamily="Cascadia Mono, Consolas" AutomationProperties.Name="追跡対象外の正規表現"/>
+  </DockPanel>
+</Window>

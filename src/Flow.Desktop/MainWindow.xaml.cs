@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private bool previewUnavailable;
     private bool closed;
     private int version;
+    private CallExclusions excludedCalls = new([]);
 
     public MainWindow()
     {
@@ -49,15 +50,33 @@ public partial class MainWindow : Window
         Loaded += StartPreview;
         Closed += CloseViewer;
         SetBusy(false);
+        try { excludedCalls = TraceSettings.Read(TraceSettings.SettingsPath); }
+        catch (FileNotFoundException) { }
+        catch (DirectoryNotFoundException) { }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
+        {
+            SetStatus("保存した追跡設定を読み込めません。追跡設定から内容を確認してください。", attention: true);
+        }
     }
 
     private async void StartPreview(object sender, RoutedEventArgs args)
     {
         Loaded -= StartPreview;
-        try { await preview.InitializeAsync(); }
-        catch (Exception) when (!closed)
+        try
         {
-            SetPreviewUnavailable("WebView2 プレビューを起動できません。Evergreen Runtime x64 と利用環境を確認してください。ノード一覧と Mermaid 出力は利用できます。");
+            await preview.InitializeAsync(lifetime.Token);
+            if (closed || previewUnavailable) return;
+            ready = true;
+            UpdateSurface();
+            RequestRender();
+        }
+        catch (Microsoft.Web.WebView2.Core.WebView2RuntimeNotFoundException) when (!closed)
+        {
+            SetPreviewUnavailable("WebView2 Evergreen Runtime x64 が見つかりません。ノード一覧と Mermaid 出力は利用できます。");
+        }
+        catch (Exception error) when (!closed)
+        {
+            SetPreviewUnavailable($"WebView2 プレビューを起動できません（{error.GetType().Name} / 0x{error.HResult:X8}）。ノード一覧と Mermaid 出力は利用できます。");
         }
         catch (Exception) when (closed) { }
     }
@@ -76,6 +95,7 @@ public partial class MainWindow : Window
         if (diagram is not null) showList = true;
         RefreshDiagnostics();
         if (!diagnostics.Contains(message)) diagnostics.Add(message);
+        DiagnosticsBox.Visibility = Visibility.Visible;
         UpdateDiagnosticList();
         UpdateSurface();
     }
@@ -185,9 +205,27 @@ public partial class MainWindow : Window
 
     private async void MethodChanged(object sender, SelectionChangedEventArgs args)
     {
-        if (busy || source is null || MethodsBox.SelectedItem is not MethodEntry entry) return;
+        if (busy || MethodsBox.SelectedItem is not MethodEntry entry) return;
+        await AnalyzeMethodAsync(entry);
+    }
+
+    private async void EditTraceSettings(object sender, RoutedEventArgs args)
+    {
+        if (busy) return;
+        var dialog = new TraceSettingsDialog(this, excludedCalls);
+        if (dialog.ShowDialog() != true) return;
+        excludedCalls = dialog.ExcludedCalls;
+        if (method is { } current)
+            await AnalyzeMethodAsync(current);
+        else
+            SetStatus("追跡設定を保存しました。");
+    }
+
+    private async Task AnalyzeMethodAsync(MethodEntry entry)
+    {
+        if (source is not { } currentSource) return;
         SetBusy(true);
-        var currentSource = source;
+        var exclusions = excludedCalls;
         try
         {
             ResetDiagram();
@@ -197,7 +235,7 @@ public partial class MainWindow : Window
             NavigateSource(entry.Source with { Length = 0 });
             SetState("制御フローを解析中", "Roslyn CFG から図を組み立てています…");
             SetStatus("選択したメソッドを解析中");
-            var result = await Task.Run(() => currentSource.Analyze(entry.Id, lifetime.Token), lifetime.Token);
+            var result = await Task.Run(() => currentSource.Analyze(entry.Id, lifetime.Token, exclusions), lifetime.Token);
             if (closed) return;
             diagram = result;
             nodes = result.Nodes.ToDictionary(node => node.Id);
@@ -372,13 +410,6 @@ public partial class MainWindow : Window
     private void OnPreviewMessage(string type, JsonElement value, int requestVersion)
     {
         if (closed) return;
-        if (type == "ready")
-        {
-            ready = true;
-            UpdateSurface();
-            RequestRender();
-            return;
-        }
         if (type == "process-error")
         {
             SetPreviewUnavailable("WebView2 のプロセスを利用できません。再起動後に再試行できます。");
@@ -441,6 +472,7 @@ public partial class MainWindow : Window
     {
         busy = value;
         OpenButton.IsEnabled = !value;
+        TraceSettingsButton.IsEnabled = !value;
         SettingsBox.IsEnabled = !value && SettingsBox.Items.Count > 1;
         BrowserPane.IsEnabled = !value;
         UpdateSurface();
@@ -452,7 +484,9 @@ public partial class MainWindow : Window
         var webVisible = hasGraph && ready && !showList && !previewUnavailable;
         var listVisible = hasGraph && (showList || !ready || previewUnavailable);
         EmptyState.Visibility = !webVisible && !listVisible ? Visibility.Visible : Visibility.Collapsed;
-        Web.Visibility = webVisible ? Visibility.Visible : Visibility.Collapsed;
+        // The composition control needs a layout pass to initialize before it can signal readiness.
+        PreviewSurface.Opacity = webVisible ? 1 : 0;
+        PreviewSurface.IsHitTestVisible = Web.Focusable = webVisible;
         NodesBox.Visibility = listVisible ? Visibility.Visible : Visibility.Collapsed;
         CopyButton.IsEnabled = SaveButton.IsEnabled = hasGraph && !busy;
         BackButton.IsEnabled = !busy && history.Count > 0;

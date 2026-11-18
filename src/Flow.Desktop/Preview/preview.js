@@ -137,5 +137,5 @@
   }
   host?.addEventListener("message", event => receive(event.data));
   window.flowPreview = receive;
-  send("ready", null);
+  send(typeof window.flowMermaid?.render === "function" ? "ready" : "startup-error", null);
 })();

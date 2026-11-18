@@ -13,7 +13,7 @@ internal sealed class PreviewHost(WebView2CompositionControl web)
     private readonly string profilePath = Path.Combine(Path.GetTempPath(), "csharp-flow-viewer-" + Guid.NewGuid().ToString("N"));
     public event Action<string, JsonElement, int>? Message;
 
-    public async Task InitializeAsync()
+    public async Task InitializeAsync(CancellationToken token)
     {
         var assembly = typeof(PreviewHost).Assembly;
         foreach (var (file, mime) in new[] { ("index.html", "text/html"), ("preview.css", "text/css"),
@@ -28,10 +28,13 @@ internal sealed class PreviewHost(WebView2CompositionControl web)
 
         var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: profilePath,
             options: new CoreWebView2EnvironmentOptions("--disable-background-networking --disable-breakpad"));
+        token.ThrowIfCancellationRequested();
         var controller = environment.CreateCoreWebView2ControllerOptions();
         controller.IsInPrivateModeEnabled = true;
-        await web.EnsureCoreWebView2Async(environment, controller);
+        await web.EnsureCoreWebView2Async(environment, controller).WaitAsync(TimeSpan.FromSeconds(15), token);
+        token.ThrowIfCancellationRequested();
         var core = web.CoreWebView2;
+        var pageReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         core.Settings.AreDevToolsEnabled = false;
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.AreBrowserAcceleratorKeysEnabled = false;
@@ -45,10 +48,17 @@ internal sealed class PreviewHost(WebView2CompositionControl web)
         core.NewWindowRequested += (_, args) => args.Handled = true;
         core.DownloadStarting += (_, args) => args.Cancel = true;
         core.PermissionRequested += (_, args) => args.State = CoreWebView2PermissionState.Deny;
-        core.ProcessFailed += (_, _) => Message?.Invoke("process-error", default, 0);
+        core.ProcessFailed += (_, args) =>
+        {
+            // WebView2 recovers from failures in auxiliary processes such as the GPU.
+            if (args.ProcessFailedKind is CoreWebView2ProcessFailedKind.BrowserProcessExited
+                or CoreWebView2ProcessFailedKind.RenderProcessExited)
+                Message?.Invoke("process-error", default, 0);
+        };
         core.NavigationCompleted += (_, args) =>
         {
-            if (!args.IsSuccess) Message?.Invoke("process-error", default, 0);
+            if (!args.IsSuccess)
+                pageReady.TrySetException(new InvalidOperationException($"WebView2 navigation failed ({args.WebErrorStatus})."));
         };
         core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All,
             CoreWebView2WebResourceRequestSourceKinds.All);
@@ -68,9 +78,17 @@ internal sealed class PreviewHost(WebView2CompositionControl web)
             var root = payload.RootElement;
             if (root.TryGetProperty("type", out var type) && type.GetString() is { } name &&
                 root.TryGetProperty("value", out var value) && root.TryGetProperty("version", out var version))
-                Message?.Invoke(name, value, version.GetInt32());
+            {
+                if (name == "ready")
+                    pageReady.TrySetResult();
+                else if (name == "startup-error")
+                    pageReady.TrySetException(new InvalidOperationException("The Mermaid renderer did not load."));
+                else
+                    Message?.Invoke(name, value, version.GetInt32());
+            }
         };
         core.Navigate(Home);
+        await pageReady.Task.WaitAsync(TimeSpan.FromSeconds(15), token);
     }
 
     public void Send<T>(T message) => web.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(message));

@@ -19,6 +19,7 @@
       </Border>
       <TextBlock DockPanel.Dock="Left" Text="csharp-flow-viewer" FontSize="19" FontWeight="SemiBold" VerticalAlignment="Center" Margin="11,0,0,0"/>
       <Button DockPanel.Dock="Right" x:Name="ThemeButton" Click="ToggleTheme" VerticalAlignment="Center" MinWidth="95" AutomationProperties.Name="テーマを切り替え"/>
+      <Button DockPanel.Dock="Right" x:Name="TraceSettingsButton" Content="追跡設定…" Click="EditTraceSettings" VerticalAlignment="Center" Margin="0,0,8,0"/>
     </DockPanel>
 
     <Border Grid.Row="1" Style="{StaticResource Panel}" Margin="0,0,0,8" Padding="7,3">
@@ -136,7 +137,9 @@
           </Border>
 
           <Grid Grid.Row="2" Background="{DynamicResource CanvasBrush}">
-            <web:WebView2CompositionControl x:Name="Web" Visibility="Collapsed" Focusable="True"/>
+            <Grid x:Name="PreviewSurface" Opacity="0" IsHitTestVisible="False">
+              <web:WebView2CompositionControl x:Name="Web" Focusable="False"/>
+            </Grid>
             <ListBox x:Name="NodesBox" Visibility="Collapsed" Margin="8" SelectionChanged="NodeChanged" AutomationProperties.Name="フローノード">
               <ListBox.ItemTemplate><DataTemplate>
                 <DockPanel>
@@ -184,8 +187,13 @@
 
     <Border Grid.Row="3" Style="{StaticResource Panel}" Margin="0,8,0,0" Padding="10,6">
       <DockPanel>
-        <Button DockPanel.Dock="Right" Content="ライセンス" Click="ShowLicenses" Margin="6,0,0,0" VerticalAlignment="Top"/>
-        <Button DockPanel.Dock="Right" x:Name="DiagnosticButton" Content="診断  ·  0" Click="ToggleDiagnostics" Margin="10,0,0,0" VerticalAlignment="Top"/>
+        <Button DockPanel.Dock="Right" x:Name="DiagnosticButton" Content="診断  ·  0" Click="ToggleDiagnostics" Margin="10,0,0,0" VerticalAlignment="Top">
+          <Button.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="ライセンスと第三者通知" Click="ShowLicenses"/>
+            </ContextMenu>
+          </Button.ContextMenu>
+        </Button>
         <StackPanel>
           <DockPanel>
             <TextBlock x:Name="StatusDot" DockPanel.Dock="Left" Text="●" Foreground="{DynamicResource GoodBrush}" Margin="0,0,8,0" VerticalAlignment="Center"/>

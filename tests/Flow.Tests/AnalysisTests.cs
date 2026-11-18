@@ -80,7 +80,7 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
-    public void AssignmentsKeepReceiverIndexGetterRhsAndSetterInOrder()
+    public void AssignmentsKeepReceiverIndexAndRhsCallsInOrder()
     {
         var result = Diagram(File("""
             class Demo
@@ -111,13 +111,10 @@ public sealed class AnalysisTests(TestContext testContext)
         var condition = Next(result, check);
         var saved = Next(result, condition, "True");
         Assert.AreEqual("Demo.Save()", saved.Label);
-        var setter = Next(result, saved);
-        StringAssert.EndsWith(setter.Label, " · set");
-        Assert.IsNotNull(setter.TargetMethod);
-        Assert.AreEqual(setter, Next(result, condition, "False"));
-        Assert.AreEqual("Demo.P · get", Next(result, setter).Label);
-        Assert.AreEqual("Demo.Save()", Next(result, Next(result, setter)).Label);
-        Assert.AreEqual("Demo.P · set", Next(result, Next(result, Next(result, setter))).Label);
+        var nextSave = Next(result, saved);
+        Assert.AreEqual("Demo.Save()", nextSave.Label);
+        Assert.AreEqual(nextSave, Next(result, condition, "False"));
+        Assert.AreEqual("return", Next(result, nextSave).Label);
         Assert.DoesNotContain("555", MermaidWriter.Write(result));
     }
 
@@ -142,37 +139,59 @@ public sealed class AnalysisTests(TestContext testContext)
                 }
             }
             """));
-        var getter = Single(result, "Demo.P · get");
-        Assert.AreEqual("Demo.Check()", Next(result, getter).Label);
-        var stringGetter = Single(result, "Demo.S · get");
-        var nullCheck = Next(result, stringGetter);
+        var check = Next(result, Single(result, "Start"));
+        Assert.AreEqual("Demo.Check()", check.Label);
+        var firstCondition = Next(result, check);
+        var nullCheck = Next(result, firstCondition, "False");
         Assert.AreEqual("null？", nullCheck.Label);
-        Assert.AreEqual("Demo.Make()", Next(result, nullCheck, "True").Label);
-        Assert.AreEqual("Demo.S · set", Next(result, Single(result, "Demo.Make()")).Label);
-        var referenceGetter = Single(result, "Demo.R · get");
-        Assert.AreEqual("Demo.Check()", Next(result, referenceGetter).Label);
+        var make = Next(result, nullCheck, "True");
+        Assert.AreEqual("Demo.Make()", make.Label);
+        var nextCheck = Next(result, make);
+        Assert.AreEqual("Demo.Check()", nextCheck.Label);
+        Assert.AreEqual(nextCheck, Next(result, nullCheck, "False"));
     }
 
     [TestMethod]
-    public void ExpressionBodiedGetterHasItsOwnDiagram()
+    public void PropertyAndIndexerAccessorsDoNotAppearAsMethodsOrNodes()
     {
         var file = File("""
             class Demo
             {
+                int Value { get => GetCount(); set { } }
                 int Count => GetCount();
                 int this[int i] => GetCount() + i;
-                int Run() => Count + this[1];
+                int Run() => Value + Count + this[1];
                 int GetCount() => 2;
             }
             """);
-        var result = Diagram(file);
-        var getters = result.Nodes.Where(node => node.Label.EndsWith(" · get", StringComparison.Ordinal)).ToArray();
-        Assert.AreEqual(2, getters.Length);
-        foreach (var getter in getters)
-        {
-            Assert.IsNotNull(getter.TargetMethod);
-            Assert.Contains(node => node.Label == "Demo.GetCount()", file.Analyze(getter.TargetMethod.Value).Nodes);
-        }
+        CollectionAssert.AreEqual(new[] { "Run", "GetCount" }, file.Methods.Select(method => method.Name).ToArray());
+        Assert.IsEmpty(Diagram(file).Nodes.Where(node => node.Kind == NodeKind.Call));
+    }
+
+    [TestMethod]
+    public void RegexExclusionsKeepArgumentEvaluationAndBranches()
+    {
+        var file = File("""
+            using System;
+            namespace Sample
+            {
+                class Demo
+                {
+                    int Run() => Math.Abs(Read()) > 0 ? Keep() : Quiet();
+                    int Read() => -1;
+                    int Keep() => 1;
+                    int Quiet() => 0;
+                }
+            }
+            """);
+        var method = file.Methods.Single(entry => entry.Name == "Run");
+        var result = file.Analyze(method.Id, excludedCalls: new CallExclusions(["Math.*", @"Sample\.Demo\.Quiet"]));
+        var read = Single(result, "Demo.Read()");
+        var condition = Next(result, read);
+        Assert.AreEqual(NodeKind.Condition, condition.Kind);
+        Assert.AreEqual("Demo.Keep()", Next(result, condition, "True").Label);
+        Assert.AreEqual("return", Next(result, condition, "False").Label);
+        Assert.DoesNotContain(node => node.Label is "Math.Abs()" or "Demo.Quiet()", result.Nodes);
     }
 
     [TestMethod]
