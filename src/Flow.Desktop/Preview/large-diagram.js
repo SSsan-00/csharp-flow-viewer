@@ -97,10 +97,6 @@ window.renderLargeDiagram = (nodes, edges) => {
       ? element("polygon", { points: "-156,0 -126,-24 126,-24 156,0 126,24 -126,24" })
       : element("rect", { x: -156, y: -24, width: 312, height: 48, rx: terminal ? 24 : 6 }));
     const label = element("text", { "text-anchor": "middle", "dominant-baseline": "central" }, node.label);
-    if ([...node.label].length > 26) {
-      label.setAttribute("textLength", "240");
-      label.setAttribute("lengthAdjust", "spacingAndGlyphs");
-    }
     group.append(label, element("title", {}, node.label));
     svg.append(group);
   }

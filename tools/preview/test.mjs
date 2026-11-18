@@ -53,7 +53,7 @@ try {
   await page.setViewportSize({ width: 740, height: 510 });
   const graph = page.locator("#graph");
   const zoomedTransform = await graph.evaluate(node => node.style.transform);
-  const rawLabel = "Check(値) <script>？";
+  const rawLabel = "長い条件式".repeat(24) + " Check(値) <script>？";
   await page.evaluate(({ text, id, label }) => window.flowPreview({
     type: "render", theme: "light", version: 2, preserveViewport: true, text, nodes: [{ id, label }]
   }), { text: source, id: picked.value, label: rawLabel });
@@ -61,6 +61,11 @@ try {
   assert.equal(await page.locator("body").getAttribute("data-theme"), "light");
   assert.equal(await graph.evaluate(node => node.style.transform), zoomedTransform);
   assert.equal(await condition.locator("text").textContent(), rawLabel);
+  assert.ok(await condition.evaluate(node => {
+    const shape = node.querySelector(":scope > rect, :scope > polygon, :scope > path, :scope > circle").getBoundingClientRect();
+    const label = node.querySelector("text").getBoundingClientRect();
+    return label.left >= shape.left && label.right <= shape.right;
+  }), "Mermaid label should fit within its node");
   assert.equal(await page.locator("#graph script").count(), 0);
   await page.evaluate(() => window.flowPreview({ type: "fit" }));
   await condition.click({ button: "right" });
@@ -78,7 +83,7 @@ try {
 
   await page.evaluate(() => {
     const nodes = Array.from({ length: 8002 }, (_, i) => ({
-      id: "n" + i, label: "Call(" + i + ")", kind: i === 0 ? "start" : "call", reachable: true
+      id: "n" + i, label: i === 0 ? "幅の広い文字列".repeat(20) : "Call(" + i + ")", kind: i === 0 ? "start" : "call", reachable: true
     }));
     const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i].id, to: node.id, reachable: true }));
     edges.push({ from: "n8001", to: "n4", label: "False", reachable: true });
@@ -87,6 +92,11 @@ try {
   await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 3));
   assert.equal(await graph.locator(".large-diagram .node").count(), 8002);
   assert.equal(await graph.locator(".large-link").count(), 8002);
+  assert.ok(await graph.locator('[data-flow-id="n0"]').evaluate(node => {
+    const shape = node.querySelector("rect").getBoundingClientRect();
+    const label = node.querySelector("text").getBoundingClientRect();
+    return label.left >= shape.left && label.right <= shape.right;
+  }), "Large diagram label should fit within its node");
   const last = graph.locator('[data-flow-id="n8001"]');
   await page.evaluate(() => window.flowPreview({ type: "select", id: "n8001", center: true }));
   assert.equal(await last.getAttribute("class"), "node flow_call selected");

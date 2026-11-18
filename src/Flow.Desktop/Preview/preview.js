@@ -130,6 +130,18 @@
           }
           node.setAttribute("aria-label", label);
         }
+        const shape = node.querySelector(":scope > rect, :scope > polygon, :scope > path, :scope > circle");
+        const text = node.querySelector("text");
+        if (shape && text) {
+          const shapeBounds = shape.getBoundingClientRect();
+          const textBounds = text.getBoundingClientRect();
+          // Leave extra room at the sloping sides of condition shapes.
+          const availableWidth = shapeBounds.width * (node.classList.contains("flow_condition") ? .68 : .85);
+          if (textBounds.width > availableWidth && availableWidth > 0) {
+            text.setAttribute("textLength", String(text.getComputedTextLength() * availableWidth / textBounds.width));
+            text.setAttribute("lengthAdjust", "spacingAndGlyphs");
+          }
+        }
       }
       feedback.textContent = "";
       if (message.preserveViewport && fittedRevision === message.diagramRevision) {
