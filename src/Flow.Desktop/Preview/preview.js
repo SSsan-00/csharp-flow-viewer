@@ -196,7 +196,7 @@
       for (const node of graph.querySelectorAll("[data-flow-id]")) {
         node.classList.toggle("marked", marks.has(node.dataset.flowId));
         node.classList.toggle("grayed", gray.has(node.dataset.flowId));
-        for (const shape of node.querySelectorAll(":scope > rect, :scope > polygon, :scope > path, :scope > circle")) {
+        for (const shape of node.querySelectorAll(":scope > rect:not(.selection-ring), :scope > polygon:not(.selection-ring), :scope > path:not(.selection-ring), :scope > circle:not(.selection-ring)")) {
           if (!originalStyles.has(shape)) {
             const properties = ["fill", "stroke", "stroke-width"];
             originalStyles.set(shape, properties.map(name => [name, shape.style.getPropertyValue(name), shape.style.getPropertyPriority(name)]));
@@ -216,10 +216,21 @@
   }
 
   function selectNode(id, center) {
-    graph.querySelector(".selected")?.classList.remove("selected");
+    const previous = graph.querySelector(".selected");
+    previous?.classList.remove("selected");
+    previous?.querySelector(":scope > .selection-ring")?.remove();
     const node = graph.querySelector(`[data-flow-id="${CSS.escape(id)}"]`);
     if (!node) return;
     node.classList.add("selected");
+    const shape = node.querySelector(":scope > rect, :scope > polygon, :scope > path, :scope > circle");
+    if (shape) {
+      const ring = shape.cloneNode(false);
+      ring.removeAttribute("id");
+      ring.removeAttribute("style");
+      ring.setAttribute("class", "selection-ring");
+      ring.setAttribute("aria-hidden", "true");
+      node.append(ring);
+    }
     if (center) {
       const bounds = node.getBoundingClientRect();
       const area = viewport.getBoundingClientRect();

@@ -1,13 +1,21 @@
 :root { color-scheme: dark; font: 14px "Segoe UI", sans-serif; }
 * { box-sizing: border-box; }
 body { margin: 0; overflow: hidden; }
-body[data-theme="dark"] { color: #e7e9f7; --surface: #101521; --dot: #293146; --accent: #cdc4ff; }
-body[data-theme="light"] { color-scheme: light; color: #232b43; --surface: #f7f8fc; --dot: #d6dceb; --accent: #4e3caa; }
+body[data-theme="dark"] { color: #e7e9f7; --surface: #101521; --dot: #293146; --accent: #cdc4ff; --selection-ring: #55eaff; --selection-glow: #003a54; }
+body[data-theme="light"] { color-scheme: light; color: #232b43; --surface: #f7f8fc; --dot: #d6dceb; --accent: #4e3caa; --selection-ring: #0052bb; --selection-glow: #ffffff; }
 #viewport { position: fixed; inset: 0; overflow: hidden; background: radial-gradient(var(--dot) 1px, transparent 1px) 0 0 / 20px 20px, var(--surface); touch-action: none; }
 #graph { position: absolute; transform-origin: 0 0; user-select: none; }
 #graph svg { display: block; max-width: none !important; }
 #graph .node { cursor: pointer; }
-#graph .node.selected > :is(rect, polygon, path, circle) { stroke: var(--accent) !important; stroke-width: 4px !important; }
+#graph .node.selected.grayed { opacity: 1; }
+#graph .node.selected > .selection-ring {
+  fill: none !important;
+  stroke: var(--selection-ring) !important;
+  stroke-width: 6px !important;
+  stroke-dasharray: none !important;
+  pointer-events: none;
+  filter: drop-shadow(0 0 3px var(--selection-glow));
+}
 #graph .node:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 #feedback { position: absolute; top: 24px; left: 22px; right: 22px; text-align: center; pointer-events: none; }
 .dragging { cursor: grabbing; }

@@ -42,6 +42,8 @@ try {
   await condition.click();
   const picked = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "node"));
   assert.equal(picked.value, await condition.getAttribute("data-flow-id"));
+  assert.equal(await condition.locator(".selection-ring").count(), 1);
+  assert.equal(await condition.locator(".selection-ring").evaluate(shape => getComputedStyle(shape).stroke), "rgb(85, 234, 255)");
   const oldTransform = await page.locator("#graph").evaluate(node => node.style.transform);
   await page.mouse.move(20, 20);
   await page.mouse.down();
@@ -61,6 +63,8 @@ try {
   assert.equal(await page.locator("body").getAttribute("data-theme"), "light");
   assert.equal(await graph.evaluate(node => node.style.transform), zoomedTransform);
   assert.equal(await condition.locator("text").textContent(), rawLabel);
+  await page.evaluate(id => window.flowPreview({ type: "select", id, center: false }), picked.value);
+  assert.equal(await condition.locator(".selection-ring").evaluate(shape => getComputedStyle(shape).stroke), "rgb(0, 82, 187)");
   assert.ok(await condition.evaluate(node => {
     const shape = node.querySelector(":scope > rect, :scope > polygon, :scope > path, :scope > circle").getBoundingClientRect();
     const label = node.querySelector("text").getBoundingClientRect();
@@ -74,6 +78,7 @@ try {
   assert.deepEqual(annotation.value, { id: picked.value, action: "mark" });
   await page.evaluate(id => window.flowPreview({ type: "annotations", marked: [id], gray: [] }), picked.value);
   assert.equal(await graph.locator(".marked").count(), 1);
+  assert.equal(await condition.locator(".selection-ring").evaluate(shape => getComputedStyle(shape).stroke), "rgb(0, 82, 187)");
   const markedShape = condition.locator(":scope > rect, :scope > polygon, :scope > path, :scope > circle").first();
   assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
   assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).stroke), "rgb(123, 82, 0)");
