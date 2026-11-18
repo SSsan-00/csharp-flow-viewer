@@ -17,7 +17,8 @@ internal sealed class PreviewHost(WebView2CompositionControl web)
     {
         var assembly = typeof(PreviewHost).Assembly;
         foreach (var (file, mime) in new[] { ("index.html", "text/html"), ("preview.css", "text/css"),
-                     ("preview.js", "text/javascript"), ("mermaid.bundle.js", "text/javascript") })
+                     ("preview.js", "text/javascript"), ("large-diagram.js", "text/javascript"),
+                     ("mermaid.bundle.js", "text/javascript") })
         {
             var name = assembly.GetManifestResourceNames().Single(resource => resource.EndsWith(".Preview." + file, StringComparison.Ordinal));
             using var resource = assembly.GetManifestResourceStream(name)!;

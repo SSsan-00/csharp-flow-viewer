@@ -6,12 +6,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="preview.css">
   <script src="mermaid.bundle.js" defer></script>
+  <script src="large-diagram.js" defer></script>
   <script src="preview.js" defer></script>
 </head>
 <body data-theme="dark">
   <main id="viewport" aria-label="制御フロー図">
     <div id="graph"></div>
     <div id="feedback" role="status"></div>
+    <div id="node-menu" role="menu" aria-label="ノードの操作" hidden>
+      <button type="button" role="menuitem" data-action="mark">マーク</button>
+      <button type="button" role="menuitem" data-action="gray">グレーアウト</button>
+      <button type="button" role="menuitem" data-action="clear">解除</button>
+    </div>
   </main>
 </body>
 </html>

@@ -8,7 +8,7 @@ assert.ok(fixture, "Set CFV_MERMAID_FIXTURE and run the .NET tests before runnin
 const source = await readFile(fixture, "utf8");
 const assets = new Map();
 for (const [file, type] of [["index.html", "text/html"], ["preview.css", "text/css"],
-  ["preview.js", "text/javascript"], ["mermaid.bundle.js", "text/javascript"]]) {
+  ["preview.js", "text/javascript"], ["large-diagram.js", "text/javascript"], ["mermaid.bundle.js", "text/javascript"]]) {
   assets.set("/" + file, [await readFile(new URL("../../src/Flow.Desktop/Preview/" + file, import.meta.url)), type]);
 }
 const server = createServer((request, response) => {
@@ -51,11 +51,46 @@ try {
   await page.evaluate(() => window.flowPreview({ type: "zoom", factor: 1.2 }));
   assert.ok(await page.evaluate(() => window.previewMessages.filter(message => message.type === "zoom").length >= 2));
   await page.setViewportSize({ width: 740, height: 510 });
-  await page.evaluate(text => window.flowPreview({ type: "render", theme: "light", version: 2, text }), source);
+  const graph = page.locator("#graph");
+  const zoomedTransform = await graph.evaluate(node => node.style.transform);
+  const rawLabel = "Check(値) <script>？";
+  await page.evaluate(({ text, id, label }) => window.flowPreview({
+    type: "render", theme: "light", version: 2, preserveViewport: true, text, nodes: [{ id, label }]
+  }), { text: source, id: picked.value, label: rawLabel });
   await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 2));
   assert.equal(await page.locator("body").getAttribute("data-theme"), "light");
+  assert.equal(await graph.evaluate(node => node.style.transform), zoomedTransform);
+  assert.equal(await condition.locator("text").textContent(), rawLabel);
+  assert.equal(await page.locator("#graph script").count(), 0);
   await page.evaluate(() => window.flowPreview({ type: "fit" }));
-  console.log("Mermaid parser and Chromium preview: escaped labels, edge labels, selection, pan, zoom, resize, light/dark passed.");
+  await condition.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "マーク" }).click();
+  const annotation = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "annotate"));
+  assert.deepEqual(annotation.value, { id: picked.value, action: "mark" });
+  await page.evaluate(id => window.flowPreview({ type: "annotations", marked: [id], gray: [] }), picked.value);
+  assert.equal(await graph.locator(".marked").count(), 1);
+  await page.evaluate(id => window.flowPreview({ type: "annotations", marked: [], gray: [id] }), picked.value);
+  assert.equal(await graph.locator(".grayed").count(), 1);
+
+  await page.evaluate(() => {
+    const nodes = Array.from({ length: 8002 }, (_, i) => ({
+      id: "n" + i, label: "Call(" + i + ")", kind: i === 0 ? "start" : "call", reachable: true
+    }));
+    const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i].id, to: node.id, reachable: true }));
+    edges.push({ from: "n8001", to: "n4", label: "False", reachable: true });
+    window.flowPreview({ type: "render", theme: "light", version: 3, nodes, edges });
+  });
+  await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 3));
+  assert.equal(await graph.locator(".large-diagram .node").count(), 8002);
+  assert.equal(await graph.locator(".large-link").count(), 8002);
+  const last = graph.locator('[data-flow-id="n8001"]');
+  await page.evaluate(() => window.flowPreview({ type: "select", id: "n8001", center: true }));
+  assert.equal(await last.getAttribute("class"), "node flow_call selected");
+  assert.ok(await last.evaluate(node => {
+    const box = node.getBoundingClientRect();
+    return box.top >= 0 && box.bottom <= window.innerHeight;
+  }));
+  console.log("Preview passed: Mermaid labels, zoom preservation, annotations, and 8,002-node SVG with a back edge.");
 } finally {
   await browser?.close();
   server.close();

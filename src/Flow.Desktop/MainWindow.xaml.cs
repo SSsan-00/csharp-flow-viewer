@@ -10,6 +10,7 @@ using Flow.Analysis;
 using Flow.Mermaid;
 using Flow.Model;
 using Microsoft.Win32;
+using ICSharpCode.AvalonEdit.Search;
 
 namespace Flow.Desktop;
 
@@ -38,11 +39,13 @@ public partial class MainWindow : Window
     private bool previewUnavailable;
     private bool closed;
     private int version;
+    private int diagramRevision;
     private CallExclusions excludedCalls = new([]);
 
     public MainWindow()
     {
         InitializeComponent();
+        SearchPanel.Install(Editor);
         dark = Theme.Read();
         ApplyTheme();
         preview = new PreviewHost(Web);
@@ -241,15 +244,13 @@ public partial class MainWindow : Window
             nodes = result.Nodes.ToDictionary(node => node.Id);
             NodesBox.ItemsSource = result.Nodes;
             mermaid = result.Nodes.Count > 0 ? MermaidWriter.Write(result) : null;
-            var tooLarge = PreviewTooLarge();
-            showList = previewUnavailable || tooLarge;
+            showList = previewUnavailable;
             SetState("フロー図を取得できません", "診断を確認するか、別のメソッドを選んでください。");
             RefreshDiagnostics();
             UpdateSurface();
             RequestRender();
             SetStatus(result.IsPartial ? "部分解析 · 診断を確認してください。"
-                : tooLarge ? "大きな図 · ノード一覧と .mmd 出力を利用できます。"
-                : $"{result.Nodes.Count:N0} ノード  /  {result.Edges.Count:N0} 遷移  ·  単純な代入値は図から省略", result.IsPartial || tooLarge);
+                : $"{result.Nodes.Count:N0} ノード  /  {result.Edges.Count:N0} 遷移  ·  単純な代入値は図から省略", result.IsPartial);
         }
         catch (Exception exception) when (!closed) { ShowFailure(exception, "フロー図を取得できません"); }
         catch (Exception) when (closed) { }
@@ -273,6 +274,7 @@ public partial class MainWindow : Window
         Filter.Clear();
         history.Clear();
         Editor.Clear();
+        GoToPanel.Visibility = Visibility.Collapsed;
         SourceTitle.Text = "ソース";
         SourceTitle.ToolTip = null;
         SourceLocation.Text = "—";
@@ -283,6 +285,7 @@ public partial class MainWindow : Window
     private void ResetDiagram()
     {
         ++version;
+        ++diagramRevision;
         ZoomLabel.Text = "—";
         diagram = null;
         method = null;
@@ -290,6 +293,8 @@ public partial class MainWindow : Window
         nodes.Clear();
         NodesBox.ItemsSource = null;
         selectedNode = null;
+        rendered = false;
+        pendingNodeCenter = false;
         NodeLabel.Text = "ノードを選ぶとソース行へ移動";
         NodeLabel.ToolTip = null;
         FlowTitle.Text = "制御フロー";
@@ -326,13 +331,12 @@ public partial class MainWindow : Window
             SelectNode(node);
     }
 
-    private void SelectNode(FlowNode node)
+    private void SelectNode(FlowNode node, bool navigateSource = true)
     {
         selectedNode = node;
-        NodeLabel.Text = (node.Source is { } location ? $"L{location.Line}  ·  " : "") + node.Label
-            + (node.IsReachable ? "" : "  ·  到達不能");
+        NodeLabel.Text = node.Label + (node.IsReachable ? "" : "  ·  到達不能");
         NodeLabel.ToolTip = NodeLabel.Text;
-        if (node.Source is { } range) NavigateSource(range);
+        if (navigateSource && node.Source is { } range) NavigateSource(range);
         FollowButton.IsEnabled = !busy && node.TargetMethod is not null;
     }
 
@@ -398,7 +402,7 @@ public partial class MainWindow : Window
         dark = !dark;
         ApplyTheme();
         if (!Theme.Save(dark)) SetStatus("テーマ設定を保存できません。", true);
-        RequestRender();
+        RequestRender(preserveViewport: true);
     }
 
     private void ApplyTheme()
@@ -419,10 +423,13 @@ public partial class MainWindow : Window
         switch (type)
         {
             case "zoom":
-                ZoomLabel.Text = value.GetInt32() + "%";
+                ZoomLabel.Text = $"{value.GetDouble():0.###}%";
                 break;
             case "node" when value.GetString() is { } id && nodes.TryGetValue(id, out var node):
                 SelectNode(node);
+                break;
+            case "annotate":
+                ChangeAnnotation(value);
                 break;
             case "error":
                 showList = true;
@@ -435,22 +442,38 @@ public partial class MainWindow : Window
             case "rendered":
                 rendered = true;
                 UpdateSurface();
-                if (selectedNode is { } selected) preview.Send(new { type = "select", id = selected.Id });
+                if (selectedNode is { } selected)
+                    preview.Send(new { type = "select", id = selected.Id, center = pendingNodeCenter });
+                pendingNodeCenter = false;
+                SendAnnotations();
                 break;
         }
     }
 
-    private void RequestRender()
+    private void RequestRender(bool preserveViewport = false)
     {
-        if (!ready || previewUnavailable || mermaid is null || PreviewTooLarge()) return;
+        if (!ready || previewUnavailable || mermaid is null || diagram is not { } graph) return;
+        var useMermaid = !UseLargeLayout(graph);
+        var text = useMermaid ? MermaidWriter.Write(graph, light: !dark, includeSourceLines: false) : null;
         rendered = false;
         ++version;
-        preview.Send(new { type = "render", version, text = dark ? mermaid : MermaidWriter.Write(diagram!, light: true),
-            theme = dark ? "dark" : "light" });
+        preview.Send(new
+        {
+            type = "render", version, text, preserveViewport, diagramRevision,
+            theme = dark ? "dark" : "light",
+            nodes = graph.Nodes.Select(node => new
+            {
+                id = node.Id, label = node.Label, kind = node.Kind.ToString().ToLowerInvariant(), reachable = node.IsReachable
+            }),
+            edges = graph.Edges.Select(edge => new
+            {
+                from = edge.From, to = edge.To, label = edge.Label, reachable = edge.IsReachable
+            })
+        });
     }
 
-    private bool PreviewTooLarge() => diagram is { } result && (result.Nodes.Count > MaxPreviewNodes ||
-        result.Edges.Count > MaxPreviewEdges || mermaid?.Length > MaxPreviewCharacters);
+    private bool UseLargeLayout(FlowDiagram graph) => graph.Nodes.Count > MaxPreviewNodes
+        || graph.Edges.Count > MaxPreviewEdges || mermaid?.Length > MaxPreviewCharacters;
 
     private void ToggleList(object sender, RoutedEventArgs args)
     {
@@ -462,7 +485,7 @@ public partial class MainWindow : Window
             NodesBox.ScrollIntoView(node);
         }
         else if (selectedNode is { } selected)
-            preview.Send(new { type = "select", id = selected.Id });
+            preview.Send(new { type = "select", id = selected.Id, center = true });
     }
 
     private void Fit(object sender, RoutedEventArgs args) => preview.Send(new { type = "fit" });
@@ -492,7 +515,8 @@ public partial class MainWindow : Window
         BackButton.IsEnabled = !busy && history.Count > 0;
         FollowButton.IsEnabled = !busy && selectedNode?.TargetMethod is not null;
         ListButton.Content = showList ? "図" : "一覧";
-        ListButton.IsEnabled = hasGraph && ready && !previewUnavailable && !PreviewTooLarge();
+        ListButton.IsEnabled = hasGraph && ready && !previewUnavailable;
+        AnnotationsButton.IsEnabled = hasGraph && !busy;
         ZoomIn.IsEnabled = ZoomOut.IsEnabled = FitButton.IsEnabled = webVisible && rendered;
     }
 
@@ -530,8 +554,8 @@ public partial class MainWindow : Window
         if (source is not null) diagnostics.AddRange(source.Notices);
         if (diagram is not null) diagnostics.AddRange(diagram.Notices);
         if (previewIssue is not null) diagnostics.Add(previewIssue);
-        if (PreviewTooLarge())
-            diagnostics.Add($"描画上限は {MaxPreviewNodes} ノード、{MaxPreviewEdges} 遷移、{MaxPreviewCharacters:N0} 文字です。全体の .mmd は出力できます。");
+        if (diagram is { } graph && UseLargeLayout(graph))
+            diagnostics.Add("大きな図を軽量レイアウトで表示します。全体の Mermaid は .mmd に保存できます。");
         UpdateDiagnosticList();
     }
 
@@ -588,6 +612,12 @@ public partial class MainWindow : Window
         {
             args.Handled = true;
             OpenProject(this, args);
+        }
+        else if (args.Key == Key.G && Keyboard.Modifiers == ModifierKeys.Control
+            && (Editor.IsKeyboardFocusWithin || GoToPanel.IsKeyboardFocusWithin))
+        {
+            args.Handled = true;
+            OpenGoToLine();
         }
         else if (args.SystemKey == Key.Left && Keyboard.Modifiers == ModifierKeys.Alt)
         {

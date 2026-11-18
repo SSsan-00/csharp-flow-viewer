@@ -51,6 +51,24 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    public void SourceConditionsAndPreviewLabelFormatKeepTheirMeaning()
+    {
+        var result = Diagram(File("""
+            class Demo
+            {
+                void Run() { if (Check() && Other(3)) Work(); }
+                bool Check() => true;
+                bool Other(int value) => value > 0;
+                void Work() { }
+            }
+            """));
+        var conditions = result.Nodes.Where(node => node.Kind == NodeKind.Condition).Select(node => node.Label).ToArray();
+        CollectionAssert.AreEquivalent(new[] { "Check()？", "Other(3)？" }, conditions);
+        Assert.DoesNotContain("  ·  L", MermaidWriter.Write(result, includeSourceLines: false));
+        StringAssert.Contains(MermaidWriter.Write(result), "  ·  L");
+    }
+
+    [TestMethod]
     public void ShortCircuitAndTernaryFollowRoslynPolarity()
     {
         var result = Diagram(File("""

@@ -6,7 +6,7 @@ namespace Flow.Mermaid;
 
 public static class MermaidWriter
 {
-    public static string Write(FlowDiagram diagram, bool light = false)
+    public static string Write(FlowDiagram diagram, bool light = false, bool includeSourceLines = true)
     {
         var text = new StringBuilder("flowchart TD\n");
         foreach (var node in diagram.Nodes)
@@ -17,7 +17,7 @@ public static class MermaidWriter
                 NodeKind.Condition => ("{", "}"),
                 _ => ("[", "]")
             };
-            var label = node.Label + (node.Source is { } source ? $"  ·  L{source.Line}" : "");
+            var label = node.Label + (includeSourceLines && node.Source is { } source ? $"  ·  L{source.Line}" : "");
             text.Append("  ").Append(node.Id).Append(open).Append('"').Append(Escape(label))
                 .Append('"').Append(close).Append(":::flow_").Append(node.IsReachable
                     ? node.Kind.ToString().ToLowerInvariant() : "unreachable").Append('\n');

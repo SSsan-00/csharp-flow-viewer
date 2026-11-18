@@ -11,3 +11,20 @@ body[data-theme="light"] { color-scheme: light; color: #232b43; --surface: #f7f8
 #graph .node:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 #feedback { position: absolute; top: 24px; left: 22px; right: 22px; text-align: center; pointer-events: none; }
 .dragging { cursor: grabbing; }
+
+body[data-theme="dark"] { --link: #b7bfd7; --node-fill: #183d3d; --condition-fill: #382f62; --node-stroke: #78ddba; --mark-fill: #70511c; --mark-stroke: #ffcf72; }
+body[data-theme="light"] { --link: #43516b; --node-fill: #dceeea; --condition-fill: #eae4ff; --node-stroke: #3b8076; --mark-fill: #ffe5a1; --mark-stroke: #7b5200; }
+#graph .node.marked > :is(rect, polygon, path, circle) { fill: var(--mark-fill) !important; stroke: var(--mark-stroke) !important; stroke-width: 3px !important; }
+#graph .node.grayed { opacity: .52; }
+#graph .node.grayed > :is(rect, polygon, path, circle) { fill: #666971 !important; stroke: #a4a6ad !important; }
+.large-diagram .node > :is(rect, polygon) { fill: var(--node-fill); stroke: var(--node-stroke); stroke-width: 1.5px; }
+.large-diagram .flow_condition > polygon { fill: var(--condition-fill); stroke: var(--accent); }
+.large-diagram .flow_unreachable > :is(rect, polygon) { stroke-dasharray: 4 3; }
+.large-diagram text { fill: currentColor; }
+.large-diagram .large-link { fill: none; stroke: var(--link); stroke-width: 1.4px; }
+.large-diagram .unreachable-link { stroke-dasharray: 5 4; }
+.large-diagram .large-arrow { fill: var(--link); }
+.large-edge-label { font-size: 13px; paint-order: stroke; stroke: var(--surface); stroke-width: 5px; }
+#node-menu { position: absolute; z-index: 1; padding: 4px; border: 1px solid var(--link); border-radius: 5px; background: var(--surface); }
+#node-menu button { display: block; width: 100%; padding: 5px 12px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+#node-menu button:hover, #node-menu button:focus-visible { background: var(--condition-fill); }

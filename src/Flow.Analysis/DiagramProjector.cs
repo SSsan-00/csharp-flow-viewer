@@ -552,12 +552,10 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
             return "case " + ShortLabel(constant) + " に一致？";
         if (value is IIsPatternOperation && value.Syntax is CasePatternSwitchLabelSyntax { Pattern: { } pattern })
             return "case " + ShortLabel(pattern) + " に一致？";
-        if (value.IsImplicit || value.DescendantsAndSelf().Any(item => item is IInvocationOperation or IAssignmentOperation
-            or IFlowCaptureReferenceOperation or IPropertyReferenceOperation or IDynamicInvocationOperation
-            or IIncrementOrDecrementOperation or IObjectCreationOperation))
-            return value is IIsPatternOperation or IIsTypeOperation ? "パターン／型に一致？" : "評価結果？";
+        if (value.Syntax is ExpressionSyntax expression)
+            return ShortLabel(expression) + "？";
 
-        return ShortLabel(value.Syntax) + "？";
+        return value is IIsPatternOperation or IIsTypeOperation ? "パターン／型に一致？" : "条件";
     }
 
     private static string ShortLabel(SyntaxNode syntax)

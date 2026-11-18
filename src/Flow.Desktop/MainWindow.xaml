@@ -158,6 +158,14 @@
           </Grid>
           <Border Grid.Row="3" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,6">
             <DockPanel>
+              <Button x:Name="AnnotationsButton" DockPanel.Dock="Right" Click="OpenAnnotationsMenu" Content="注釈…" IsEnabled="False" Margin="8,0,0,0">
+                <Button.ContextMenu>
+                  <ContextMenu>
+                    <MenuItem Header="注釈を JSON に書き出す…" Click="ExportAnnotations"/>
+                    <MenuItem Header="注釈を JSON から読み込む…" Click="ImportAnnotations"/>
+                  </ContextMenu>
+                </Button.ContextMenu>
+              </Button>
               <Button x:Name="FollowButton" DockPanel.Dock="Right" Click="Follow" Content="呼び出し先へ ›" IsEnabled="False" Margin="8,0,0,0"/>
               <TextBlock x:Name="NodeLabel" Text="ノードを選ぶとソース行へ移動" Style="{StaticResource Muted}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             </DockPanel>
@@ -175,11 +183,21 @@
               <TextBlock x:Name="SourceTitle" Text="ソース" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             </DockPanel>
           </Border>
-          <edit:TextEditor Grid.Row="1" x:Name="Editor" IsReadOnly="True" ShowLineNumbers="True"
+          <edit:TextEditor Grid.Row="1" x:Name="Editor" IsReadOnly="True" ShowLineNumbers="True" WordWrap="True"
+                           PreviewMouseLeftButtonUp="EditorClicked"
                            FontFamily="Cascadia Mono, Consolas" FontSize="13" Padding="8,8,6,8"
                            Background="{DynamicResource CanvasBrush}" Foreground="{DynamicResource TextBrush}"
-                           LineNumbersForeground="{DynamicResource MutedBrush}" HorizontalScrollBarVisibility="Auto"
+                           LineNumbersForeground="{DynamicResource MutedBrush}" HorizontalScrollBarVisibility="Disabled"
                            VerticalScrollBarVisibility="Auto" AutomationProperties.Name="C# ソース"/>
+          <Border Grid.Row="1" x:Name="GoToPanel" Visibility="Collapsed" HorizontalAlignment="Right" VerticalAlignment="Top"
+                  Padding="7" Margin="8" Background="{DynamicResource RaisedBrush}">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="行番号" VerticalAlignment="Center" Margin="0,0,8,0"/>
+              <TextBox x:Name="GoToLineInput" Width="86" KeyDown="GoToLineKeyDown" AutomationProperties.Name="移動先の行番号"/>
+              <Button Content="移動" Click="GoToLineClick" Margin="4,0,0,0"/>
+              <Button Content="閉じる" Click="CloseGoToLineClick" Margin="4,0,0,0"/>
+            </StackPanel>
+          </Border>
           <TextBlock Grid.Row="2" x:Name="SourceLocation" Style="{StaticResource Muted}" Text="—" Margin="11,6,10,4"/>
         </Grid>
       </Border>
