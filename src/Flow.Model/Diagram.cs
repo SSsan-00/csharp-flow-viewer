@@ -5,7 +5,7 @@ public sealed record SourceRange(int Offset, int Length, int Line);
 public enum NodeKind { Start, End, Call, Condition, Transfer, Exception, Junction }
 
 public sealed record FlowNode(string Id, NodeKind Kind, string Label, SourceRange? Source,
-    int? TargetMethod = null, bool IsReachable = true);
+    int? TargetMethod = null, bool IsReachable = true, bool IsCaseTest = false);
 
 public sealed record FlowEdge(string From, string To, string? Label = null, bool IsReachable = true);
 

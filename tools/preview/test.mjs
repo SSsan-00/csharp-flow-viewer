@@ -90,6 +90,41 @@ try {
     const box = node.getBoundingClientRect();
     return box.top >= 0 && box.bottom <= window.innerHeight;
   }));
+  await page.keyboard.press("Control+f");
+  await page.getByRole("searchbox", { name: "ノードを検索" }).fill("Call(800");
+  assert.equal(await page.locator("#preview-search output").textContent(), "1 / 3");
+  await page.getByRole("button", { name: "次の一致" }).click();
+  assert.equal(await page.locator("#preview-search output").textContent(), "2 / 3");
+  await page.getByRole("button", { name: "次の一致" }).click();
+  assert.equal(await page.locator("#preview-search output").textContent(), "3 / 3");
+  const found = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "node"));
+  assert.equal(found.value, "n8001");
+  await page.keyboard.press("Escape");
+
+  const scroll = page.locator("#vertical-scroll");
+  assert.ok(await scroll.isVisible());
+  await scroll.evaluate(element => element.scrollTop = 0);
+  await page.waitForFunction(() => document.querySelector("#graph").style.transform.includes(", 18px)"));
+  await scroll.evaluate(element => element.scrollTop = 325);
+  await page.waitForFunction(() => document.querySelector("#graph").style.transform.includes(", -307px)"));
+
+  await page.evaluate(() => window.flowPreview({ type: "annotations", marked: ["n0"], gray: ["n0"] }));
+  const stroke = await graph.locator('[data-flow-id="n0"] rect').evaluate(shape => getComputedStyle(shape).stroke);
+  assert.equal(stroke, "rgb(123, 82, 0)");
+  const savedViewport = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "viewport").value);
+  const savedTransform = await graph.evaluate(node => node.style.transform);
+  await page.evaluate(text => window.flowPreview({ type: "render", theme: "dark", version: 4, diagramRevision: 2, text }), source);
+  await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 4));
+  assert.equal(await graph.locator(".marked").count(), 0);
+  await condition.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "マーク" }).click();
+  const newMark = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "annotate"));
+  assert.equal(newMark.version, 4);
+  await page.evaluate(({ text, viewport }) => window.flowPreview({
+    type: "render", theme: "dark", version: 5, diagramRevision: 3, text, viewport
+  }), { text: source, viewport: savedViewport });
+  await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 5));
+  assert.equal(await graph.evaluate(node => node.style.transform), savedTransform);
   console.log("Preview passed: Mermaid labels, zoom preservation, annotations, and 8,002-node SVG with a back edge.");
 } finally {
   await browser?.close();

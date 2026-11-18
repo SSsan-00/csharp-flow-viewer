@@ -3,6 +3,11 @@
   const graph = document.querySelector("#graph");
   const feedback = document.querySelector("#feedback");
   const menu = document.querySelector("#node-menu");
+  const scroller = document.querySelector("#vertical-scroll");
+  const search = document.querySelector("#preview-search");
+  const query = search.querySelector("input");
+  const matchCount = search.querySelector("output");
+  let matches = [], matchIndex = -1, expectedScroll = 0;
   const host = window.chrome?.webview;
   const palettes = {
     dark: { background: "#101521", lineColor: "#b7bfd7", edgeLabelBackground: "#222a3b", textColor: "#e7e9f7", nodeTextColor: "#e7e9f7" },
@@ -18,7 +23,25 @@
 
   function apply() {
     graph.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+    syncScroll();
+    send("viewport", { X: x, Y: y, Scale: scale });
   }
+
+  function syncScroll() {
+    const contentHeight = Math.ceil(height * scale + 36);
+    scroller.hidden = !height || contentHeight <= viewport.clientHeight;
+    if (scroller.hidden) return;
+    scroller.firstElementChild.style.height = contentHeight + "px";
+    scroller.scrollTop = 18 - y;
+    expectedScroll = scroller.scrollTop;
+  }
+
+  scroller.addEventListener("scroll", () => {
+    if (scroller.hidden || scroller.scrollTop === expectedScroll) return;
+    y = 18 - scroller.scrollTop;
+    apply();
+  });
+  new ResizeObserver(syncScroll).observe(viewport);
   function fit() {
     if (!width || !height) return;
     scale = Math.min(1, Math.max(.000001, (viewport.clientWidth - 52) / width),
@@ -42,9 +65,11 @@
     if (request !== generation) return;
     version = message.version;
     closeMenu();
+    if (fittedRevision !== message.diagramRevision) closeSearch();
     document.body.dataset.theme = message.theme;
     graph.replaceChildren();
     width = height = 0;
+    syncScroll();
     feedback.textContent = (message.text || message.nodes) ? "図を描画しています…" : "";
     if (!message.text && !message.nodes) return;
     try {
@@ -109,6 +134,10 @@
       if (message.preserveViewport && fittedRevision === message.diagramRevision) {
         apply();
         sendZoom();
+      } else if (message.viewport) {
+        ({ X: x, Y: y, Scale: scale } = message.viewport);
+        apply();
+        sendZoom();
       } else if (!fromMermaid && message.nodes) {
         scale = .8;
         x = viewport.clientWidth / 2 - width * scale / 2;
@@ -126,6 +155,7 @@
         fit();
       }
       fittedRevision = message.diagramRevision;
+      if (!search.hidden) updateSearch();
       send("rendered", null);
     } catch {
       if (request !== generation) return;
@@ -145,6 +175,8 @@
       zoom(message.factor);
     } else if (message.type === "select") {
       selectNode(message.id, message.center);
+    } else if (message.type === "search") {
+      openSearch();
     } else if (message.type === "annotations") {
       const marks = new Set(message.marked);
       const gray = new Set(message.gray);
@@ -172,6 +204,81 @@
       sendZoom();
     }
   }
+
+  function openSearch() {
+    closeMenu();
+    search.hidden = false;
+    updateSearch();
+    query.focus();
+    query.select();
+  }
+
+  function closeSearch() {
+    search.hidden = true;
+    query.value = "";
+    matchIndex = -1;
+    matches = [];
+    graph.querySelectorAll(".search-match").forEach(node => node.classList.remove("search-match"));
+  }
+
+  function updateSearch(move = false) {
+    const selected = graph.querySelector(".selected")?.dataset.flowId;
+    const term = query.value.trim().toLowerCase();
+    matches = [];
+    for (const node of graph.querySelectorAll("[data-flow-id]")) {
+      const label = node.getAttribute("aria-label") ?? node.querySelector("text")?.textContent ?? "";
+      const matched = term.length > 0 && label.toLowerCase().includes(term);
+      node.classList.toggle("search-match", matched);
+      if (matched) matches.push(node.dataset.flowId);
+    }
+    matchIndex = move ? -1 : matches.indexOf(selected);
+    if (move && matches.length)
+      stepSearch(1);
+    else
+      updateMatchCount();
+  }
+
+  function updateMatchCount() {
+    matchCount.value = matchIndex >= 0 ? `${matchIndex + 1} / ${matches.length}` : `${matches.length} 件`;
+    search.querySelectorAll("[data-step], [type=submit]").forEach(button => button.disabled = !matches.length);
+  }
+
+  function stepSearch(delta) {
+    if (!matches.length) return;
+    const previous = matchIndex < 0 && delta < 0 ? 0 : matchIndex;
+    matchIndex = (previous + delta + matches.length) % matches.length;
+    const id = matches[matchIndex];
+    selectNode(id, true);
+    send("node", id);
+    updateMatchCount();
+  }
+
+  query.addEventListener("input", () => updateSearch(true));
+  search.addEventListener("submit", event => {
+    event.preventDefault();
+    stepSearch(1);
+  });
+  search.querySelector("[data-step]").addEventListener("click", () => stepSearch(-1));
+  search.querySelector("[data-close]").addEventListener("click", () => {
+    closeSearch();
+    viewport.focus({ preventScroll: true });
+  });
+  window.addEventListener("keydown", event => {
+    if (event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "f") {
+      event.preventDefault();
+      openSearch();
+    } else if (event.altKey && !event.ctrlKey && event.key === "ArrowLeft") {
+      event.preventDefault();
+      send("back", null);
+    } else if (event.key === "Escape" && !search.hidden && menu.hidden) {
+      event.preventDefault();
+      closeSearch();
+      viewport.focus({ preventScroll: true });
+    } else if (event.key === "Enter" && event.shiftKey && event.target === query) {
+      event.preventDefault();
+      stepSearch(-1);
+    }
+  });
 
   function closeMenu() {
     menu.hidden = true;
@@ -208,16 +315,22 @@
     closeMenu();
   });
   viewport.addEventListener("keydown", event => {
-    if (event.key === "Escape") closeMenu();
+    if (event.key === "Escape" && !menu.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu();
+    }
   });
 
   viewport.addEventListener("wheel", event => {
+    if (scroller.contains(event.target) || search.contains(event.target) || menu.contains(event.target)) return;
     event.preventDefault();
     zoom(event.deltaY < 0 ? 1.13 : 1 / 1.13, event.clientX, event.clientY);
   }, { passive: false });
   viewport.addEventListener("pointerdown", event => {
-    if (event.button !== 0 || menu.contains(event.target)) return;
+    if (event.button !== 0 || menu.contains(event.target) || scroller.contains(event.target) || search.contains(event.target)) return;
     closeMenu();
+    if (!event.target.closest("[data-flow-id]")) viewport.focus({ preventScroll: true });
     drag = { id: event.pointerId, startX: event.clientX, startY: event.clientY, x, y };
     suppressClick = false;
   });

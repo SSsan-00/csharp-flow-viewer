@@ -21,7 +21,7 @@ public partial class MainWindow : Window
     private const int MaxPreviewCharacters = 380_000;
     private readonly PreviewHost preview;
     private readonly CancellationTokenSource lifetime = new();
-    private readonly Stack<int> history = new();
+    private readonly Stack<(int Method, string Node)> history = new();
     private readonly List<string> diagnostics = [];
     private ProjectSession? project;
     private SourceFile? source;
@@ -46,11 +46,14 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         SearchPanel.Install(Editor);
+        Editor.TextArea.AddHandler(MouseLeftButtonDownEvent, new MouseButtonEventHandler(EditorPressed), true);
+        Editor.TextArea.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(EditorClicked), true);
         dark = Theme.Read();
         ApplyTheme();
         preview = new PreviewHost(Web);
         preview.Message += OnPreviewMessage;
         Loaded += StartPreview;
+        Closing += (_, _) => SaveFileState();
         Closed += CloseViewer;
         SetBusy(false);
         try { excludedCalls = TraceSettings.Read(TraceSettings.SettingsPath); }
@@ -193,6 +196,7 @@ public partial class MainWindow : Window
         if (closed) return;
         source = loaded;
         Editor.Text = loaded.Text;
+        var restored = ReadFileState(file);
         SourceTitle.Text = file.Label;
         SourceTitle.ToolTip = file.Label;
         MethodsBox.ItemsSource = loaded.Methods;
@@ -204,6 +208,17 @@ public partial class MainWindow : Window
             loaded.Methods.Count > 0 ? "左の一覧でメソッドを選ぶと、制御フローを表示します。" : "ほかのファイルを選ぶか、構成と診断を確認してください。");
         SetStatus(loaded.Notices.Any(IsPartial) ? "部分解析 · 参照やコンパイル条件を診断で確認できます。" : "ソースの読み込み完了",
             attention: loaded.Notices.Any(IsPartial));
+        if (restored is not null)
+        {
+            if (FindSavedMethod(loaded, restored) is { } entry)
+            {
+                MethodsBox.SelectedItem = entry;
+                MethodsBox.ScrollIntoView(entry);
+                await AnalyzeMethodAsync(entry, restored: restored);
+            }
+            else
+                RestoreFileState(restored);
+        }
     }
 
     private async void MethodChanged(object sender, SelectionChangedEventArgs args)
@@ -224,7 +239,7 @@ public partial class MainWindow : Window
             SetStatus("追跡設定を保存しました。");
     }
 
-    private async Task AnalyzeMethodAsync(MethodEntry entry)
+    private async Task AnalyzeMethodAsync(MethodEntry entry, string? returnTo = null, FileViewState? restored = null)
     {
         if (source is not { } currentSource) return;
         SetBusy(true);
@@ -244,11 +259,17 @@ public partial class MainWindow : Window
             nodes = result.Nodes.ToDictionary(node => node.Id);
             NodesBox.ItemsSource = result.Nodes;
             mermaid = result.Nodes.Count > 0 ? MermaidWriter.Write(result) : null;
+            UpdateAnnotationKey();
             showList = previewUnavailable;
             SetState("フロー図を取得できません", "診断を確認するか、別のメソッドを選んでください。");
             RefreshDiagnostics();
             UpdateSurface();
+            if (returnTo is not null && nodes.TryGetValue(returnTo, out var caller))
+                JumpToPreviewNode(caller, navigateSource: true);
+            if (restored is not null)
+                RestoreFileState(restored);
             RequestRender();
+            ShowAnnotations();
             SetStatus(result.IsPartial ? "部分解析 · 診断を確認してください。"
                 : $"{result.Nodes.Count:N0} ノード  /  {result.Edges.Count:N0} 遷移  ·  単純な代入値は図から省略", result.IsPartial);
         }
@@ -268,6 +289,9 @@ public partial class MainWindow : Window
 
     private void ResetFile()
     {
+        SaveFileState();
+        fileStatePath = null;
+        annotationHistory.Clear();
         source = null;
         MethodsBox.ItemsSource = null;
         MethodCount.Text = "メソッド";
@@ -290,11 +314,15 @@ public partial class MainWindow : Window
         diagram = null;
         method = null;
         mermaid = null;
+        AnnotationKey = null;
+        viewport = null;
         nodes.Clear();
         NodesBox.ItemsSource = null;
         selectedNode = null;
         rendered = false;
         pendingNodeCenter = false;
+        editorAnnotations.Clear();
+        Editor.TextArea.TextView.Redraw();
         NodeLabel.Text = "ノードを選ぶとソース行へ移動";
         NodeLabel.ToolTip = null;
         FlowTitle.Text = "制御フロー";
@@ -327,7 +355,7 @@ public partial class MainWindow : Window
 
     private void NodeChanged(object sender, SelectionChangedEventArgs args)
     {
-        if (NodesBox.SelectedItem is FlowNode node)
+        if (!selectingFromSource && NodesBox.SelectedItem is FlowNode node)
             SelectNode(node);
     }
 
@@ -347,33 +375,41 @@ public partial class MainWindow : Window
         SourceLocation.Text = $"L{location.Line}  /  {Editor.LineCount:N0} 行";
     }
 
-    private void Follow(object sender, RoutedEventArgs args)
+    private async void Follow(object sender, RoutedEventArgs args)
     {
-        if (busy || selectedNode?.TargetMethod is not { } target || method is null) return;
-        history.Push(method.Id);
-        if (target == method.Id)
+        if (busy || selectedNode is not { TargetMethod: { } target } caller || method is not { } entry) return;
+        history.Push((entry.Id, caller.Id));
+        if (target == entry.Id)
         {
-            NavigateSource(method.Source with { Length = 0 });
+            NavigateSource(entry.Source with { Length = 0 });
             SetBusy(false);
             return;
         }
-        SelectMethod(target);
+        await SelectMethodAsync(target);
     }
 
-    private void Back(object? sender, RoutedEventArgs args)
+    private async void Back(object? sender, RoutedEventArgs args)
     {
         if (busy || !history.TryPop(out var previous)) return;
-        SelectMethod(previous);
-        if (!busy) SetBusy(false);
+        await SelectMethodAsync(previous.Method, previous.Node);
     }
 
-    private void SelectMethod(int id)
+    private async Task SelectMethodAsync(int id, string? returnTo = null)
     {
         if (source?.Methods.FirstOrDefault(item => item.Id == id) is not { } entry) return;
+        if (method?.Id == id && diagram is not null)
+        {
+            if (returnTo is not null && nodes.TryGetValue(returnTo, out var caller))
+                JumpToPreviewNode(caller, navigateSource: true);
+            SetBusy(false);
+            return;
+        }
+
+        SetBusy(true);
         if (!MethodsBox.Items.Contains(entry)) Filter.Clear();
         MethodsBox.SelectedItem = entry;
         MethodsBox.ScrollIntoView(entry);
-        if (method?.Id == entry.Id) NavigateSource(entry.Source with { Length = 0 });
+        await AnalyzeMethodAsync(entry, returnTo);
     }
 
     private void Copy(object sender, RoutedEventArgs args)
@@ -408,6 +444,11 @@ public partial class MainWindow : Window
     private void ApplyTheme()
     {
         Theme.Apply(this, Editor, dark);
+        var transformers = Editor.TextArea.TextView.LineTransformers;
+        transformers.Remove(editorAnnotations);
+        editorAnnotations.Dark = dark;
+        transformers.Add(editorAnnotations);
+        Editor.TextArea.TextView.Redraw();
         ThemeButton.Content = dark ? "◐  ダーク" : "☼  ライト";
     }
 
@@ -422,13 +463,19 @@ public partial class MainWindow : Window
         if (requestVersion != version) return;
         switch (type)
         {
+            case "viewport" when value.Deserialize<PreviewViewport>() is { IsValid: true } saved:
+                viewport = saved;
+                break;
             case "zoom":
                 ZoomLabel.Text = $"{value.GetDouble():0.###}%";
                 break;
             case "node" when value.GetString() is { } id && nodes.TryGetValue(id, out var node):
                 SelectNode(node);
                 break;
-            case "annotate":
+            case "back":
+                Back(this, new RoutedEventArgs());
+                break;
+            case "annotate" when rendered:
                 ChangeAnnotation(value);
                 break;
             case "error":
@@ -445,7 +492,7 @@ public partial class MainWindow : Window
                 if (selectedNode is { } selected)
                     preview.Send(new { type = "select", id = selected.Id, center = pendingNodeCenter });
                 pendingNodeCenter = false;
-                SendAnnotations();
+                ShowAnnotations();
                 break;
         }
     }
@@ -456,10 +503,11 @@ public partial class MainWindow : Window
         var useMermaid = !UseLargeLayout(graph);
         var text = useMermaid ? MermaidWriter.Write(graph, light: !dark, includeSourceLines: false) : null;
         rendered = false;
+        UpdateSurface();
         ++version;
         preview.Send(new
         {
-            type = "render", version, text, preserveViewport, diagramRevision,
+            type = "render", version, text, preserveViewport, diagramRevision, viewport,
             theme = dark ? "dark" : "light",
             nodes = graph.Nodes.Select(node => new
             {
@@ -488,6 +536,15 @@ public partial class MainWindow : Window
             preview.Send(new { type = "select", id = selected.Id, center = true });
     }
 
+    private void FindInPreview(object sender, RoutedEventArgs args)
+    {
+        if (!rendered) return;
+        showList = false;
+        UpdateSurface();
+        Web.Focus();
+        preview.Send(new { type = "search" });
+    }
+
     private void Fit(object sender, RoutedEventArgs args) => preview.Send(new { type = "fit" });
     private void Zoom(object sender, RoutedEventArgs args) => preview.Send(new { type = "zoom", factor = sender == ZoomIn ? 1.18 : 1 / 1.18 });
 
@@ -509,7 +566,7 @@ public partial class MainWindow : Window
         EmptyState.Visibility = !webVisible && !listVisible ? Visibility.Visible : Visibility.Collapsed;
         // The composition control needs a layout pass to initialize before it can signal readiness.
         PreviewSurface.Opacity = webVisible ? 1 : 0;
-        PreviewSurface.IsHitTestVisible = Web.Focusable = webVisible;
+        PreviewSurface.IsHitTestVisible = Web.Focusable = webVisible && rendered;
         NodesBox.Visibility = listVisible ? Visibility.Visible : Visibility.Collapsed;
         CopyButton.IsEnabled = SaveButton.IsEnabled = hasGraph && !busy;
         BackButton.IsEnabled = !busy && history.Count > 0;
@@ -517,6 +574,7 @@ public partial class MainWindow : Window
         ListButton.Content = showList ? "図" : "一覧";
         ListButton.IsEnabled = hasGraph && ready && !previewUnavailable;
         AnnotationsButton.IsEnabled = hasGraph && !busy;
+        PreviewSearchButton.IsEnabled = webVisible && rendered;
         ZoomIn.IsEnabled = ZoomOut.IsEnabled = FitButton.IsEnabled = webVisible && rendered;
     }
 
@@ -612,6 +670,11 @@ public partial class MainWindow : Window
         {
             args.Handled = true;
             OpenProject(this, args);
+        }
+        else if (args.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control && Web.IsKeyboardFocusWithin)
+        {
+            args.Handled = true;
+            FindInPreview(this, args);
         }
         else if (args.Key == Key.G && Keyboard.Modifiers == ModifierKeys.Control
             && (Editor.IsKeyboardFocusWithin || GoToPanel.IsKeyboardFocusWithin))

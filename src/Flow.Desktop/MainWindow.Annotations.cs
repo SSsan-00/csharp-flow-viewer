@@ -13,8 +13,11 @@ public partial class MainWindow
 {
     private sealed record AnnotationFile(int Version, string Diagram, NodeAnnotations Annotations);
     private readonly Dictionary<string, NodeAnnotations> annotationHistory = new();
+    private readonly SourceAnnotationColorizer editorAnnotations = new();
 
-    private string? AnnotationKey => method is { } entry && mermaid is { } graph
+    private string? AnnotationKey { get; set; }
+
+    private void UpdateAnnotationKey() => AnnotationKey = method is { } entry && mermaid is { } graph
         ? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"{SourceTitle.Text}\n{entry.Signature}\n{entry.Source.Offset}\n{graph}")))
         : null;
@@ -52,14 +55,19 @@ public partial class MainWindow
                 annotations.GrayRoots.Remove(id);
                 break;
         }
-        SendAnnotations();
+        ShowAnnotations();
+        SaveFileState();
     }
 
-    private void SendAnnotations()
+    private void ShowAnnotations()
     {
-        if (!rendered || diagram is not { } graph || AnnotationKey is not { } key) return;
+        if (diagram is not { } graph || AnnotationKey is not { } key) return;
         var annotations = annotationHistory.GetValueOrDefault(key) ?? new NodeAnnotations();
-        preview.Send(new { type = "annotations", marked = annotations.Marked, gray = annotations.GrayNodes(graph) });
+        var gray = annotations.GrayNodes(graph);
+        editorAnnotations.SetRanges(Editor.Document, graph.Nodes, annotations.Marked, gray);
+        Editor.TextArea.TextView.Redraw();
+        if (rendered)
+            preview.Send(new { type = "annotations", marked = annotations.Marked, gray });
     }
 
     private void ExportAnnotations(object sender, RoutedEventArgs args)
@@ -103,8 +111,9 @@ public partial class MainWindow
                 return;
             }
             annotationHistory[key] = file.Annotations;
-            SendAnnotations();
+            ShowAnnotations();
             SetStatus("注釈を読み込みました。");
+            SaveFileState();
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
         {

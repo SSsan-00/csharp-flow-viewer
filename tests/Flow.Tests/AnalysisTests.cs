@@ -354,6 +354,70 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    public void SwitchInputAndCaseGrayOutPreserveOtherCasesAndSharedCode()
+    {
+        var result = Diagram(File("""
+            class Demo
+            {
+                void Run(int status)
+                {
+                    switch (Read(status))
+                    {
+                        case 0: Zero(); break;
+                        case 1:
+                        case 2 when Allowed(): Shared(); break;
+                        default: Fallback(); break;
+                    }
+                    Audit();
+                }
+                int Read(int value) => value;
+                bool Allowed() => true;
+                void Zero() {}
+                void Shared() {}
+                void Fallback() {}
+                void Audit() {}
+            }
+            """));
+        var input = Single(result, "switch (Read(status))");
+        Assert.AreEqual(input, Next(result, Single(result, "Demo.Read()")));
+        var first = Single(result, "case 0 に一致？");
+        var second = Single(result, "case 1 に一致？");
+        var guard = Single(result, "when Allowed()？");
+        Assert.IsTrue(first.IsCaseTest);
+        Assert.IsTrue(guard.IsCaseTest);
+        var annotations = new NodeAnnotations { GrayRoots = [first.Id] };
+        var gray = annotations.GrayNodes(result);
+        CollectionAssert.AreEquivalent(new[] { first.Id, Single(result, "Demo.Zero()").Id },
+            result.Nodes.Where(node => (node.Kind is NodeKind.Call or NodeKind.Condition) &&
+                gray.Contains(node.Id)).Select(node => node.Id).ToArray());
+        annotations.GrayRoots.Clear();
+        annotations.GrayRoots.Add(second.Id);
+        Assert.IsFalse(annotations.GrayNodes(result).Contains(Single(result, "Demo.Shared()").Id));
+    }
+
+    [TestMethod]
+    public void SwitchExpressionsDisplayInputAndArmsWithoutOperatorNodes()
+    {
+        var result = Diagram(File("""
+            class Demo
+            {
+                decimal Read() => 2m;
+                decimal Run(decimal input) => (input + Read()) switch
+                {
+                    3m => Read(),
+                    _ => 0m
+                };
+            }
+            """));
+        var input = Single(result, "switch ((input + Read()))");
+        var test = Single(result, "case 3m に一致？");
+        Assert.IsTrue(test.IsCaseTest);
+        Assert.AreEqual(test, Next(result, input));
+        Assert.HasCount(2, result.Nodes.Where(node => node.Label == "Demo.Read()"));
+        Assert.DoesNotContain(node => node.Label.Contains("op_", StringComparison.Ordinal), result.Nodes);
+    }
+
+    [TestMethod]
     public void FinallyRunsBeforeDistinctReturnAndNormalContinuations()
     {
         var result = Diagram(File("""

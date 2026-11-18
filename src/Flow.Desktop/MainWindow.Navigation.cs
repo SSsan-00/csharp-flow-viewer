@@ -7,6 +7,8 @@ namespace Flow.Desktop;
 public partial class MainWindow
 {
     private bool pendingNodeCenter;
+    private Point? editorPress;
+    private bool selectingFromSource;
 
     private void OpenGoToLine()
     {
@@ -55,21 +57,44 @@ public partial class MainWindow
         SetStatus($"{line:N0} 行目に移動しました。");
     }
 
+    private void EditorPressed(object sender, MouseButtonEventArgs args)
+    {
+        editorPress = args.GetPosition(Editor.TextArea.TextView);
+    }
+
     private void EditorClicked(object sender, MouseButtonEventArgs args)
     {
-        if (busy || diagram is null || !Editor.TextArea.TextView.IsMouseOver
+        var start = editorPress;
+        editorPress = null;
+        var view = Editor.TextArea.TextView;
+        var point = args.GetPosition(view);
+        if (busy || diagram is null || start is not { } pressed
+            || Math.Abs(pressed.X - point.X) > SystemParameters.MinimumHorizontalDragDistance
+            || Math.Abs(pressed.Y - point.Y) > SystemParameters.MinimumVerticalDragDistance
+            || !new Rect(view.RenderSize).Contains(point)
             || Editor.GetPositionFromPoint(args.GetPosition(Editor)) is not { } position)
             return;
 
         var offset = Editor.Document.GetOffset(position.Location);
-        var node = NodesForClick(offset, position.Line);
-        if (node is null) return;
+        if (NodesForClick(offset, position.Line) is { } node)
+            JumpToPreviewNode(node, navigateSource: false);
+    }
 
-        SelectNode(node, navigateSource: false);
+    private void JumpToPreviewNode(FlowNode node, bool navigateSource)
+    {
+        SelectNode(node, navigateSource);
         if (previewUnavailable || !ready)
         {
-            NodesBox.SelectedItem = node;
-            NodesBox.ScrollIntoView(node);
+            selectingFromSource = true;
+            try
+            {
+                NodesBox.SelectedItem = node;
+                NodesBox.ScrollIntoView(node);
+            }
+            finally
+            {
+                selectingFromSource = false;
+            }
             return;
         }
 

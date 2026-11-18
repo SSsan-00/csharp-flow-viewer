@@ -14,7 +14,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
 {
     private readonly record struct State(int Block, int Context);
     private sealed record Continuation(ControlFlowRegion Region, string Resume, int Parent);
-    private readonly record struct Visible(NodeKind Kind, string Label, SourceRange? Source, int? Target = null);
+    private readonly record struct Visible(NodeKind Kind, string Label, SourceRange? Source, int? Target = null, bool IsCaseTest = false);
     private sealed record RegionEntry(ControlFlowRegion Region, ControlFlowRegion? EnclosingFinally);
 
     private readonly Dictionary<State, string> states = new();
@@ -32,6 +32,8 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private readonly HashSet<CaptureId> compoundLocations = [];
     private readonly List<string> notices = [];
     private bool partial;
+    private readonly Dictionary<int, ExpressionSyntax> switchStarts = [];
+    private readonly HashSet<int> switchesWithTests = [];
 
     public FlowDiagram Build(SourceRange declaration, bool isPartial)
     {
@@ -46,6 +48,20 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                 if (operation is ICompoundAssignmentOperation)
                     compoundLocations.Add(target.Id);
             }
+        }
+
+        foreach (var block in graph.Blocks)
+        {
+            var test = SwitchCase(block.BranchValue);
+            var owner = test?.Ancestors().FirstOrDefault(node => node is SwitchStatementSyntax or SwitchExpressionSyntax);
+            var input = owner switch
+            {
+                SwitchStatementSyntax statement => statement.Expression,
+                SwitchExpressionSyntax expression => expression.GoverningExpression,
+                _ => null
+            };
+            if (input is not null && switchesWithTests.Add(input.SpanStart))
+                switchStarts[block.Ordinal] = input;
         }
 
         CollectRegions(graph.Root, null);
@@ -133,11 +149,24 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         var block = graph.Blocks[state.Block];
         var last = states[state];
         foreach (var operation in block.Operations)
+        {
             Append(Evaluate(operation));
+            if (operation is IFlowCaptureOperation { Syntax: ExpressionSyntax expression } &&
+                expression.Parent is SwitchStatementSyntax statement && statement.Expression == expression &&
+                !switchesWithTests.Contains(expression.SpanStart))
+                Append([SwitchInput(expression)]);
+        }
         if (block.BranchValue is { } value)
             Append(Evaluate(value));
+        if (switchStarts.TryGetValue(block.Ordinal, out var input))
+            Append([SwitchInput(input)]);
         if (block.ConditionKind != ControlFlowConditionKind.None)
-            Append([new Visible(NodeKind.Condition, ConditionLabel(block.BranchValue), OperationSource(block.BranchValue))]);
+        {
+            var test = SwitchCase(block.BranchValue);
+            Append([new Visible(NodeKind.Condition, ConditionLabel(block.BranchValue, test),
+                test is SwitchLabelSyntax ? range(markers.OriginalSpan(test.Span)) : OperationSource(block.BranchValue),
+                IsCaseTest: test is not null || block.BranchValue?.Syntax.Parent is WhenClauseSyntax)]);
+        }
 
         Route(block.ConditionalSuccessor);
         Route(block.FallThroughSuccessor);
@@ -378,8 +407,6 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                     yield return item;
             foreach (var item in Evaluate(assignment.Value))
                 yield return item;
-            if (assignment is ICompoundAssignmentOperation { OperatorMethod: { } op })
-                yield return Call(op, operation, op.Name);
             foreach (var item in AccessDynamicStorage(assignment.Target, write: true))
                 yield return item;
             if (assignment is IDeconstructionAssignmentOperation)
@@ -393,8 +420,6 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                 yield return item;
             foreach (var item in AccessDynamicStorage(increment.Target, write: false))
                 yield return item;
-            if (increment.OperatorMethod is { } op)
-                yield return Call(op, operation, op.Name);
             foreach (var item in AccessDynamicStorage(increment.Target, write: true))
                 yield return item;
             yield break;
@@ -436,15 +461,6 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                 break;
             case IObjectCreationOperation creation when creation.Constructor is { } ctor:
                 yield return Call(ctor, creation, "new " + ctor.ContainingType.Name + "()");
-                break;
-            case IConversionOperation { OperatorMethod: { } conversion }:
-                yield return Call(conversion, operation, conversion.Name);
-                break;
-            case IBinaryOperation { OperatorMethod: { } binary }:
-                yield return Call(binary, operation, binary.Name);
-                break;
-            case IUnaryOperation { OperatorMethod: { } unary }:
-                yield return Call(unary, operation, unary.Name);
                 break;
             case IInvalidOperation:
                 MarkPartial("未解決の式があります。呼び出し先や経路の一部は確認できません。");
@@ -507,6 +523,8 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
 
     private Visible? Call(IMethodSymbol method, IOperation operation, string label, bool virtualCall = false, ITypeSymbol? receiver = null)
     {
+        if (method.MethodKind is MethodKind.UserDefinedOperator or MethodKind.Conversion)
+            return null;
         var definition = method.ReducedFrom ?? method;
         if (excludedCalls is { Patterns.Count: > 0 } && !notices.Contains(ExclusionTimeout))
         {
@@ -542,18 +560,32 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
 
     private static string Name(ISymbol symbol) => symbol.ContainingType.Name + "." + symbol.Name;
 
-    private string ConditionLabel(IOperation? value)
+    private Visible SwitchInput(ExpressionSyntax input) =>
+        new(NodeKind.Condition, $"switch ({ShortLabel(input)})", range(markers.OriginalSpan(input.Span)));
+
+    private static SyntaxNode? SwitchCase(IOperation? value) => value?.Syntax switch
+    {
+        CaseSwitchLabelSyntax or CasePatternSwitchLabelSyntax => value.Syntax,
+        ExpressionSyntax { Parent: CaseSwitchLabelSyntax label } => label,
+        PatternSyntax { Parent: CasePatternSwitchLabelSyntax label } => label,
+        SwitchExpressionArmSyntax arm when value is IIsPatternOperation => arm,
+        _ => null
+    };
+
+    private string ConditionLabel(IOperation? value, SyntaxNode? test)
     {
         if (value is null)
             return "条件";
+        if (test is CaseSwitchLabelSyntax constant)
+            return "case " + ShortLabel(constant.Value) + " に一致？";
+        if (test is CasePatternSwitchLabelSyntax pattern)
+            return "case " + ShortLabel(pattern.Pattern) + " に一致？";
+        if (test is SwitchExpressionArmSyntax arm)
+            return "case " + ShortLabel(arm.Pattern) + " に一致？";
         if (value is IIsNullOperation)
             return "null？";
-        if (value.Syntax is CaseSwitchLabelSyntax { Value: { } constant })
-            return "case " + ShortLabel(constant) + " に一致？";
-        if (value is IIsPatternOperation && value.Syntax is CasePatternSwitchLabelSyntax { Pattern: { } pattern })
-            return "case " + ShortLabel(pattern) + " に一致？";
         if (value.Syntax is ExpressionSyntax expression)
-            return ShortLabel(expression) + "？";
+            return (expression.Parent is WhenClauseSyntax ? "when " : "") + ShortLabel(expression) + "？";
 
         return value is IIsPatternOperation or IIsTypeOperation ? "パターン／型に一致？" : "条件";
     }
@@ -575,7 +607,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private string Add(Visible visible, bool reachable)
     {
         var id = "n" + nodes.Count;
-        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable));
+        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest));
         return id;
     }
 

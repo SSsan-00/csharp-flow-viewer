@@ -28,3 +28,27 @@ body[data-theme="light"] { --link: #43516b; --node-fill: #dceeea; --condition-fi
 #node-menu { position: absolute; z-index: 1; padding: 4px; border: 1px solid var(--link); border-radius: 5px; background: var(--surface); }
 #node-menu button { display: block; width: 100%; padding: 5px 12px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 #node-menu button:hover, #node-menu button:focus-visible { background: var(--condition-fill); }
+
+/* A marked node keeps its amber outline inside an inherited gray region. */
+#graph .node.marked.grayed { opacity: 1; }
+#graph .node.marked.grayed > :is(rect, polygon, path, circle) { stroke: var(--mark-stroke) !important; }
+#graph .node.marked.grayed text { opacity: .52; }
+#graph .node.search-match > :is(rect, polygon, path, circle) { stroke-dasharray: 4 3; }
+#vertical-scroll {
+  position: absolute; top: 0; bottom: 0; right: 5px; width: 22px;
+  overflow-x: hidden; overflow-y: scroll; background: var(--surface);
+  scrollbar-color: var(--link) var(--surface);
+}
+#vertical-scroll > div { width: 1px; pointer-events: none; }
+#preview-search {
+  position: absolute; top: 8px; right: 33px; z-index: 1;
+  max-width: calc(100% - 41px); align-items: center; gap: 4px; padding: 5px;
+  border: 1px solid var(--link); border-radius: 5px; background: var(--surface); color: inherit;
+}
+#preview-search:not([hidden]) { display: flex; }
+#preview-search input { min-width: 32px; width: 150px; }
+#preview-search output { font-variant-numeric: tabular-nums; white-space: nowrap; }
+#preview-search input, #preview-search button {
+  font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--link); border-radius: 3px;
+}
+#preview-search button:disabled { opacity: .45; }

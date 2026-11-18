@@ -111,7 +111,7 @@
           </ListBox>
         </Grid>
       </Border>
-      <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Columns"/>
+      <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Center" VerticalAlignment="Stretch" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext"/>
       <Border Grid.Column="2" Style="{StaticResource Panel}">
         <Grid>
           <Grid.RowDefinitions>
@@ -120,12 +120,14 @@
           <Border Style="{StaticResource PanelHeader}">
             <DockPanel>
               <TextBlock DockPanel.Dock="Left" Text="◇" Foreground="{DynamicResource AccentBrush}" FontSize="16" Margin="0,0,9,0" VerticalAlignment="Center"/>
+              <Button DockPanel.Dock="Right" x:Name="PreviewSearchButton" Content="検索" Click="FindInPreview"
+                      ToolTip="図を検索 (Ctrl+F)" IsEnabled="False" Margin="8,0,0,0"/>
               <TextBlock x:Name="FlowTitle" Text="制御フロー" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             </DockPanel>
           </Border>
           <Border Grid.Row="1" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="6,4">
             <DockPanel LastChildFill="False">
-              <Button DockPanel.Dock="Left" x:Name="BackButton" Content="‹" Click="Back" ToolTip="前のメソッドに戻る (Alt+←)" Padding="8,3" IsEnabled="False"/>
+              <Button DockPanel.Dock="Left" x:Name="BackButton" Content="‹ 戻る" Click="Back" ToolTip="呼び出し元に戻る (Alt+←)" Padding="8,3" IsEnabled="False"/>
               <Button DockPanel.Dock="Left" x:Name="CopyButton" Content="コピー" Click="Copy" ToolTip="Mermaid をコピー" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
               <Button DockPanel.Dock="Left" x:Name="SaveButton" Content=".mmd 保存" Click="Save" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
               <Button DockPanel.Dock="Right" x:Name="FitButton" Content="全体" Click="Fit" ToolTip="図を全体表示" Padding="6,3" IsEnabled="False"/>
@@ -137,7 +139,7 @@
           </Border>
 
           <Grid Grid.Row="2" Background="{DynamicResource CanvasBrush}">
-            <Grid x:Name="PreviewSurface" Opacity="0" IsHitTestVisible="False">
+            <Grid x:Name="PreviewSurface" ClipToBounds="True" Opacity="0" IsHitTestVisible="False">
               <web:WebView2CompositionControl x:Name="Web" Focusable="False"/>
             </Grid>
             <ListBox x:Name="NodesBox" Visibility="Collapsed" Margin="8" SelectionChanged="NodeChanged" AutomationProperties.Name="フローノード">
@@ -172,7 +174,7 @@
           </Border>
         </Grid>
       </Border>
-      <GridSplitter Grid.Column="3" Width="8" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Columns"/>
+      <GridSplitter Grid.Column="3" Width="6" HorizontalAlignment="Center" VerticalAlignment="Stretch" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext"/>
 
       <Border Grid.Column="4" Style="{StaticResource Panel}">
         <Grid>
@@ -184,7 +186,6 @@
             </DockPanel>
           </Border>
           <edit:TextEditor Grid.Row="1" x:Name="Editor" IsReadOnly="True" ShowLineNumbers="True" WordWrap="True"
-                           PreviewMouseLeftButtonUp="EditorClicked"
                            FontFamily="Cascadia Mono, Consolas" FontSize="13" Padding="8,8,6,8"
                            Background="{DynamicResource CanvasBrush}" Foreground="{DynamicResource TextBrush}"
                            LineNumbersForeground="{DynamicResource MutedBrush}" HorizontalScrollBarVisibility="Disabled"

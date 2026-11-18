@@ -20,8 +20,9 @@ public sealed record ProjectFile(DocumentId Id, string Label, string Path)
     public override string ToString() => Label;
 }
 
-public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, string[] notices, string? intermediateDirectory) : IDisposable
+public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, string[] notices, string? intermediateDirectory, ProjectOptions options) : IDisposable
 {
+    public ProjectOptions Options { get; } = options;
     public IReadOnlyList<string> Notices { get; } = notices;
     public IReadOnlyList<ProjectFile> Files { get; } = project.Documents
         .Where(doc => doc.FilePath is { } path && path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) && File.Exists(path)
@@ -104,7 +105,7 @@ public static class ProjectLoader
                 solution = solution.WithProjectAnalyzerReferences(referenceProject.Id, []);
             project = solution.GetProject(project.Id)!;
             var notices = workspace.Diagnostics.Select(DescribeWorkspaceDiagnostic).Distinct().ToArray();
-            return new ProjectSession(workspace, project, notices, intermediate);
+            return new ProjectSession(workspace, project, notices, intermediate, options);
         }
         catch
         {
