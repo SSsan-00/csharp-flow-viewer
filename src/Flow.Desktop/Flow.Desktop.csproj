@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>csharp-flow-viewer</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Flow.Analysis/Flow.Analysis.csproj" />
+    <ProjectReference Include="../Flow.Mermaid/Flow.Mermaid.csproj" />
+    <PackageReference Include="AvalonEdit" Version="6.3.1.120" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3650.58" />
+    <EmbeddedResource Include="Preview/*.html;Preview/*.js;Preview/*.css" />
+    <EmbeddedResource Include="../../LICENSE" LogicalName="Notices.LICENSE.txt" />
+    <EmbeddedResource Include="../../THIRD-PARTY-NOTICES.md" LogicalName="Notices.THIRD-PARTY-NOTICES.md" />
+    <EmbeddedResource Include="../../licenses/*" LogicalName="Notices.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../tools/preview/THIRD-PARTY-LICENSES.txt" LogicalName="Notices.Mermaid-THIRD-PARTY-LICENSES.txt" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,182 @@
+<Window x:Class="Flow.Desktop.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:edit="http://icsharpcode.net/sharpdevelop/avalonedit"
+        xmlns:web="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="csharp-flow-viewer" Width="1440" Height="860" MinWidth="900" MinHeight="560"
+        Background="{DynamicResource WindowBrush}" Foreground="{DynamicResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" WindowStartupLocation="CenterScreen">
+  <Grid Margin="14,9,14,10">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="48"/>
+      <RowDefinition Height="47"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <DockPanel LastChildFill="False" Margin="0,0,0,6">
+      <Border Background="{DynamicResource SelectedBrush}" Width="35" Height="33" CornerRadius="8" VerticalAlignment="Center" DockPanel.Dock="Left">
+        <TextBlock Text="C#" FontWeight="Bold" FontSize="16" Foreground="{DynamicResource AccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+      <TextBlock DockPanel.Dock="Left" Text="csharp-flow-viewer" FontSize="19" FontWeight="SemiBold" VerticalAlignment="Center" Margin="11,0,0,0"/>
+      <Button DockPanel.Dock="Right" x:Name="ThemeButton" Click="ToggleTheme" VerticalAlignment="Center" MinWidth="95" AutomationProperties.Name="テーマを切り替え"/>
+    </DockPanel>
+
+    <Border Grid.Row="1" Style="{StaticResource Panel}" Margin="0,0,0,8" Padding="7,3">
+      <DockPanel>
+        <Button DockPanel.Dock="Left" x:Name="OpenButton" Content="プロジェクトを開く…" Click="OpenProject" ToolTip="Ctrl+O" Margin="0,0,12,0"/>
+        <ComboBox DockPanel.Dock="Right" x:Name="SettingsBox" Width="180" Margin="12,0,0,0"
+                  AutomationProperties.Name="構成と対象フレームワーク" SelectionChanged="ProjectOptionsChanged" IsEnabled="False"/>
+        <TextBlock DockPanel.Dock="Right" x:Name="SdkLabel" Style="{StaticResource Muted}" VerticalAlignment="Center"/>
+        <TextBlock x:Name="ProjectLabel" Text="プロジェクト未選択" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+      </DockPanel>
+    </Border>
+
+    <Grid Grid.Row="2">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="265" MinWidth="190"/>
+        <ColumnDefinition Width="8"/>
+        <ColumnDefinition Width="1.60*" MinWidth="340"/>
+        <ColumnDefinition Width="8"/>
+        <ColumnDefinition Width="1*" MinWidth="250"/>
+      </Grid.ColumnDefinitions>
+
+      <Border Style="{StaticResource Panel}">
+        <Grid x:Name="BrowserPane">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="42"/><RowDefinition Height="Auto"/><RowDefinition Height="1.1*"/>
+            <RowDefinition Height="40"/><RowDefinition Height="Auto"/><RowDefinition Height="2*"/>
+          </Grid.RowDefinitions>
+          <Border Style="{StaticResource PanelHeader}">
+            <TextBlock Text="プロジェクト" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          </Border>
+          <TextBlock x:Name="FileCount" Grid.Row="1" Text="対象ファイル" Style="{StaticResource Muted}" Margin="12,9,12,4"/>
+          <ListBox Grid.Row="2" x:Name="FilesBox" Margin="5,0,5,6" SelectionChanged="FileChanged" AutomationProperties.Name="対象ファイル">
+            <ListBox.ItemTemplate><DataTemplate>
+              <DockPanel ToolTip="{Binding Label}">
+                <TextBlock DockPanel.Dock="Left" Text="C#" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}" Margin="0,0,8,0"/>
+                <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis"/>
+              </DockPanel>
+            </DataTemplate></ListBox.ItemTemplate>
+          </ListBox>
+          <Border Grid.Row="3" Background="{DynamicResource RaisedBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,1" Padding="12,8">
+            <TextBlock x:Name="MethodCount" Text="メソッド" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          </Border>
+          <Grid Grid.Row="4" Margin="9,8,9,5">
+            <TextBox x:Name="Filter" TextChanged="FilterChanged" ToolTip="名前、シグネチャ、または行番号" AutomationProperties.Name="メソッドを検索"/>
+            <TextBlock Text="メソッドを検索" IsHitTestVisible="False" Margin="8,0,7,0" VerticalAlignment="Center">
+              <TextBlock.Style>
+                <Style TargetType="TextBlock" BasedOn="{StaticResource Muted}">
+                  <Setter Property="Visibility" Value="Collapsed"/>
+                  <Style.Triggers>
+                    <MultiDataTrigger>
+                      <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding Text, ElementName=Filter}" Value=""/>
+                        <Condition Binding="{Binding IsKeyboardFocused, ElementName=Filter}" Value="False"/>
+                      </MultiDataTrigger.Conditions>
+                      <Setter Property="Visibility" Value="Visible"/>
+                    </MultiDataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </TextBlock.Style>
+            </TextBlock>
+          </Grid>
+          <ListBox Grid.Row="5" x:Name="MethodsBox" Margin="5,0,5,6" SelectionChanged="MethodChanged" AutomationProperties.Name="メソッド">
+            <ListBox.ItemTemplate><DataTemplate>
+              <DockPanel ToolTip="{Binding}">
+                <TextBlock DockPanel.Dock="Left" Text="ƒ" FontStyle="Italic" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}" Margin="0,0,8,0"/>
+                <TextBlock DockPanel.Dock="Right" Text="{Binding Source.Line, StringFormat=L{0}}" Style="{StaticResource Muted}" Margin="8,0,0,0"/>
+                <TextBlock Text="{Binding Signature}" TextTrimming="CharacterEllipsis"/>
+              </DockPanel>
+            </DataTemplate></ListBox.ItemTemplate>
+          </ListBox>
+        </Grid>
+      </Border>
+      <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Columns"/>
+      <Border Grid.Column="2" Style="{StaticResource Panel}">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="42"/><RowDefinition Height="39"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <Border Style="{StaticResource PanelHeader}">
+            <DockPanel>
+              <TextBlock DockPanel.Dock="Left" Text="◇" Foreground="{DynamicResource AccentBrush}" FontSize="16" Margin="0,0,9,0" VerticalAlignment="Center"/>
+              <TextBlock x:Name="FlowTitle" Text="制御フロー" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+          </Border>
+          <Border Grid.Row="1" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="6,4">
+            <DockPanel LastChildFill="False">
+              <Button DockPanel.Dock="Left" x:Name="BackButton" Content="‹" Click="Back" ToolTip="前のメソッドに戻る (Alt+←)" Padding="8,3" IsEnabled="False"/>
+              <Button DockPanel.Dock="Left" x:Name="CopyButton" Content="コピー" Click="Copy" ToolTip="Mermaid をコピー" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
+              <Button DockPanel.Dock="Left" x:Name="SaveButton" Content=".mmd 保存" Click="Save" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
+              <Button DockPanel.Dock="Right" x:Name="FitButton" Content="全体" Click="Fit" ToolTip="図を全体表示" Padding="6,3" IsEnabled="False"/>
+              <Button DockPanel.Dock="Right" x:Name="ZoomIn" Content="+" Click="Zoom" ToolTip="拡大" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
+              <TextBlock DockPanel.Dock="Right" x:Name="ZoomLabel" Text="—" MinWidth="39" HorizontalAlignment="Center" TextAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Muted}"/>
+              <Button DockPanel.Dock="Right" x:Name="ZoomOut" Content="−" Click="Zoom" ToolTip="縮小" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
+              <Button DockPanel.Dock="Right" x:Name="ListButton" Content="一覧" Click="ToggleList" ToolTip="図とノード一覧を切り替え" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
+            </DockPanel>
+          </Border>
+
+          <Grid Grid.Row="2" Background="{DynamicResource CanvasBrush}">
+            <web:WebView2CompositionControl x:Name="Web" Visibility="Collapsed" Focusable="True"/>
+            <ListBox x:Name="NodesBox" Visibility="Collapsed" Margin="8" SelectionChanged="NodeChanged" AutomationProperties.Name="フローノード">
+              <ListBox.ItemTemplate><DataTemplate>
+                <DockPanel>
+                  <TextBlock DockPanel.Dock="Right" Text="{Binding Source.Line, StringFormat=L{0}}" Style="{StaticResource Muted}" Margin="8,0,0,0"/>
+                  <TextBlock Text="{Binding Label}" TextWrapping="Wrap"/>
+                </DockPanel>
+              </DataTemplate></ListBox.ItemTemplate>
+            </ListBox>
+            <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="25">
+              <Border Width="46" Height="46" CornerRadius="12" Background="{DynamicResource SelectedBrush}" Margin="0,0,0,13">
+                <TextBlock Text="◇" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource AccentBrush}"/>
+              </Border>
+              <TextBlock x:Name="EmptyTitle" Text="プロジェクトを選択" FontSize="19" FontWeight="SemiBold" TextAlignment="Center" TextWrapping="Wrap"/>
+              <TextBlock x:Name="EmptyHelp" Text="信頼できる .csproj を開いてください。" Style="{StaticResource Muted}" Margin="0,7,0,0" TextAlignment="Center" TextWrapping="Wrap"/>
+            </StackPanel>
+          </Grid>
+          <Border Grid.Row="3" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,6">
+            <DockPanel>
+              <Button x:Name="FollowButton" DockPanel.Dock="Right" Click="Follow" Content="呼び出し先へ ›" IsEnabled="False" Margin="8,0,0,0"/>
+              <TextBlock x:Name="NodeLabel" Text="ノードを選ぶとソース行へ移動" Style="{StaticResource Muted}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+          </Border>
+        </Grid>
+      </Border>
+      <GridSplitter Grid.Column="3" Width="8" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Columns"/>
+
+      <Border Grid.Column="4" Style="{StaticResource Panel}">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="42"/><RowDefinition Height="*"/><RowDefinition Height="31"/></Grid.RowDefinitions>
+          <Border Style="{StaticResource PanelHeader}">
+            <DockPanel>
+              <TextBlock DockPanel.Dock="Left" Text="C#" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold" Margin="0,0,9,0" VerticalAlignment="Center"/>
+              <TextBlock x:Name="SourceTitle" Text="ソース" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+          </Border>
+          <edit:TextEditor Grid.Row="1" x:Name="Editor" IsReadOnly="True" ShowLineNumbers="True"
+                           FontFamily="Cascadia Mono, Consolas" FontSize="13" Padding="8,8,6,8"
+                           Background="{DynamicResource CanvasBrush}" Foreground="{DynamicResource TextBrush}"
+                           LineNumbersForeground="{DynamicResource MutedBrush}" HorizontalScrollBarVisibility="Auto"
+                           VerticalScrollBarVisibility="Auto" AutomationProperties.Name="C# ソース"/>
+          <TextBlock Grid.Row="2" x:Name="SourceLocation" Style="{StaticResource Muted}" Text="—" Margin="11,6,10,4"/>
+        </Grid>
+      </Border>
+    </Grid>
+
+    <Border Grid.Row="3" Style="{StaticResource Panel}" Margin="0,8,0,0" Padding="10,6">
+      <DockPanel>
+        <Button DockPanel.Dock="Right" Content="ライセンス" Click="ShowLicenses" Margin="6,0,0,0" VerticalAlignment="Top"/>
+        <Button DockPanel.Dock="Right" x:Name="DiagnosticButton" Content="診断  ·  0" Click="ToggleDiagnostics" Margin="10,0,0,0" VerticalAlignment="Top"/>
+        <StackPanel>
+          <DockPanel>
+            <TextBlock x:Name="StatusDot" DockPanel.Dock="Left" Text="●" Foreground="{DynamicResource GoodBrush}" Margin="0,0,8,0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="StatusText" Text="信頼できる C# プロジェクトを開いてください。" VerticalAlignment="Center" MinHeight="22" TextWrapping="Wrap"/>
+          </DockPanel>
+          <ListBox x:Name="DiagnosticsBox" Visibility="Collapsed" MaxHeight="155" Margin="10,4,0,0" AutomationProperties.Name="診断の詳細">
+            <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap"/></DataTemplate></ListBox.ItemTemplate>
+          </ListBox>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>

@@ -1,0 +1,15 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <!-- Roslyn evaluates projects in its separate build host, using the target SDK's MSBuild. -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'Flow.Analysis' Or '$(MSBuildProjectName)' == 'Flow.Desktop' Or '$(MSBuildProjectName)' == 'Flow.Tests'">
+    <PackageReference Include="Microsoft.Build" Version="17.14.28" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.14.28" />
+    <PackageReference Include="Microsoft.Build.Tasks.Core" Version="17.14.28" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.14.28" ExcludeAssets="runtime" />
+  </ItemGroup>
+</Project>

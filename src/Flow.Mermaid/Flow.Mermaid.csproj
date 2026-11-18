@@ -1,0 +1,3 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup><ProjectReference Include="../Flow.Model/Flow.Model.csproj" /></ItemGroup>
+</Project>

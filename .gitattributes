@@ -1,0 +1,3 @@
+src/Flow.Desktop/Preview/mermaid.bundle.js -diff
+licenses/** whitespace=cr-at-eol,-trailing-space
+tools/preview/THIRD-PARTY-LICENSES.txt whitespace=cr-at-eol,-trailing-space

@@ -1,0 +1,551 @@
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Windows.Documents;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Input;
+using Flow.Analysis;
+using Flow.Mermaid;
+using Flow.Model;
+using Microsoft.Win32;
+
+namespace Flow.Desktop;
+
+public partial class MainWindow : Window
+{
+    private const int MaxPreviewNodes = 650;
+    private const int MaxPreviewEdges = 1000;
+    private const int MaxPreviewCharacters = 380_000;
+    private readonly PreviewHost preview;
+    private readonly CancellationTokenSource lifetime = new();
+    private readonly Stack<int> history = new();
+    private readonly List<string> diagnostics = [];
+    private ProjectSession? project;
+    private SourceFile? source;
+    private FlowDiagram? diagram;
+    private Dictionary<string, FlowNode> nodes = [];
+    private string? path;
+    private string? mermaid;
+    private MethodEntry? method;
+    private FlowNode? selectedNode;
+    private bool dark;
+    private bool busy;
+    private bool ready;
+    private bool rendered;
+    private bool showList;
+    private bool previewUnavailable;
+    private bool closed;
+    private int version;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        dark = Theme.Read();
+        ApplyTheme();
+        preview = new PreviewHost(Web);
+        preview.Message += OnPreviewMessage;
+        Loaded += StartPreview;
+        Closed += CloseViewer;
+        SetBusy(false);
+    }
+
+    private async void StartPreview(object sender, RoutedEventArgs args)
+    {
+        Loaded -= StartPreview;
+        try { await preview.InitializeAsync(); }
+        catch (Exception) when (!closed)
+        {
+            SetPreviewUnavailable("WebView2 プレビューを起動できません。Evergreen Runtime x64 と利用環境を確認してください。ノード一覧と Mermaid 出力は利用できます。");
+        }
+        catch (Exception) when (closed) { }
+    }
+
+    private void CloseViewer(object? sender, EventArgs args)
+    {
+        closed = true;
+        lifetime.Cancel();
+        project?.Dispose();
+        preview.Close();
+    }
+
+    private void SetPreviewUnavailable(string message)
+    {
+        previewUnavailable = true;
+        if (diagram is not null) showList = true;
+        RefreshDiagnostics();
+        if (!diagnostics.Contains(message)) diagnostics.Add(message);
+        UpdateDiagnosticList();
+        UpdateSurface();
+    }
+
+    private async void OpenProject(object? sender, RoutedEventArgs args)
+    {
+        if (busy) return;
+        var dialog = new OpenFileDialog { Title = "信頼できる C# プロジェクトを開く", Filter = "C# プロジェクト (*.csproj)|*.csproj", CheckFileExists = true };
+        if (dialog.ShowDialog(this) != true) return;
+        SetBusy(true);
+        try
+        {
+            path = dialog.FileName;
+            ResetProject();
+            ProjectLabel.Text = Path.GetFileName(path);
+            ProjectLabel.ToolTip = path;
+            SdkLabel.Text = "";
+            SettingsBox.ItemsSource = null;
+            SetState("プロジェクトを評価中", "SDK と構成を確認しています…");
+            SetStatus("SDK とプロジェクト設定を確認中");
+            var settings = await ProjectLoader.InspectAsync(path, lifetime.Token);
+            if (closed) return;
+            SdkLabel.Text = ".NET SDK " + settings.SdkVersion;
+            SettingsBox.ItemsSource = settings.Options;
+            SettingsBox.SelectedIndex = 0;
+            await LoadProject(settings.Options[0]);
+        }
+        catch (Exception exception) when (!closed) { ShowFailure(exception, "プロジェクトを開けません"); }
+        catch (Exception) when (closed) { }
+        finally { if (!closed) SetBusy(false); }
+    }
+
+    private async void ProjectOptionsChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (busy || path is null || SettingsBox.SelectedItem is not ProjectOptions options) return;
+        SetBusy(true);
+        try { await LoadProject(options, (FilesBox.SelectedItem as ProjectFile)?.Path); }
+        catch (Exception exception) when (!closed) { ShowFailure(exception, "構成を読み込めません"); }
+        catch (Exception) when (closed) { }
+        finally { if (!closed) SetBusy(false); }
+    }
+
+    private async Task LoadProject(ProjectOptions options, string? previousFile = null)
+    {
+        ResetProject();
+        SetState("プロジェクトを読み込み中", "MSBuild でソースと参照情報を取得しています…");
+        SetStatus(options + " の設計時ビルドを読み込み中");
+        var loaded = await ProjectLoader.OpenAsync(path!, options, lifetime.Token);
+        if (closed) { loaded.Dispose(); return; }
+        project = loaded;
+        FilesBox.ItemsSource = loaded.Files;
+        FileCount.Text = $"対象ファイル  ·  {loaded.Files.Count:N0}";
+        RefreshDiagnostics();
+        if (loaded.Files.Count == 0)
+        {
+            SetState("対象ファイルがありません", "構成、対象フレームワーク、Compile 項目と診断を確認してください。");
+            SetStatus("選択できる C# ファイルがありません。", attention: true);
+            return;
+        }
+        if (loaded.Files.FirstOrDefault(file => file.Path == previousFile) is { } previous)
+        {
+            FilesBox.SelectedItem = previous;
+            await LoadFile(previous);
+            return;
+        }
+        SetState("対象ファイルを選択", "左の一覧から .cs または .cshtml.cs を選んでください。");
+        SetStatus(loaded.Notices.Count == 0 ? "対象ファイルを選択してください。" : "MSBuild 診断があります。対象ファイルを選択できます。",
+            attention: loaded.Notices.Count != 0);
+    }
+
+    private async void FileChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (busy || project is null || FilesBox.SelectedItem is not ProjectFile file) return;
+        SetBusy(true);
+        try { await LoadFile(file); }
+        catch (Exception exception) when (!closed) { ShowFailure(exception, "ソースを解析できません"); }
+        catch (Exception) when (closed) { }
+        finally { if (!closed) SetBusy(false); }
+    }
+
+    private async Task LoadFile(ProjectFile file)
+    {
+        ResetFile();
+        SetState("ソースを解析中", "Roslyn で型とメソッドを調べています…");
+        SetStatus("コンパイルとセマンティックモデルを取得中");
+        var current = project!;
+        var loaded = await Task.Run(() => current.ReadAsync(file, lifetime.Token), lifetime.Token);
+        if (closed) return;
+        source = loaded;
+        Editor.Text = loaded.Text;
+        SourceTitle.Text = file.Label;
+        SourceTitle.ToolTip = file.Label;
+        MethodsBox.ItemsSource = loaded.Methods;
+        CollectionViewSource.GetDefaultView(MethodsBox.ItemsSource).Filter =
+            entry => entry is MethodEntry item && item.ToString().Contains(Filter.Text.Trim(), StringComparison.OrdinalIgnoreCase);
+        UpdateMethodCount();
+        RefreshDiagnostics();
+        SetState(loaded.Methods.Count > 0 ? "メソッドを選択" : "メソッドが見つかりません",
+            loaded.Methods.Count > 0 ? "左の一覧でメソッドを選ぶと、制御フローを表示します。" : "ほかのファイルを選ぶか、構成と診断を確認してください。");
+        SetStatus(loaded.Notices.Any(IsPartial) ? "部分解析 · 参照やコンパイル条件を診断で確認できます。" : "ソースの読み込み完了",
+            attention: loaded.Notices.Any(IsPartial));
+    }
+
+    private async void MethodChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (busy || source is null || MethodsBox.SelectedItem is not MethodEntry entry) return;
+        SetBusy(true);
+        var currentSource = source;
+        try
+        {
+            ResetDiagram();
+            method = entry;
+            FlowTitle.Text = entry.Signature;
+            FlowTitle.ToolTip = entry.Signature;
+            NavigateSource(entry.Source with { Length = 0 });
+            SetState("制御フローを解析中", "Roslyn CFG から図を組み立てています…");
+            SetStatus("選択したメソッドを解析中");
+            var result = await Task.Run(() => currentSource.Analyze(entry.Id, lifetime.Token), lifetime.Token);
+            if (closed) return;
+            diagram = result;
+            nodes = result.Nodes.ToDictionary(node => node.Id);
+            NodesBox.ItemsSource = result.Nodes;
+            mermaid = result.Nodes.Count > 0 ? MermaidWriter.Write(result) : null;
+            var tooLarge = PreviewTooLarge();
+            showList = previewUnavailable || tooLarge;
+            SetState("フロー図を取得できません", "診断を確認するか、別のメソッドを選んでください。");
+            RefreshDiagnostics();
+            UpdateSurface();
+            RequestRender();
+            SetStatus(result.IsPartial ? "部分解析 · 診断を確認してください。"
+                : tooLarge ? "大きな図 · ノード一覧と .mmd 出力を利用できます。"
+                : $"{result.Nodes.Count:N0} ノード  /  {result.Edges.Count:N0} 遷移  ·  単純な代入値は図から省略", result.IsPartial || tooLarge);
+        }
+        catch (Exception exception) when (!closed) { ShowFailure(exception, "フロー図を取得できません"); }
+        catch (Exception) when (closed) { }
+        finally { if (!closed) SetBusy(false); }
+    }
+
+    private void ResetProject()
+    {
+        project?.Dispose();
+        project = null;
+        FilesBox.ItemsSource = null;
+        FileCount.Text = "対象ファイル";
+        ResetFile();
+    }
+
+    private void ResetFile()
+    {
+        source = null;
+        MethodsBox.ItemsSource = null;
+        MethodCount.Text = "メソッド";
+        Filter.Clear();
+        history.Clear();
+        Editor.Clear();
+        SourceTitle.Text = "ソース";
+        SourceTitle.ToolTip = null;
+        SourceLocation.Text = "—";
+        ResetDiagram();
+        RefreshDiagnostics();
+    }
+
+    private void ResetDiagram()
+    {
+        ++version;
+        ZoomLabel.Text = "—";
+        diagram = null;
+        method = null;
+        mermaid = null;
+        nodes.Clear();
+        NodesBox.ItemsSource = null;
+        selectedNode = null;
+        NodeLabel.Text = "ノードを選ぶとソース行へ移動";
+        NodeLabel.ToolTip = null;
+        FlowTitle.Text = "制御フロー";
+        FlowTitle.ToolTip = null;
+        UpdateSurface();
+    }
+
+    private void FilterChanged(object sender, TextChangedEventArgs args)
+    {
+        if (MethodsBox?.ItemsSource is not { } entries) return;
+        var retained = MethodsBox.SelectedItem;
+        var view = CollectionViewSource.GetDefaultView(entries);
+        view.Refresh();
+        if (retained is not null && view.Contains(retained))
+            MethodsBox.SelectedItem = retained;
+        UpdateMethodCount();
+    }
+
+    private void UpdateMethodCount() => MethodCount.Text = $"メソッド  ·  {MethodsBox.Items.Count:N0} / {source?.Methods.Count:N0}";
+
+    private void NodeChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (NodesBox.SelectedItem is FlowNode node)
+            SelectNode(node);
+    }
+
+    private void SelectNode(FlowNode node)
+    {
+        selectedNode = node;
+        NodeLabel.Text = (node.Source is { } location ? $"L{location.Line}  ·  " : "") + node.Label
+            + (node.IsReachable ? "" : "  ·  到達不能");
+        NodeLabel.ToolTip = NodeLabel.Text;
+        if (node.Source is { } range) NavigateSource(range);
+        FollowButton.IsEnabled = !busy && node.TargetMethod is not null;
+    }
+
+    private void NavigateSource(SourceRange location)
+    {
+        Editor.Select(location.Offset, location.Length);
+        Editor.ScrollTo(location.Line, Editor.Document.GetLocation(location.Offset).Column);
+        SourceLocation.Text = $"L{location.Line}  /  {Editor.LineCount:N0} 行";
+    }
+
+    private void Follow(object sender, RoutedEventArgs args)
+    {
+        if (busy || selectedNode?.TargetMethod is not { } target || method is null) return;
+        history.Push(method.Id);
+        if (target == method.Id)
+        {
+            NavigateSource(method.Source with { Length = 0 });
+            SetBusy(false);
+            return;
+        }
+        SelectMethod(target);
+    }
+
+    private void Back(object? sender, RoutedEventArgs args)
+    {
+        if (busy || !history.TryPop(out var previous)) return;
+        SelectMethod(previous);
+        if (!busy) SetBusy(false);
+    }
+
+    private void SelectMethod(int id)
+    {
+        if (source?.Methods.FirstOrDefault(item => item.Id == id) is not { } entry) return;
+        if (!MethodsBox.Items.Contains(entry)) Filter.Clear();
+        MethodsBox.SelectedItem = entry;
+        MethodsBox.ScrollIntoView(entry);
+        if (method?.Id == entry.Id) NavigateSource(entry.Source with { Length = 0 });
+    }
+
+    private void Copy(object sender, RoutedEventArgs args)
+    {
+        if (mermaid is null) return;
+        try { Clipboard.SetText(mermaid); SetStatus("Mermaid をクリップボードにコピーしました。"); }
+        catch (ExternalException) { SetStatus("クリップボードを使用できません。時間をおいて再試行してください。", true); }
+    }
+
+    private void Save(object sender, RoutedEventArgs args)
+    {
+        if (mermaid is null) return;
+        var dialog = new SaveFileDialog
+        {
+            Filter = "Mermaid (*.mmd)|*.mmd", DefaultExt = ".mmd", AddExtension = true, FileName = "flow.mmd",
+            Title = "Mermaid 図を保存"
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        try { File.WriteAllText(dialog.FileName, mermaid); SetStatus("Mermaid 図を保存しました。"); }
+        catch (IOException) { SetStatus("保存できません。保存先のファイルと空き容量を確認してください。", true); }
+        catch (UnauthorizedAccessException) { SetStatus("保存先への書き込み権限を確認してください。", true); }
+    }
+
+    private void ToggleTheme(object sender, RoutedEventArgs args)
+    {
+        dark = !dark;
+        ApplyTheme();
+        if (!Theme.Save(dark)) SetStatus("テーマ設定を保存できません。", true);
+        RequestRender();
+    }
+
+    private void ApplyTheme()
+    {
+        Theme.Apply(this, Editor, dark);
+        ThemeButton.Content = dark ? "◐  ダーク" : "☼  ライト";
+    }
+
+    private void OnPreviewMessage(string type, JsonElement value, int requestVersion)
+    {
+        if (closed) return;
+        if (type == "ready")
+        {
+            ready = true;
+            UpdateSurface();
+            RequestRender();
+            return;
+        }
+        if (type == "process-error")
+        {
+            SetPreviewUnavailable("WebView2 のプロセスを利用できません。再起動後に再試行できます。");
+            return;
+        }
+        if (requestVersion != version) return;
+        switch (type)
+        {
+            case "zoom":
+                ZoomLabel.Text = value.GetInt32() + "%";
+                break;
+            case "node" when value.GetString() is { } id && nodes.TryGetValue(id, out var node):
+                SelectNode(node);
+                break;
+            case "error":
+                showList = true;
+                rendered = false;
+                UpdateSurface();
+                diagnostics.Add("Mermaid プレビューの描画に失敗しました。ノード一覧と出力を利用できます。");
+                UpdateDiagnosticList();
+                SetStatus("Mermaid の描画に失敗しました。", true);
+                break;
+            case "rendered":
+                rendered = true;
+                UpdateSurface();
+                if (selectedNode is { } selected) preview.Send(new { type = "select", id = selected.Id });
+                break;
+        }
+    }
+
+    private void RequestRender()
+    {
+        if (!ready || previewUnavailable || mermaid is null || PreviewTooLarge()) return;
+        rendered = false;
+        ++version;
+        preview.Send(new { type = "render", version, text = dark ? mermaid : MermaidWriter.Write(diagram!, light: true),
+            theme = dark ? "dark" : "light" });
+    }
+
+    private bool PreviewTooLarge() => diagram is { } result && (result.Nodes.Count > MaxPreviewNodes ||
+        result.Edges.Count > MaxPreviewEdges || mermaid?.Length > MaxPreviewCharacters);
+
+    private void ToggleList(object sender, RoutedEventArgs args)
+    {
+        showList = !showList;
+        UpdateSurface();
+        if (showList && selectedNode is { } node)
+        {
+            NodesBox.SelectedItem = node;
+            NodesBox.ScrollIntoView(node);
+        }
+        else if (selectedNode is { } selected)
+            preview.Send(new { type = "select", id = selected.Id });
+    }
+
+    private void Fit(object sender, RoutedEventArgs args) => preview.Send(new { type = "fit" });
+    private void Zoom(object sender, RoutedEventArgs args) => preview.Send(new { type = "zoom", factor = sender == ZoomIn ? 1.18 : 1 / 1.18 });
+
+    private void SetBusy(bool value)
+    {
+        busy = value;
+        OpenButton.IsEnabled = !value;
+        SettingsBox.IsEnabled = !value && SettingsBox.Items.Count > 1;
+        BrowserPane.IsEnabled = !value;
+        UpdateSurface();
+    }
+
+    private void UpdateSurface()
+    {
+        var hasGraph = mermaid is not null;
+        var webVisible = hasGraph && ready && !showList && !previewUnavailable;
+        var listVisible = hasGraph && (showList || !ready || previewUnavailable);
+        EmptyState.Visibility = !webVisible && !listVisible ? Visibility.Visible : Visibility.Collapsed;
+        Web.Visibility = webVisible ? Visibility.Visible : Visibility.Collapsed;
+        NodesBox.Visibility = listVisible ? Visibility.Visible : Visibility.Collapsed;
+        CopyButton.IsEnabled = SaveButton.IsEnabled = hasGraph && !busy;
+        BackButton.IsEnabled = !busy && history.Count > 0;
+        FollowButton.IsEnabled = !busy && selectedNode?.TargetMethod is not null;
+        ListButton.Content = showList ? "図" : "一覧";
+        ListButton.IsEnabled = hasGraph && ready && !previewUnavailable && !PreviewTooLarge();
+        ZoomIn.IsEnabled = ZoomOut.IsEnabled = FitButton.IsEnabled = webVisible && rendered;
+    }
+
+    private void SetState(string title, string help)
+    {
+        EmptyTitle.Text = title;
+        EmptyHelp.Text = help;
+        UpdateSurface();
+    }
+
+    private void SetStatus(string message, bool attention = false)
+    {
+        StatusText.Text = message;
+        StatusDot.SetResourceReference(TextBlock.ForegroundProperty, attention ? "WarningBrush" : "GoodBrush");
+    }
+
+    private void ShowFailure(Exception exception, string title)
+    {
+        var hint = exception is ProjectLoadException ? exception.Message
+            : "SDK、復元済み依存関係、プロジェクト設定を確認してください。";
+        var message = title + " · " + hint;
+        SetState(title, hint);
+        SetStatus(message, true);
+        diagnostics.Add(message);
+        UpdateDiagnosticList();
+    }
+
+    private static bool IsPartial(string notice) => notice.StartsWith("解析は部分的", StringComparison.Ordinal);
+
+    private void RefreshDiagnostics()
+    {
+        var previewIssue = diagnostics.FirstOrDefault(text => text.StartsWith("WebView2", StringComparison.Ordinal));
+        diagnostics.Clear();
+        if (project is not null) diagnostics.AddRange(project.Notices);
+        if (source is not null) diagnostics.AddRange(source.Notices);
+        if (diagram is not null) diagnostics.AddRange(diagram.Notices);
+        if (previewIssue is not null) diagnostics.Add(previewIssue);
+        if (PreviewTooLarge())
+            diagnostics.Add($"描画上限は {MaxPreviewNodes} ノード、{MaxPreviewEdges} 遷移、{MaxPreviewCharacters:N0} 文字です。全体の .mmd は出力できます。");
+        UpdateDiagnosticList();
+    }
+
+    private void UpdateDiagnosticList()
+    {
+        DiagnosticsBox.ItemsSource = diagnostics.Distinct().ToArray();
+        DiagnosticButton.Content = $"診断  ·  {DiagnosticsBox.Items.Count}";
+    }
+
+    private void ShowLicenses(object sender, RoutedEventArgs args)
+    {
+        const string prefix = "Notices.";
+        var assembly = typeof(MainWindow).Assembly;
+        var choices = new ComboBox { Margin = new Thickness(0, 0, 0, 8),
+            ItemsSource = assembly.GetManifestResourceNames().Where(name => name.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(name => name[prefix.Length..]).Order(StringComparer.Ordinal).ToArray() };
+        var text = new RichTextBox { IsReadOnly = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        text.SetResourceReference(BackgroundProperty, "CanvasBrush");
+        text.SetResourceReference(ForegroundProperty, "TextBrush");
+        var panel = new DockPanel { Margin = new Thickness(12) };
+        DockPanel.SetDock(choices, Dock.Top);
+        panel.Children.Add(choices);
+        panel.Children.Add(text);
+        var window = new Window { Owner = this, Title = "ライセンスと第三者通知", Width = 730, Height = 540,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner, Content = panel };
+        foreach (var key in Resources.Keys)
+            window.Resources[key] = Resources[key];
+        window.SetResourceReference(BackgroundProperty, "WindowBrush");
+        choices.SelectionChanged += (_, _) =>
+        {
+            if (choices.SelectedItem is not string item) return;
+            using var stream = assembly.GetManifestResourceStream(prefix + item)!;
+            text.Document.Blocks.Clear();
+            var document = new TextRange(text.Document.ContentStart, text.Document.ContentEnd);
+            if (item.EndsWith(".rtf", StringComparison.Ordinal))
+                document.Load(stream, DataFormats.Rtf);
+            else
+            {
+                using var reader = new StreamReader(stream);
+                document.Text = reader.ReadToEnd();
+            }
+            text.ScrollToHome();
+        };
+        choices.SelectedItem = "THIRD-PARTY-NOTICES.md";
+        window.ShowDialog();
+    }
+
+    private void ToggleDiagnostics(object sender, RoutedEventArgs args) =>
+        DiagnosticsBox.Visibility = DiagnosticsBox.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+
+    protected override void OnPreviewKeyDown(KeyEventArgs args)
+    {
+        if (args.Key == Key.O && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            args.Handled = true;
+            OpenProject(this, args);
+        }
+        else if (args.SystemKey == Key.Left && Keyboard.Modifiers == ModifierKeys.Alt)
+        {
+            args.Handled = true;
+            Back(this, args);
+        }
+        base.OnPreviewKeyDown(args);
+    }
+}

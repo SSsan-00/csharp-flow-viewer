@@ -1,0 +1,16 @@
+{
+  "name": "csharp-flow-viewer-preview",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "mermaid": "12.3.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.0",
+    "playwright-core": "1.59.1"
+  }
+}
