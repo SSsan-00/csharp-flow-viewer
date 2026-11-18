@@ -8,7 +8,7 @@ Windows で、C# メソッドの制御フローを Roslyn で解析して Mermai
 
 | 用途 | 必要なもの |
 | --- | --- |
-| 発行済み EXE の実行 | Windows x64。アプリ用の .NET 9 / Windows Desktop Runtime は EXE に同梱 |
+| 発行済み EXE の実行 | Windows 10 バージョン 1809 以降の x64。アプリ用の .NET 9、Windows Desktop Runtime、WebView2 が読み込む Windows SDK の .NET ライブラリは EXE に同梱 |
 | プロジェクトの解析 | `dotnet` が PATH にあり、対象プロジェクトを理解できる .NET SDK 8 以降、必要なターゲティングパックおよび復元済みの参照が利用できること。検証に使用した SDK は 9.0.321 |
 | フロー図のプレビュー | Microsoft Edge WebView2 Evergreen Runtime x64。利用できない場合はノード一覧、ソース連動、Mermaid 出力を利用可能 |
 | このリポジトリをビルド | .NET 9 SDK 9.0.300 以降の 9.0 系。Node.js 22.12 以降は Mermaid バンドルを再生成する場合とブラウザテストで使用 |

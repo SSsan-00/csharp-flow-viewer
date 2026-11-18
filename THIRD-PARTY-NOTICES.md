@@ -7,6 +7,7 @@
 | MSBuild Framework and StringTools | 17.14.28, MIT | licenses/MSBuild-LICENSE.txt and licenses/MSBuild-NOTICES.txt |
 | AvalonEdit | 6.3.1.120, MIT | licenses/AvalonEdit.txt |
 | WebView2 SDK, including the native loader | 1.0.3650.58, BSD 3-Clause | licenses/WebView2-SDK.txt |
+| Windows SDK for .NET projections and WinRT runtime | Microsoft.Windows.SDK.NET.Ref 10.0.17763.57, Microsoft Windows SDK license | [License terms](https://aka.ms/WinSDKLicenseURL) and [redistributable files](https://learn.microsoft.com/legal/windows-sdk/redist#microsoftwindowssdknetref) |
 | Humanizer.Core | 2.14.1, MIT | licenses/Humanizer.txt |
 | Newtonsoft.Json | 13.0.3, MIT | licenses/Newtonsoft.Json.txt |
 | Mermaid and modules linked into the browser bundle | Mermaid 12.3.0, MIT. Modules carry their own license terms | tools/preview/THIRD-PARTY-LICENSES.txt |

@@ -11,7 +11,13 @@
 | 単一ファイルの解析ホスト | 同じ解析ライブラリを組み込んだ Linux x64 の self-contained 単一ファイルの試験プログラムで、展開された Roslyn ビルドホストからサンプルの `OnPost` を解析。13 ノードと 15 遷移、同一ファイルの `Submit` へのリンクを確認 |
 | Windows x64 発行物 | 圧縮した単一 EXE をクロス発行。PE の x64 ヘッダーとバンドルのマニフェストを検査し、.NET／WPF、WebView2 ローダー、Roslyn の別プロセス用資産が含まれることを確認 |
 
-発行 EXE は 87,147,374 バイト（約 83 MiB）です。SHA-256 は `b129551a112e0763cebafa1a4ea524553c82a5036157bb84db48c6fe46d75149` です。
+## Windows x64 単一 EXE の起動確認
+
+修正前の EXE は、GitHub Actions の Windows Server 2025（OS ビルド 26100）で起動直後に終了しました。.NET Runtime のイベントには、WebView2 の画面部品が読み込む `Microsoft.Windows.SDK.NET.dll` が見つからないことが記録されていました。 [修正前の実行ログ](https://github.com/SSsan-00/csharp-flow-viewer/actions/runs/44236177021)
+
+Windows SDK のバージョンを対象フレームワークに指定し、必要な DLL を EXE に同梱しました。修正後は Linux でクロス発行した単一 EXE を同じ Windows ランナーで検証しました。通常設定と WebView2 の実行フォルダーを存在しない場所に指定した設定の両方で、空の作業フォルダーからメインウィンドウを開き、正常に終了できました。展開先の `Microsoft.Windows.SDK.NET.dll` と `WinRT.Runtime.dll` も確認しました。 [修正後の実行ログ](https://github.com/SSsan-00/csharp-flow-viewer/actions/runs/44236671989)
+
+検証した EXE は 93,165,251 バイト（約 89 MiB）です。SHA-256 は `28b6e9650dfa4b7ae77585dfadbd6f30d7f97a4c135f083e77f9c7f7c914fe2a` です。
 
 ## 約 2 万行の計測
 
@@ -26,4 +32,4 @@
 
 ## Windows で未確認の項目
 
-検証環境は Linux のため、Windows 実機の WPF 起動と外観、ネイティブの画面サイズ変更やペイン操作、WPF ソースとの実画面での連動、クリップボードと保存ダイアログ、テーマの再起動時復元、エラー表示は未確認です。Windows クリーン環境での .NET Desktop Runtime／対象 SDK／WebView2 の組み合わせ、WebView2 の同梱プレビューと欠落時のノード一覧切り替えも未確認です。
+Windows の実機での外観、画面サイズ変更やペイン操作、WPF のソース表示との連動、クリップボードと保存ダイアログ、テーマの再起動時復元、エラー表示は未確認です。Windows クリーン環境での .NET Desktop Runtime／対象 SDK／WebView2 の組み合わせ、WebView2 での図の描画と欠落時のノード一覧切り替えも未確認です。
