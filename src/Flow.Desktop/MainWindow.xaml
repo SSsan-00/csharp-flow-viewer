@@ -156,7 +156,7 @@
                 <TextBlock Text="◇" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource AccentBrush}"/>
               </Border>
               <TextBlock x:Name="EmptyTitle" Text="プロジェクトを選択" FontSize="19" FontWeight="SemiBold" TextAlignment="Center" TextWrapping="Wrap"/>
-              <TextBlock x:Name="EmptyHelp" Text="信頼できる .csproj を開いてください。" Style="{StaticResource Muted}" Margin="0,7,0,0" TextAlignment="Center" TextWrapping="Wrap"/>
+              <TextBlock x:Name="EmptyHelp" Text="" Style="{StaticResource Muted}" Margin="0,7,0,0" TextAlignment="Center" TextWrapping="Wrap"/>
             </StackPanel>
           </Grid>
           <Border Grid.Row="3" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,6">
@@ -164,6 +164,9 @@
               <Button x:Name="AnnotationsButton" DockPanel.Dock="Right" Click="OpenAnnotationsMenu" Content="注釈…" IsEnabled="False" Margin="8,0,0,0">
                 <Button.ContextMenu>
                   <ContextMenu>
+                    <MenuItem Header="この図のマークをすべてクリア…" Click="ClearMarks"/>
+                    <MenuItem Header="この図のグレーアウトをすべてクリア…" Click="ClearGray"/>
+                    <Separator/>
                     <MenuItem Header="注釈を JSON に書き出す…" Click="ExportAnnotations"/>
                     <MenuItem Header="注釈を JSON から読み込む…" Click="ImportAnnotations"/>
                   </ContextMenu>
@@ -217,7 +220,7 @@
         <StackPanel>
           <DockPanel>
             <TextBlock x:Name="StatusDot" DockPanel.Dock="Left" Text="●" Foreground="{DynamicResource GoodBrush}" Margin="0,0,8,0" VerticalAlignment="Center"/>
-            <TextBlock x:Name="StatusText" Text="信頼できる C# プロジェクトを開いてください。" VerticalAlignment="Center" MinHeight="22" TextWrapping="Wrap"/>
+            <TextBlock x:Name="StatusText" Text="C# プロジェクトを開いてください。" VerticalAlignment="Center" MinHeight="22" TextWrapping="Wrap"/>
           </DockPanel>
           <ListBox x:Name="DiagnosticsBox" Visibility="Collapsed" MaxHeight="155" Margin="10,4,0,0" AutomationProperties.Name="診断の詳細">
             <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap"/></DataTemplate></ListBox.ItemTemplate>

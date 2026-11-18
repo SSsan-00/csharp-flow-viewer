@@ -59,6 +59,29 @@ public partial class MainWindow
         SaveFileState();
     }
 
+    private void ClearMarks(object sender, RoutedEventArgs args) => ClearAnnotations(gray: false);
+
+    private void ClearGray(object sender, RoutedEventArgs args) => ClearAnnotations(gray: true);
+
+    private void ClearAnnotations(bool gray)
+    {
+        if (AnnotationKey is not { } key || !annotationHistory.TryGetValue(key, out var annotations)) return;
+        var targets = gray ? annotations.GrayRoots : annotations.Marked;
+        var label = gray ? "グレーアウト" : "マーク";
+        if (targets.Count == 0)
+        {
+            SetStatus($"この図に{label}はありません。");
+            return;
+        }
+        if (MessageBox.Show(this, $"この図の{label}をすべてクリアしますか？", label + "のクリア",
+                MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes)
+            return;
+        targets.Clear();
+        ShowAnnotations();
+        SaveFileState();
+        SetStatus($"この図の{label}をクリアしました。");
+    }
+
     private void ShowAnnotations()
     {
         if (diagram is not { } graph || AnnotationKey is not { } key) return;

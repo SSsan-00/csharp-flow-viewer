@@ -53,7 +53,8 @@ public partial class MainWindow : Window
         preview = new PreviewHost(Web);
         preview.Message += OnPreviewMessage;
         Loaded += StartPreview;
-        Closing += (_, _) => SaveFileState();
+        Loaded += RestoreProject;
+        Closing += (_, _) => { SaveFileState(); SaveProjectState(); };
         Closed += CloseViewer;
         SetBusy(false);
         try { excludedCalls = TraceSettings.Read(TraceSettings.SettingsPath); }
@@ -109,30 +110,9 @@ public partial class MainWindow : Window
     private async void OpenProject(object? sender, RoutedEventArgs args)
     {
         if (busy) return;
-        var dialog = new OpenFileDialog { Title = "信頼できる C# プロジェクトを開く", Filter = "C# プロジェクト (*.csproj)|*.csproj", CheckFileExists = true };
+        var dialog = new OpenFileDialog { Title = "C# プロジェクトを開く", Filter = "C# プロジェクト (*.csproj)|*.csproj", CheckFileExists = true };
         if (dialog.ShowDialog(this) != true) return;
-        SetBusy(true);
-        try
-        {
-            path = dialog.FileName;
-            FileFilter.Clear();
-            ResetProject();
-            ProjectLabel.Text = Path.GetFileName(path);
-            ProjectLabel.ToolTip = path;
-            SdkLabel.Text = "";
-            SettingsBox.ItemsSource = null;
-            SetState("プロジェクトを評価中", "SDK と構成を確認しています…");
-            SetStatus("SDK とプロジェクト設定を確認中");
-            var settings = await ProjectLoader.InspectAsync(path, lifetime.Token);
-            if (closed) return;
-            SdkLabel.Text = ".NET SDK " + settings.SdkVersion;
-            SettingsBox.ItemsSource = settings.Options;
-            SettingsBox.SelectedIndex = 0;
-            await LoadProject(settings.Options[0]);
-        }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "プロジェクトを開けません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed) SetBusy(false); }
+        await OpenProjectAsync(dialog.FileName);
     }
 
     private async void ReloadProject(object sender, RoutedEventArgs args)
@@ -150,6 +130,7 @@ public partial class MainWindow : Window
             var options = settings.Options.FirstOrDefault(item => item == previousOptions) ?? settings.Options[0];
             SettingsBox.SelectedItem = options;
             await LoadProject(options, previousFile);
+            if (project is not null) SaveProjectState();
         }
         catch (Exception exception) when (!closed) { ShowFailure(exception, "プロジェクトを再読み込みできません"); }
         catch (Exception) when (closed) { }
@@ -160,7 +141,7 @@ public partial class MainWindow : Window
     {
         if (busy || path is null || SettingsBox.SelectedItem is not ProjectOptions options) return;
         SetBusy(true);
-        try { await LoadProject(options, (FilesBox.SelectedItem as ProjectFile)?.Path); }
+        try { await LoadProject(options, (FilesBox.SelectedItem as ProjectFile)?.Path); if (project is not null) SaveProjectState(); }
         catch (Exception exception) when (!closed) { ShowFailure(exception, "構成を読み込めません"); }
         catch (Exception) when (closed) { }
         finally { if (!closed) SetBusy(false); }
@@ -201,7 +182,7 @@ public partial class MainWindow : Window
     {
         if (busy || project is null || FilesBox.SelectedItem is not ProjectFile file) return;
         SetBusy(true);
-        try { await LoadFile(file); }
+        try { await LoadFile(file); if (source is not null) SaveProjectState(); }
         catch (Exception exception) when (!closed) { ShowFailure(exception, "ソースを解析できません"); }
         catch (Exception) when (closed) { }
         finally { if (!closed) SetBusy(false); }
