@@ -89,6 +89,7 @@ public partial class MainWindow : Window
         try
         {
             path = dialog.FileName;
+            FileFilter.Clear();
             ResetProject();
             ProjectLabel.Text = Path.GetFileName(path);
             ProjectLabel.ToolTip = path;
@@ -127,7 +128,9 @@ public partial class MainWindow : Window
         if (closed) { loaded.Dispose(); return; }
         project = loaded;
         FilesBox.ItemsSource = loaded.Files;
-        FileCount.Text = $"対象ファイル  ·  {loaded.Files.Count:N0}";
+        CollectionViewSource.GetDefaultView(loaded.Files).Filter =
+            item => item is ProjectFile file && file.Label.Contains(FileFilter.Text.Trim(), StringComparison.OrdinalIgnoreCase);
+        UpdateFileCount();
         RefreshDiagnostics();
         if (loaded.Files.Count == 0)
         {
@@ -137,6 +140,7 @@ public partial class MainWindow : Window
         }
         if (loaded.Files.FirstOrDefault(file => file.Path == previousFile) is { } previous)
         {
+            if (!FilesBox.Items.Contains(previous)) FileFilter.Clear();
             FilesBox.SelectedItem = previous;
             await LoadFile(previous);
             return;
@@ -254,6 +258,16 @@ public partial class MainWindow : Window
         FlowTitle.ToolTip = null;
         UpdateSurface();
     }
+
+    private void FileFilterChanged(object sender, TextChangedEventArgs args)
+    {
+        if (FilesBox?.ItemsSource is not { } files) return;
+        CollectionViewSource.GetDefaultView(files).Refresh();
+        UpdateFileCount();
+    }
+
+    private void UpdateFileCount() =>
+        FileCount.Text = $"対象ファイル  ·  {FilesBox.Items.Count:N0} / {project?.Files.Count ?? 0:N0}";
 
     private void FilterChanged(object sender, TextChangedEventArgs args)
     {
