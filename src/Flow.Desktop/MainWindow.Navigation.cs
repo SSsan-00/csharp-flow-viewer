@@ -1,5 +1,7 @@
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Input;
+using Flow.Analysis;
 using Flow.Model;
 
 namespace Flow.Desktop;
@@ -12,7 +14,7 @@ public partial class MainWindow
 
     private void OpenGoToLine()
     {
-        if (source is null) return;
+        if (!HasSource) return;
         GoToPanel.Visibility = Visibility.Visible;
         GoToLineInput.Text = Editor.TextArea.Caret.Line.ToString();
         GoToLineInput.Focus();
@@ -68,7 +70,7 @@ public partial class MainWindow
         editorPress = null;
         var view = Editor.TextArea.TextView;
         var point = args.GetPosition(view);
-        if (busy || source is null || start is not { } pressed
+        if (busy || !HasSource || start is not { } pressed
             || Math.Abs(pressed.X - point.X) > SystemParameters.MinimumHorizontalDragDistance
             || Math.Abs(pressed.Y - point.Y) > SystemParameters.MinimumVerticalDragDistance
             || !new Rect(view.RenderSize).Contains(point)
@@ -76,8 +78,9 @@ public partial class MainWindow
             return;
 
         var offset = Editor.Document.GetOffset(position.Location);
-        var target = source.Methods
-            .Where(entry => offset >= entry.Source.Offset && offset < entry.Source.Offset + entry.Source.Length)
+        var target = CurrentEntries
+            .Where(entry => IsCurrentSource(entry.Source)
+                && offset >= entry.Source.Offset && offset < entry.Source.Offset + entry.Source.Length)
             .MinBy(entry => entry.Source.Length);
         if (target is null) return;
         if (method?.Id != target.Id)
@@ -118,7 +121,7 @@ public partial class MainWindow
     }
 
     private FlowNode? NodesForClick(int offset, int line) =>
-        nodes.Values.Where(node => node.Source is { } range
+        nodes.Values.Where(node => node.Source is { } range && IsCurrentSource(range)
                 && (range.Line == line || (offset >= range.Offset && offset - range.Offset < range.Length)))
             .MinBy(node =>
             {
@@ -126,4 +129,48 @@ public partial class MainWindow
                 var distance = Math.Max(0, Math.Max(range.Offset - offset, offset - range.Offset - range.Length + 1));
                 return (distance, range.Length == 0 ? int.MaxValue : range.Length);
             });
+
+    private bool IsCurrentSource(SourceRange range) => range.FilePath is null
+        || string.Equals(range.FilePath, currentFile?.Path, StringComparison.OrdinalIgnoreCase);
+
+    private ProjectFile? FindTargetFile(FlowNode node) => node.TargetFilePath is null
+        ? currentFile
+        : project?.Files.FirstOrDefault(file =>
+            string.Equals(file.Path, node.TargetFilePath, StringComparison.OrdinalIgnoreCase));
+
+    private bool CanFollow(FlowNode node) => node.TargetMethod is not null && FindTargetFile(node) is not null;
+
+    // Navigation keeps the originating Razor event in the same history as C# calls.
+    private async Task NavigateEntryAsync(ProjectFile file, int entryId, string? returnTo = null)
+    {
+        SetBusy(true);
+        try
+        {
+            if (currentFile != file)
+            {
+                if (!FilesBox.Items.Contains(file)) FileFilter.Clear();
+                FilesBox.SelectedItem = file;
+                FilesBox.ScrollIntoView(file);
+                await LoadFile(file, preserveHistory: true, restoreSelection: false);
+                if (closed) return;
+            }
+            await SelectMethodAsync(entryId, returnTo);
+            if (!closed && HasSource) SaveProjectState();
+        }
+        catch (Exception exception) when (!closed) { ShowFailure(exception, "呼び出し先に移動できません"); }
+        catch (Exception) when (closed) { }
+        finally { if (!closed) SetBusy(false); }
+    }
+
+    private void UpdateSourcePresentation()
+    {
+        var isRazor = currentFile?.IsRazor == true;
+        SourceLanguage.Text = isRazor ? "Razor" : "C#";
+        EntrySearchHint.Text = isRazor ? "画面イベントを検索" : "メソッドを検索";
+        Filter.ToolTip = isRazor ? "イベント名、要素名、または行番号" : "名前、シグネチャ、または行番号";
+        AutomationProperties.SetName(Filter, EntrySearchHint.Text);
+        AutomationProperties.SetName(MethodsBox, isRazor ? "画面イベント" : "メソッド");
+        AutomationProperties.SetName(Editor, isRazor ? "Razor ソース" : "C# ソース");
+        ApplyTheme();
+    }
 }

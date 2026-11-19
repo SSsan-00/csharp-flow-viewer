@@ -1,3 +1,50 @@
 @page
 @model OrderProcessing.Pages.OrderModel
-<p>架空の注文受付サンプル</p>
+
+@{
+    // 架空の表示条件。Razorの条件と、ブラウザーで動くイベントを区別して確認する。
+    var showActions = true;
+}
+
+<h1>架空の注文受付サンプル</h1>
+<form method="post">
+    <label>
+        区分
+        <select id="category" name="category" onchange="changeCategory(this.value)">
+            <option value="normal">通常</option>
+            <option value="express">急ぎ</option>
+        </select>
+    </label>
+    <p id="categoryHelp">区分を選ぶと、説明が変わります。</p>
+    <label>金額 <input name="amount" type="number" min="0" step="0.01" value="100" /></label>
+    <label>数量 <input name="quantity" type="number" min="1" max="20" value="1" /></label>
+
+    @if (showActions)
+    {
+        @* @: の内側にある送信ボタンから、OrderModel.OnPostへ進む。 *@
+        @:<button type="submit">注文を登録</button>
+
+        @* textタグ自体は出力されない。内側のボタンはブラウザー側の処理を呼ぶ。 *@
+        <text>
+            <button type="button" onclick="showHelp()">入力ヘルプ</button>
+        </text>
+    }
+</form>
+
+<script>
+    // changeイベントで選択値を受け取り、選択した区分の説明を更新する。
+    function changeCategory(value) {
+        var message;
+        if (value === "express") {
+            message = "急ぎの注文です。";
+        } else {
+            message = "通常の注文です。";
+        }
+        document.getElementById("categoryHelp").textContent = message;
+    }
+
+    // JavaScriptの処理は、Razorがページを生成した後にブラウザーで実行される。
+    function showHelp() {
+        window.alert("金額と数量を入力して、注文を登録してください。");
+    }
+</script>

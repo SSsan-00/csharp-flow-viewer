@@ -1,5 +1,30 @@
 # 検証結果
 
+## Razor / JavaScript 解析の追加（2026-11-19）
+
+Linux x64、.NET SDK 9.0.321 / Runtime 9.0.23 で実施しました。以下は今回の変更に対する検証結果です。
+
+| 検証 | 結果 |
+| --- | --- |
+| Release ビルド | WPF プロジェクトを含むソリューションと架空サンプルを個別にビルド。どちらもエラー 0、警告 0 |
+| MSTest | MSBuild の別プロセスを必要としない 56 件が成功。既存の C# 解析に加え、Razor の `@:` / `<text>`、元ソースの位置、JavaScript のイベント・分岐・XHR・スコープ、動的値や不正な入力の扱いを検証 |
+| ページとハンドラーの対応 | 実際の ASP.NET Core のアセンブリを参照するプロセス内の Roslyn ワークスペースを使い、名前空間の優先順位、継承したハンドラー、`NonHandler`、外部リンクファイルの制約を検証 |
+| 送信先の判定 | Form / Anchor Tag Helper の有効・無効、フォームの既定 HTTP メソッド、同一ページへの XHR、フラグメント、`base`、動的 URL、MVC / 名前付きルートを現在の PageModel へ誤接続しないことを検証 |
+
+再現コマンドは次のとおりです。先に依存パッケージを復元してください。
+
+```sh
+dotnet build csharp-flow-viewer.sln -c Release --no-restore -m:1 -p:BuildInParallel=false -p:UseSharedCompilation=false
+dotnet build samples/OrderProcessing/OrderProcessing.csproj -c Release -m:1 -p:BuildInParallel=false -p:UseSharedCompilation=false
+dotnet test tests/Flow.Tests/Flow.Tests.csproj -c Release --no-build --no-restore -m:1 --filter 'FullyQualifiedName!~Flow.Tests.ProjectTests'
+```
+
+`ProjectTests` の 2 件は、この実行環境が Roslyn の MSBuild BuildHost に必要な名前付きパイプを許可しないため、`SocketException: Permission denied` で実行できませんでした。プロジェクト項目の評価を確認する既存テストと、実際のプロジェクトから Razor のモデル・継承ハンドラーを解決する追加テストを残しています。通常の開発環境では上記の `--filter` を外して確認してください。プロセス内の検証は、この 2 件の統合テストを代替するものではありません。
+
+今回の `.cshtml` 選択、イベント・関数選択、PageModel への移動と復帰について、Windows 上での画面操作は未実施です。今回の変更を含む Windows 単一 EXE の発行・起動も未実施です。下記の過去の Windows 検証結果は、今回追加した機能の動作確認には含めていません。
+
+## これまでの検証記録
+
 2026-11-18、Debian 13 x64、.NET SDK 9.0.321 / Runtime 9.0.23、Node.js 24.22.1、Chromium 156.0.8078.79 で実施しました。
 
 | 検証 | 結果 |

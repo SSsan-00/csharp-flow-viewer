@@ -74,7 +74,14 @@
           <ListBox Grid.Row="3" x:Name="FilesBox" Margin="5,0,5,6" SelectionChanged="FileChanged" AutomationProperties.Name="対象ファイル">
             <ListBox.ItemTemplate><DataTemplate>
               <DockPanel ToolTip="{Binding Label}">
-                <TextBlock DockPanel.Dock="Left" Text="C#" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}" Margin="0,0,8,0"/>
+                <TextBlock DockPanel.Dock="Left" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}" Margin="0,0,8,0">
+                  <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Text" Value="C#"/>
+                      <Style.Triggers><DataTrigger Binding="{Binding IsRazor}" Value="True"><Setter Property="Text" Value="RZ"/></DataTrigger></Style.Triggers>
+                    </Style>
+                  </TextBlock.Style>
+                </TextBlock>
                 <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis"/>
               </DockPanel>
             </DataTemplate></ListBox.ItemTemplate>
@@ -84,7 +91,7 @@
           </Border>
           <Grid Grid.Row="5" Margin="9,8,9,5">
             <TextBox x:Name="Filter" TextChanged="FilterChanged" ToolTip="名前、シグネチャ、または行番号" AutomationProperties.Name="メソッドを検索"/>
-            <TextBlock Text="メソッドを検索" IsHitTestVisible="False" Margin="8,0,7,0" VerticalAlignment="Center">
+            <TextBlock x:Name="EntrySearchHint" Text="メソッドを検索" IsHitTestVisible="False" Margin="8,0,7,0" VerticalAlignment="Center">
               <TextBlock.Style>
                 <Style TargetType="TextBlock" BasedOn="{StaticResource Muted}">
                   <Setter Property="Visibility" Value="Collapsed"/>
@@ -185,7 +192,7 @@
           <Grid.RowDefinitions><RowDefinition Height="42"/><RowDefinition Height="*"/><RowDefinition Height="31"/></Grid.RowDefinitions>
           <Border Style="{StaticResource PanelHeader}">
             <DockPanel>
-              <TextBlock DockPanel.Dock="Left" Text="C#" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold" Margin="0,0,9,0" VerticalAlignment="Center"/>
+              <TextBlock x:Name="SourceLanguage" DockPanel.Dock="Left" Text="C#" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold" Margin="0,0,9,0" VerticalAlignment="Center"/>
               <TextBlock x:Name="SourceTitle" Text="ソース" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             </DockPanel>
           </Border>

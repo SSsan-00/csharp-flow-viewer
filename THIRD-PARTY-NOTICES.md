@@ -4,6 +4,8 @@
 | --- | --- | --- |
 | .NET runtime, .NET libraries and Windows Desktop (WPF) | Windows x64 runtime 9.0.23 in the verified bundle, MIT | licenses/dotnet-runtime-LICENSE.txt, licenses/dotnet-runtime-NOTICES.txt, licenses/WPF-LICENSE.txt and licenses/WPF-NOTICES.txt |
 | Roslyn compiler and workspaces (including the build hosts) | 4.14.0, MIT | licenses/Roslyn-LICENSE.txt and licenses/Roslyn-NOTICES.rtf |
+| Razor compiler and Razor utilities from the .NET 9 SDK, Microsoft.Extensions.ObjectPool | SDK-selected version (verified with SDK 9.0.321), MIT | licenses/Razor-LICENSE.txt and licenses/dotnet-runtime-LICENSE.txt |
+| Acornima JavaScript parser | 1.9.2, BSD 3-Clause, with upstream notices | licenses/Acornima-LICENSE.txt and licenses/Acornima-NOTICE.txt |
 | MSBuild Framework and StringTools | 17.14.28, MIT | licenses/MSBuild-LICENSE.txt and licenses/MSBuild-NOTICES.txt |
 | AvalonEdit | 6.3.1.120, MIT | licenses/AvalonEdit.txt |
 | WebView2 SDK, including the native loader | 1.0.3650.58, BSD 3-Clause | licenses/WebView2-SDK.txt |
