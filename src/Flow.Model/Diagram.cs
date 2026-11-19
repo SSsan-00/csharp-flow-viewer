@@ -1,11 +1,14 @@
 namespace Flow.Model;
 
-public sealed record SourceRange(int Offset, int Length, int Line);
+// FilePath is optional so existing single-file C# diagrams and saved annotations remain compatible.
+// Razor entries carry their original document, rather than an offset into generated C# or JavaScript.
+public sealed record SourceRange(int Offset, int Length, int Line, string? FilePath = null);
 
 public enum NodeKind { Start, End, Call, Condition, Transfer, Exception, Junction }
 
 public sealed record FlowNode(string Id, NodeKind Kind, string Label, SourceRange? Source,
-    int? TargetMethod = null, bool IsReachable = true, bool IsCaseTest = false);
+    int? TargetMethod = null, bool IsReachable = true, bool IsCaseTest = false,
+    string? TargetFilePath = null);
 
 public sealed record FlowEdge(string From, string To, string? Label = null, bool IsReachable = true);
 

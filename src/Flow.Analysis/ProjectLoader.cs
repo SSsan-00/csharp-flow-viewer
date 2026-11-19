@@ -15,12 +15,14 @@ public sealed record ProjectOptions(string Configuration, string? TargetFramewor
 
 public sealed record ProjectSettings(string SdkVersion, IReadOnlyList<ProjectOptions> Options);
 
-public sealed record ProjectFile(DocumentId Id, string Label, string Path)
+public sealed record ProjectFile(DocumentId? Id, string Label, string Path)
 {
+    public bool IsRazor => Path.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase);
     public override string ToString() => Label;
 }
 
-public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, string[] notices, string? intermediateDirectory, ProjectOptions options) : IDisposable
+public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, string[] notices, string? intermediateDirectory,
+    ProjectOptions options, IReadOnlyList<string>? razorFiles = null) : IDisposable
 {
     public ProjectOptions Options { get; } = options;
     public IReadOnlyList<string> Notices { get; } = notices;
@@ -29,11 +31,16 @@ public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, 
             && (intermediateDirectory is null || !Path.GetRelativePath(intermediateDirectory, path).IsWithinDirectory()))
         .Select(doc => new ProjectFile(doc.Id,
             Path.GetRelativePath(Path.GetDirectoryName(project.FilePath!)!, doc.FilePath!), doc.FilePath!))
+        .Concat((razorFiles ?? []).Where(File.Exists)
+            .Where(path => intermediateDirectory is null || !Path.GetRelativePath(intermediateDirectory, path).IsWithinDirectory())
+            .Select(path => new ProjectFile(null, Path.GetRelativePath(Path.GetDirectoryName(project.FilePath!)!, path), path)))
+        .DistinctBy(file => file.Path, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
         .OrderBy(file => file.Label, StringComparer.OrdinalIgnoreCase).ToArray();
 
     public async Task<SourceFile> ReadAsync(ProjectFile file, CancellationToken token)
     {
-        var document = project.GetDocument(file.Id) ?? throw new ProjectLoadException("対象ファイルが見つかりません。");
+        var document = file.Id is { } id ? project.GetDocument(id) : null;
+        if (document is null) throw new ProjectLoadException("対象の C# ファイルが見つかりません。");
         var model = await document.GetSemanticModelAsync(token).ConfigureAwait(false)
             ?? throw new ProjectLoadException("コンパイルとセマンティックモデルを取得できません。");
         var diagnostics = model.GetDiagnostics(cancellationToken: token)
@@ -53,6 +60,10 @@ public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, 
             diagnostics.Add("解析は部分的 · プロジェクトの参照解決に失敗しました。");
         return new SourceFile(model, diagnostics, token);
     }
+
+    /// <summary>Reads a Razor document without executing it, then resolves its PageModel using the loaded compilation.</summary>
+    public Task<RazorSourceFile> ReadRazorAsync(ProjectFile file, CancellationToken token) =>
+        PageModelResolver.ReadAsync(project, file, Files, token);
 
     public void Dispose() => workspace.Dispose();
 }
@@ -91,7 +102,7 @@ public static class ProjectLoader
         properties["Configuration"] = options.Configuration;
         if (options.TargetFramework is { } tfm)
             properties["TargetFramework"] = tfm;
-        var evaluated = await EvaluateAsync(path, properties, token).ConfigureAwait(false);
+        var evaluated = await EvaluateAsync(path, properties, token, includeItems: true).ConfigureAwait(false);
         var intermediatePath = Property(evaluated, "BaseIntermediateOutputPath");
         var intermediate = string.IsNullOrWhiteSpace(intermediatePath) ? null :
             Path.GetFullPath(intermediatePath.Replace('\\', Path.DirectorySeparatorChar),
@@ -105,7 +116,7 @@ public static class ProjectLoader
                 solution = solution.WithProjectAnalyzerReferences(referenceProject.Id, []);
             project = solution.GetProject(project.Id)!;
             var notices = workspace.Diagnostics.Select(DescribeWorkspaceDiagnostic).Distinct().ToArray();
-            return new ProjectSession(workspace, project, notices, intermediate, options);
+            return new ProjectSession(workspace, project, notices, intermediate, options, RazorFiles(evaluated, path));
         }
         catch
         {
@@ -125,17 +136,22 @@ public static class ProjectLoader
 
     private static Match DiagnosticCode(string message) => Regex.Match(message, @"\b(?:MSB|NETSDK)[0-9]{4}\b");
 
-    private static async Task<JsonElement> EvaluateAsync(string path, Dictionary<string, string> globals, CancellationToken token)
+    private static async Task<JsonElement> EvaluateAsync(string path, Dictionary<string, string> globals, CancellationToken token,
+        bool includeItems = false)
     {
         path = Path.GetFullPath(path);
         var arguments = new List<string> { "msbuild", path, "-nologo", "-verbosity:quiet",
             "-getProperty:Configuration,Configurations,TargetFramework,TargetFrameworks,BaseIntermediateOutputPath,NETCoreSdkVersion" };
+        // Honor evaluated MSBuild items, including linked files and conditional removals.
+        // A directory scan would incorrectly reintroduce pages excluded by the selected project configuration.
+        if (includeItems) arguments.Add("-getItem:Content,None,AdditionalFiles,RazorGenerate");
         arguments.AddRange(globals.Select(pair => $"-property:{pair.Key}={pair.Value}"));
         var output = await DotnetAsync(Path.GetDirectoryName(path)!, arguments, token).ConfigureAwait(false);
         try
         {
             using var json = JsonDocument.Parse(output);
-            return json.RootElement.GetProperty("Properties").Clone();
+            _ = json.RootElement.GetProperty("Properties");
+            return json.RootElement.Clone();
         }
         catch (Exception exception) when (exception is JsonException or KeyNotFoundException)
         {
@@ -143,8 +159,24 @@ public static class ProjectLoader
         }
     }
 
-    private static string Property(JsonElement properties, string name) =>
-        properties.TryGetProperty(name, out var value) ? value.GetString() ?? "" : "";
+    private static string Property(JsonElement evaluation, string name) =>
+        evaluation.GetProperty("Properties").TryGetProperty(name, out var value) ? value.GetString() ?? "" : "";
+
+    private static string[] RazorFiles(JsonElement evaluation, string projectPath)
+    {
+        if (!evaluation.TryGetProperty("Items", out var items)) return [];
+        var root = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
+        var paths = new List<string>();
+        foreach (var itemGroup in items.EnumerateObject())
+        foreach (var item in itemGroup.Value.EnumerateArray())
+        {
+            var path = item.TryGetProperty("FullPath", out var fullPath) ? fullPath.GetString()
+                : item.TryGetProperty("Identity", out var identity) ? identity.GetString() : null;
+            if (path?.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase) == true)
+                paths.Add(Path.GetFullPath(path.Replace('\\', Path.DirectorySeparatorChar), root));
+        }
+        return paths.Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).ToArray();
+    }
 
     private static Dictionary<string, string> DesignTimeProperties() => new()
     {

@@ -3,5 +3,19 @@
     <ProjectReference Include="../Flow.Model/Flow.Model.csproj" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.14.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.14.0" />
+    <PackageReference Include="Acornima" Version="1.9.2" />
+  </ItemGroup>
+  <!-- The SDK is pinned by global.json. Copy its public Razor compiler API and
+       support assemblies so the desktop app does not locate SDK internals at runtime. -->
+  <ItemGroup>
+    <Reference Include="Microsoft.CodeAnalysis.Razor.Compiler"
+               HintPath="$(MSBuildSDKsPath)/Microsoft.NET.Sdk.Razor/tools/Microsoft.CodeAnalysis.Razor.Compiler.dll"
+               Private="true" />
+    <Reference Include="Microsoft.AspNetCore.Razor.Utilities.Shared"
+               HintPath="$(MSBuildSDKsPath)/Microsoft.NET.Sdk.Razor/tools/Microsoft.AspNetCore.Razor.Utilities.Shared.dll"
+               Private="true" />
+    <Reference Include="Microsoft.Extensions.ObjectPool"
+               HintPath="$(MSBuildSDKsPath)/Microsoft.NET.Sdk.Razor/tools/Microsoft.Extensions.ObjectPool.dll"
+               Private="true" />
   </ItemGroup>
 </Project>

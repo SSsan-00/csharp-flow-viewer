@@ -35,7 +35,7 @@ public partial class MainWindow
 
     private void SaveFileState()
     {
-        if (fileStatePath is null || source is null) return;
+        if (fileStatePath is null || !HasSource) return;
         var caret = Editor.TextArea.Caret;
         var state = new FileViewState(1, method is { } entry ? FileViewState.Key(entry.Signature) : null,
             method?.Source.Line ?? 0, caret.Line, caret.Column, Editor.VerticalOffset,
@@ -47,10 +47,10 @@ public partial class MainWindow
         }
     }
 
-    private static MethodEntry? FindSavedMethod(SourceFile file, FileViewState state)
+    private static MethodEntry? FindSavedMethod(IReadOnlyList<MethodEntry> methods, FileViewState state)
     {
         if (state.Method is null) return null;
-        var entries = file.Methods.Where(entry => FileViewState.Key(entry.Signature) == state.Method).ToArray();
+        var entries = methods.Where(entry => FileViewState.Key(entry.Signature) == state.Method).ToArray();
         return entries.Length == 1 ? entries[0] : entries.FirstOrDefault(entry => entry.Source.Line == state.MethodLine);
     }
 

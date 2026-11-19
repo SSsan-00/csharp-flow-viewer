@@ -87,7 +87,8 @@ public partial class MainWindow
         if (diagram is not { } graph || AnnotationKey is not { } key) return;
         var annotations = annotationHistory.GetValueOrDefault(key) ?? new NodeAnnotations();
         var gray = annotations.GrayNodes(graph);
-        editorAnnotations.SetRanges(Editor.Document, graph.Nodes, annotations.Marked, gray);
+        editorAnnotations.SetRanges(Editor.Document,
+            graph.Nodes.Where(node => node.Source is { } range && IsCurrentSource(range)), annotations.Marked, gray);
         Editor.TextArea.TextView.Redraw();
         if (rendered)
             preview.Send(new { type = "annotations", marked = annotations.Marked, gray });

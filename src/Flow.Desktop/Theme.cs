@@ -32,7 +32,7 @@ internal static class Theme
         catch (UnauthorizedAccessException) { return false; }
     }
 
-    public static void Apply(Window window, TextEditor editor, bool dark)
+    public static void Apply(Window window, TextEditor editor, bool dark, string language = "C#")
     {
         string[] values = dark
             ? ["#101420", "#181E2C", "#202738", "#111622", "#353D52", "#EFF0FA", "#B0B9D1",
@@ -45,13 +45,14 @@ internal static class Theme
         editor.TextArea.SelectionBrush = Brush(dark ? "#564592" : "#D9CFFF");
         editor.TextArea.SelectionForeground = Brush(dark ? "#FFFFFF" : "#151B27");
         editor.SyntaxHighlighting = null;
-        var highlighting = HighlightingManager.Instance.GetDefinition("C#");
+        var highlighting = HighlightingManager.Instance.GetDefinition(language);
+        if (highlighting is null) return;
         foreach (var color in highlighting.NamedHighlightingColors)
         {
             var (night, day) = color.Name switch
             {
                 "Comment" or "Preprocessor" => ("#A1B2A9", "#386449"),
-                "String" or "Char" => ("#A0E5C4", "#14694A"),
+                "String" or "Char" or "AttributeValue" => ("#A0E5C4", "#14694A"),
                 "MethodCall" => ("#F1D89A", "#76540B"),
                 "NumberLiteral" or "TrueFalse" => ("#91DBED", "#1A6378"),
                 "Keywords" or "GotoKeywords" or "ContextKeywords" or "ExceptionKeywords" or "GetSetAddRemove"
