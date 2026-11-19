@@ -3,8 +3,11 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <None Include="../../global.json" Link="TestAssets/global.json" CopyToOutputDirectory="PreserveNewest" />
     <ProjectReference Include="../../src/Flow.Analysis/Flow.Analysis.csproj" />
     <ProjectReference Include="../../src/Flow.Mermaid/Flow.Mermaid.csproj" />
+    <!-- PageModel の解析に使う参照は、テストホストが解決する共有フレームワークから取得する。 -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="MSTest.TestFramework" Version="4.5.3" />
     <PackageReference Include="MSTest.TestAdapter" Version="4.5.3" PrivateAssets="all" />

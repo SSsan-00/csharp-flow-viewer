@@ -81,7 +81,8 @@ public sealed class RazorProjectBindingTests
             }
             var compilation = await project.GetCompilationAsync();
             Assert.IsNotNull(compilation);
-            Assert.IsEmpty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+            var errors = compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
+            Assert.IsEmpty(errors, string.Join(Environment.NewLine, errors.Select(diagnostic => diagnostic.ToString())));
 
             // Construct the session from an already evaluated Roslyn project. This does not use a
             // BuildHost, and does not replace the separate end-to-end ProjectLoader tests.
@@ -139,18 +140,9 @@ public sealed class RazorProjectBindingTests
 
     private static IEnumerable<MetadataReference> FrameworkReferences()
     {
-        // Use actual framework metadata, including PageModel and NonHandlerAttribute. The SDK used
-        // by the application supplies the corresponding ASP.NET shared runtime alongside .NET.
-        var runtimeDirectory = Path.GetDirectoryName(typeof(object).Assembly.Location)!;
-        var sharedDirectory = Directory.GetParent(runtimeDirectory)!.Parent!.FullName;
-        var aspNetDirectory = Path.Combine(sharedDirectory, "Microsoft.AspNetCore.App");
-        var runtime = Directory.EnumerateDirectories(aspNetDirectory)
-            .Select(path => (Path: path, Version: Version.TryParse(Path.GetFileName(path), out var version) ? version : null))
-            .Where(item => item.Version is not null && item.Version.Major == Environment.Version.Major
-                && item.Version.Minor == Environment.Version.Minor)
-            .OrderByDescending(item => item.Version).First().Path;
+        // FrameworkReference で宣言した ASP.NET Core も含め、実行ホストが解決した
+        // マネージドアセンブリだけを使う。ランタイム配下のネイティブ DLL は列挙しない。
         return ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
-            .Concat(Directory.EnumerateFiles(runtime, "*.dll"))
             .DistinctBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
             .Select(path => MetadataReference.CreateFromFile(path));
     }

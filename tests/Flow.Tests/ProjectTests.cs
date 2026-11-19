@@ -187,8 +187,13 @@ public sealed class ProjectTests
         }
     }
 
-    private static async Task RestoreAsync(string projectPath, string emptyPackageSource)
+    private static async Task RestoreAsync(string projectPath, string fixtureRoot)
     {
+        // Temporary projects live outside the repository and do not inherit its SDK policy.
+        // Pin the common root so restore and later MSBuildWorkspace reads use the same policy.
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "TestAssets", "global.json"),
+            Path.Combine(fixtureRoot, "global.json"), overwrite: true);
+
         // These fixtures use SDK reference packs only and must not depend on a public package feed.
         var start = new ProcessStartInfo("dotnet")
         {
@@ -196,7 +201,7 @@ public sealed class ProjectTests
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
-        foreach (var argument in new[] { "restore", projectPath, "--source", emptyPackageSource, "-p:NuGetAudit=false" })
+        foreach (var argument in new[] { "restore", projectPath, "--source", fixtureRoot, "-p:NuGetAudit=false" })
             start.ArgumentList.Add(argument);
         using var restore = Process.Start(start)!;
         var standardOutput = restore.StandardOutput.ReadToEndAsync();
