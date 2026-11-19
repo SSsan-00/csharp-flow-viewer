@@ -81,7 +81,8 @@ public sealed class RazorProjectBindingTests
             }
             var compilation = await project.GetCompilationAsync();
             Assert.IsNotNull(compilation);
-            Assert.IsEmpty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+            var errors = compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
+            Assert.IsEmpty(errors, string.Join(Environment.NewLine, errors.Select(diagnostic => diagnostic.ToString())));
 
             // Construct the session from an already evaluated Roslyn project. This does not use a
             // BuildHost, and does not replace the separate end-to-end ProjectLoader tests.
