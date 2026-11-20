@@ -23,6 +23,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm --prefix tools/preview ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\tools\preview\node_modules\.bin\playwright-core.cmd install chromium
+          node tools/preview/node_modules/playwright-core/cli.js install chromium --only-shell
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          from pathlib import Path
+          p = Path("src/Flow.Desktop/Preview/preview.js")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace('    } catch {\n      if (request !== generation) return;', '    } catch (error) {\n      console.error(error.stack || error.message);\n      if (request !== generation) return;', 1)
+          p.write_text(s, encoding="utf-8")
+          p = Path("tools/preview/test.mjs")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace('  await page.addInitScript(() => {', '  page.on("console", message => console.log("browser:", message.text()));\n  page.on("pageerror", error => console.log("pageerror:", error.stack));\n  await page.addInitScript(() => {', 1)
+          s = s.replace('  await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered"));', '  await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" || message.type === "error"));\n  assert.equal(await page.locator("#feedback").textContent(), "");', 1)
+          p.write_text(s, encoding="utf-8")
+          '@ | python -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm --prefix tools/preview test
