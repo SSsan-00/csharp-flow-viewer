@@ -216,6 +216,82 @@ public sealed class ExternalJavaScriptTests
         Assert.IsNotNull(actual.EntryId);
     }
 
+    [TestMethod]
+    public async Task InlineChangeFollowsDeferredClassicScriptWithoutTreatingItAsAvailableDuringParsing()
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Index.cshtml", """
+            @page
+            <script defer src="/js/orders.js"></script>
+            <script>function parserCall() { reload(); } </script>
+            <select onchange="reload()"></select>
+            """);
+        var script = tree.Add("wwwroot/js/orders.js", "function reload() { return 1; }");
+        using var session = tree.Open(pagePath, script);
+        var page = await ReadPage(session);
+        var node = Assert.ContainsSingle(page.Analyze(-1).Nodes.Where(node => node.Label == "onchange → reload()"));
+        Assert.AreEqual(script, node.TargetFilePath);
+        Assert.AreEqual(4, node.Source!.Line);
+        var early = page.Entries.Single(entry => entry.Name == "parserCall");
+        Assert.IsNull(FindCall(page.Analyze(early.Id), "reload()").TargetMethod);
+        var targetFile = session.Files.Single(file => file.Path == script);
+        var js = await session.ReadJavaScriptAsync(targetFile, CancellationToken.None, page);
+        var definition = js.Entries.Single(entry => entry.Name == "reload");
+        Assert.AreEqual(definition.Id, node.TargetMethod);
+        var callers = await session.FindCallersAsync(targetFile, definition.Id, CancellationToken.None);
+        Assert.AreEqual(node.Source, Assert.ContainsSingle(callers.Locations).Source);
+    }
+
+    [TestMethod]
+    public void InlineChangeFollowsUnambiguousExplicitWindowFunction()
+    {
+        var page = new RazorSourceFile("""
+            @page
+            <script>
+              window.reload = () => { return 1; };
+              window.changed = function () { return 2; };
+              window.changed = other;
+              window.onBranch = () => 1;
+              if (flag) window.onBranch = () => 2;
+            </script>
+            <select onchange="reload()"></select>
+            <select oninput="window.reload()"></select>
+            <button onclick="changed()"></button>
+            <input onblur="onBranch()">
+            """, Path.GetFullPath("Index.cshtml"));
+        var graph = page.Analyze(-1);
+        var reload = page.Entries.Single(entry => entry.Name == "reload");
+        Assert.AreEqual(reload.Id, FindCall(graph, "onchange → reload()").TargetMethod);
+        Assert.AreEqual(reload.Id, FindCall(graph, "oninput → window.reload()").TargetMethod);
+        Assert.IsNull(FindCall(graph, "onclick → changed()").TargetMethod);
+        Assert.IsNull(FindCall(graph, "onblur → onBranch()").TargetMethod);
+    }
+
+    [TestMethod]
+    public async Task InlineChangeDoesNotLinkAmbiguousOrOptionalDeferredDefinitions()
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Index.cshtml", """
+            @page
+            <script defer src="/js/one.js"></script>
+            <script defer src="/js/two.js"></script>
+            <script defer async src="/js/optional.js"></script>
+            @if (true) { <script defer src="/js/guarded.js"></script> }
+            <select onchange="reload()"></select>
+            <button onclick="optional()"></button>
+            <input oninput="guarded()" />
+            """);
+        var one = tree.Add("wwwroot/js/one.js", "function reload() {}");
+        var two = tree.Add("wwwroot/js/two.js", "function reload() {}");
+        var optional = tree.Add("wwwroot/js/optional.js", "function optional() {}");
+        var guarded = tree.Add("wwwroot/js/guarded.js", "function guarded() {}");
+        using var session = tree.Open(pagePath, one, two, optional, guarded);
+        var page = await ReadPage(session);
+        var graph = page.Analyze(-1);
+        foreach (var label in new[] { "onchange → reload()", "onclick → optional()", "oninput → guarded()" })
+            Assert.IsNull(FindCall(graph, label).TargetMethod);
+    }
+
     private static FlowNode FindCall(FlowDiagram graph, string label) => graph.Nodes.Single(item => item.Label == label);
 
     private static Task<RazorSourceFile> ReadPage(ProjectSession session) =>

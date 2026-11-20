@@ -102,7 +102,9 @@ internal sealed class RazorMarkupReader
                         if (element.Attribute("src") is { } scriptSource)
                             references.Add(new RazorScriptReference(scriptSource.Value,
                                 document.Range(scriptSource.ValueStart, scriptSource.ValueLength), module, scriptSource.IsDynamic,
-                                element.Attributes.Keys.Any(name => name is "async" or "defer" or "nomodule")));
+                                element.Attributes.Keys.Any(name => name is "async" or "defer" or "nomodule"),
+                                element.Attribute("defer") is { IsDynamic: false }
+                                    && element.Attribute("async") is null && element.Attribute("nomodule") is null));
                         else scripts.Add(document.ProjectScript(position, contentEnd - position, module));
                     }
                     else if (element.Attribute("language") is { } language && !language.Value.Equals("javascript", StringComparison.OrdinalIgnoreCase))

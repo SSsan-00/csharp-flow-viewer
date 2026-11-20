@@ -12,6 +12,7 @@ public sealed record RazorJavaScriptFragment(string Text, SourceRange Source, bo
 {
     internal IReadOnlyDictionary<int, SourceRange>? RenderingSlots { get; init; }
     internal bool IsolatedClassic { get; init; }
+    internal bool VisibleToInlineEvents { get; init; }
 }
 
 /// <summary>イベントの登録候補。条件付き登録や旧IE専用のAPIを確定した動作と区別する。</summary>
@@ -46,6 +47,8 @@ public sealed class RazorJavaScript
     private readonly Dictionary<(XhrState Client, int Owner), XhrUsage> xhrUsages = [];
     private readonly Scope globals = new(null);
     private readonly HashSet<int> windowFunctions = [];
+    private readonly HashSet<int> explicitWindowFunctions = [];
+    private readonly Dictionary<Scope, bool> isolatedClassicScopes = new();
     private readonly Dictionary<string, ScriptUnit> externalUnits = new(LocalJavaScriptFiles.PathComparer);
     private readonly Dictionary<string, (ScriptUnit Unit, Scope Scope)> modules = new(LocalJavaScriptFiles.PathComparer);
     private int nextId = -2;
@@ -117,6 +120,8 @@ public sealed class RazorJavaScript
 
             if (external) externalUnits.Add(path!, unit);
             if (external && fragment.IsModule) modules.Add(path!, (unit, scope));
+            if (fragment.IsolatedClassic && !fragment.IsModule)
+                isolatedClassicScopes.Add(scope, fragment.VisibleToInlineEvents);
             var entry = AddEntry(name, unit.Root, unit, scope);
             scope.OwnerEntryId = entry.Entry.Id;
             Index(unit.Root, unit, scope, token, 0, conditional: false);
@@ -225,7 +230,7 @@ public sealed class RazorJavaScript
             failed.Failure = "JavaScriptを静的に解析できません。診断を確認してください。";
             return failed.Entry.Id;
         }
-        var scope = new Scope(globals);
+        var scope = new Scope(globals) { InlineEvent = true };
         var entry = AddEntry(name, unit.Root, unit, scope);
         scope.OwnerEntryId = entry.Entry.Id;
         // インラインイベントのeventはブラウザーが渡す引数として扱う。
@@ -317,7 +322,8 @@ public sealed class RazorJavaScript
             if (node is FunctionDeclaration { Id: { } id })
             {
                 scope.Declare(id.Name, conditional ? null : entry.Entry.Id);
-                if (!conditional && ReferenceEquals(scope, globals)) windowFunctions.Add(entry.Entry.Id);
+                if (!conditional && (scope == globals || isolatedClassicScopes.ContainsKey(scope)))
+                    windowFunctions.Add(entry.Entry.Id);
             }
             if (function.Id is { } ownName)
                 functionScope.Declare(ownName.Name, entry.Entry.Id);
@@ -373,10 +379,26 @@ public sealed class RazorJavaScript
                 scope.Xhrs[assigned.Name] = client;
             }
         }
-        else if (node is AssignmentExpression { Left: MemberExpression { Object: Identifier { Name: "window" } } property }
+        else if (node is AssignmentExpression { Left: MemberExpression { Object: Identifier { Name: "window" } } property } windowAssignment
             && !scope.IsDeclared("window") && PropertyName(property) is { } name)
         {
-            globals.Block(name);
+            var scriptScope = isolatedClassicScopes.ContainsKey(scope) ? scope : globals;
+            // Only publish a function from a direct assignment in a classic script.
+            if (depth == 2 && !conditional && !unit.ContainsRazor && (scope == globals || isolatedClassicScopes.ContainsKey(scope))
+                && windowAssignment.Operator == Operator.Assignment
+                && functions.TryGetValue(windowAssignment.Right, out var assignedFunction))
+            {
+                scriptScope.Declare(name, assignedFunction.Entry.Id);
+                windowFunctions.Add(assignedFunction.Entry.Id);
+                explicitWindowFunctions.Add(assignedFunction.Entry.Id);
+                if (windowAssignment.Right is IFunction { Id: null })
+                {
+                    var renamed = assignedFunction.Entry with { Name = name, Signature = name };
+                    entries[entries.FindIndex(item => item.Id == renamed.Id)] = renamed;
+                    assignedFunction.Entry = renamed;
+                }
+            }
+            else scriptScope.Block(name);
         }
         if (node is CallExpression { Callee: Identifier { Name: "eval" } })
         {
@@ -557,14 +579,43 @@ public sealed class RazorJavaScript
     internal int? ResolveCall(CallExpression call, EntryData entry)
     {
         var scope = scopes.TryGetValue(call, out var indexed) ? indexed : entry.Scope;
-        if (call.Callee is Identifier id) return scope.Resolve(id.Name);
+        if (call.Callee is Identifier id) return ResolveCallName(scope, id.Name);
         if (call.Callee is not MemberExpression { Object: Identifier owner } member || PropertyName(member) is not { } name)
             return null;
         if (scope.FindNamespace(owner.Name) is { } module) return module.GetValueOrDefault(name);
-        if (owner.Name != "window" || scope.IsDeclared("window") || scope.Resolve(name) != globals.Resolve(name)
-            || globals.Resolve(name) is not { } target) return null;
-        return windowFunctions.Contains(target) ? target : null;
+        if (owner.Name != "window" || scope.IsDeclared("window"))
+            return null;
+        var target = scope.IsInInlineEvent ? ResolveCallName(scope, name)
+            : scope.Resolve(name) == globals.Resolve(name) ? globals.Resolve(name) : null;
+        return target is int key && windowFunctions.Contains(key) ? key : null;
     }
+
+    private int? ResolveCallName(Scope scope, string name)
+    {
+        var direct = scope.Resolve(name);
+        if (direct is int directId && explicitWindowFunctions.Contains(directId)
+            && scope.DeclarationScope(name)?.IsDeclared("window") == true) return null;
+        if (!scope.IsInInlineEvent || isolatedClassicScopes.Count == 0) return direct;
+        for (var lexical = scope; lexical != globals; lexical = lexical.Parent!)
+        {
+            if (lexical.Dynamic || lexical.DeclaresHere(name)) return direct;
+            if (lexical.Parent is null) return null;
+        }
+        if (globals.Dynamic) return null;
+
+        Scope? candidate = null;
+        foreach (var (isolated, visible) in isolatedClassicScopes)
+        {
+            if (isolated.Dynamic) return null;
+            if (!isolated.DeclaresHere(name)) continue;
+            if (globals.DeclaresHere(name) || candidate is not null || !visible) return null;
+            candidate = isolated;
+        }
+        if (candidate is null) return direct;
+        var target = candidate.ResolveLocal(name);
+        return target is int key && explicitWindowFunctions.Contains(key) && candidate.IsDeclared("window") ? null : target;
+    }
+
     internal MethodEntry? GetEntry(int id) => data.GetValueOrDefault(id)?.Entry;
 
     internal record CallSite(string? Name, SourceRange Source, MethodEntry Owner, FlowTarget? Target);
@@ -678,6 +729,9 @@ public sealed class RazorJavaScript
     {
         private readonly Dictionary<string, List<int?>> names = new(StringComparer.Ordinal);
         public Scope? Parent { get; } = parent;
+        public bool InlineEvent { get; init; }
+        public bool IsInInlineEvent => InlineEvent || Parent?.IsInInlineEvent == true;
+        public bool DeclaresHere(string name) => names.ContainsKey(name);
         public int OwnerEntryId { get; set; }
         public bool Dynamic { get; set; }
         public Dictionary<string, Dictionary<string, int?>> Namespaces { get; } = new(StringComparer.Ordinal);

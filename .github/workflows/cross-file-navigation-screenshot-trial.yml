@@ -1,4 +1,4 @@
-name: Razor overview and callers Windows verification
+name: Razor onchange reload definition Windows verification
 on:
   push:
     branches: [codex/cross-file-nav-screen-trial]
@@ -20,12 +20,12 @@ jobs:
         run: |
           @'
           @page
-          <script src="~/js/nav-target.js"></script>
-          <select id="orderKind" onchange="externalTarget(this.value)"><option value="standard">Standard</option></select>
+          <script defer src="~/js/nav-target.js"></script>
+          <select id="orderKind" onchange="reload()"><option value="standard">Standard</option></select>
           '@ | Set-Content 'samples/OrderProcessing/Pages/NavigationDemo.cshtml' -Encoding utf8
           New-Item -ItemType Directory -Force 'samples/OrderProcessing/wwwroot/js' | Out-Null
-          'function externalTarget(kind) { const xhr = new XMLHttpRequest(); xhr.open("GET", "/Orders"); xhr.onload = responseReady; xhr.send(); } function responseReady() { console.log("loaded"); } function noCaller() { return false; }' | Set-Content 'samples/OrderProcessing/wwwroot/js/nav-target.js' -Encoding utf8
-          'function externalTarget() { console.log("not referenced"); }' | Set-Content 'samples/OrderProcessing/wwwroot/js/unrelated.js' -Encoding utf8
+          'window.reload = function () { const xhr = new XMLHttpRequest(); xhr.open("GET", "/Orders"); xhr.onload = responseReady; xhr.send(); }; function responseReady() { console.log("loaded"); } function noCaller() { return false; }' | Set-Content 'samples/OrderProcessing/wwwroot/js/nav-target.js' -Encoding utf8
+          'function reload() { console.log("not referenced"); }' | Set-Content 'samples/OrderProcessing/wwwroot/js/unrelated.js' -Encoding utf8
           'namespace NavigationDemo; public static class NavigationCaller { public static void InvokeCross() => NavigationTarget.GoCross(); }' | Set-Content 'samples/OrderProcessing/NavigationCaller.cs' -Encoding utf8
           'namespace NavigationDemo; public static class NavigationTarget { public static void GoCross() => System.Console.WriteLine("target"); }' | Set-Content 'samples/OrderProcessing/NavigationTarget.cs' -Encoding utf8
           dotnet restore samples/OrderProcessing/OrderProcessing.csproj
@@ -116,17 +116,17 @@ jobs:
               Select-Entry 'MethodsBox' 'ページ全体'
               $listMode = Find-Id $win 'ListButton'
               if ($listMode.Current.Name -eq '一覧') { Invoke-Button 'ListButton' }
-              Select-Entry 'NodesBox' 'onchange.*externalTarget'
+              Select-Entry 'NodesBox' 'onchange.*reload'
               Wait-Text 'SourceLocation' '^L3'
               Capture 'overview-event.png'
               Invoke-Button 'FollowButton'
               Wait-Title 'nav-target[.]js'
-              Wait-Text 'FlowTitle' 'externalTarget'
+              Wait-Text 'FlowTitle' 'reload'
             }
             Enter-OverviewCall
             Invoke-Button 'BackButton'
             Wait-Title 'NavigationDemo[.]cshtml'
-            Wait-Text 'NodeLabel' 'onchange.*externalTarget'
+            Wait-Text 'NodeLabel' 'onchange.*reload'
             Wait-Text 'SourceLocation' '^L3'
             Enter-OverviewCall
             Select-Entry 'MethodsBox' 'noCaller'
@@ -138,8 +138,8 @@ jobs:
             Wait-Title 'NavigationDemo[.]cshtml'
             Select-File 'nav-target.js' 'nav-target[.]js'
             Wait-Title 'nav-target[.]js'
-            Select-Entry 'MethodsBox' 'externalTarget'
-            Wait-Text 'FlowTitle' 'externalTarget'
+            Select-Entry 'MethodsBox' 'reload'
+            Wait-Text 'FlowTitle' 'reload'
             Invoke-Button 'BackButton'
             Wait-Title 'NavigationDemo[.]cshtml'
             Wait-Text 'SourceLocation' '^L3'

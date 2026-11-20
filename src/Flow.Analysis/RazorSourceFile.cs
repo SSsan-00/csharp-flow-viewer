@@ -49,9 +49,12 @@ public sealed class RazorSourceFile
                 scriptNotices.Add($"解析は部分的 · L{reference.Source.Line}: 外部スクリプトを読み込めません: {reference.Url}");
                 continue;
             }
-            // Show the file, but do not infer an unconditional page global for an optional script.
-            var isolated = reference.HasDeferredExecution || document.GuardsAt(reference.Source.Offset).Count > 0;
-            scripts.Add((reference.Source.Offset, fragment with { IsolatedClassic = isolated }));
+            var guarded = document.GuardsAt(reference.Source.Offset).Count > 0;
+            scripts.Add((reference.Source.Offset, fragment with
+            {
+                IsolatedClassic = reference.HasDeferredExecution || guarded,
+                VisibleToInlineEvents = reference.IsOrderedDeferred && !guarded
+            }));
             scriptLinks.Add((reference.Source, fragment.Source.FilePath!));
         }
         javaScript = new RazorJavaScript(text, filePath,
