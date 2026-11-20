@@ -437,11 +437,11 @@ public partial class MainWindow : Window
     {
         selectedNode = node;
         NodeLabel.Text = node.Label + (node.IsReachable ? "" : "  ·  到達不能");
-        var navigation = !CanFollow(node) ? NavigationHint(node) : "選択した呼び出しの定義へ移動 (F12)";
+        var navigation = NavigationHint(node);
         NodeLabel.ToolTip = $"{NodeLabel.Text}\n{navigation}";
         FollowButton.ToolTip = navigation;
-        NavigationStatus.Text = CanFollow(node) && node.TargetFilePath is { } targetPath
-            ? $"定義: {Path.GetFileName(targetPath)}" : navigation;
+        NavigationStatus.Text = CanFollow(node) && DefinitionPath(node) is { } targetPath
+            ? $"{(node.TargetMethod is not null ? "定義" : "宣言のみ")}: {Path.GetFileName(targetPath)}" : navigation;
         NavigationStatus.ToolTip = navigation;
         NavigationStatus.Visibility = Visibility.Visible;
         if (navigateSource && node.Source is { } range) NavigateSource(range);
@@ -463,9 +463,14 @@ public partial class MainWindow : Window
 
     private async Task FollowSelectedAsync()
     {
-        if (busy || selectedNode is not { TargetMethod: { } target } caller || method is not { } entry
-            || currentFile is not { } file || FindTargetFile(caller) is not { } targetFile) return;
+        if (busy || selectedNode is not { } caller || method is not { } entry || currentFile is not { } file
+            || !CanFollow(caller) || FindTargetFile(caller) is not { } targetFile) return;
         history.Push((file, entry.Id, caller.Id, razorSource, javaScriptSource));
+        if (caller.TargetMethod is not { } target)
+        {
+            await NavigateDeclarationAsync(targetFile, caller.TargetDeclaration!, caller.RequiresRuntimeDispatch);
+            return;
+        }
         if (targetFile == file && target == entry.Id)
         {
             NavigateSource(entry.Source with { Length = 0 });
