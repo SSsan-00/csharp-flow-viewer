@@ -17,7 +17,8 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private readonly record struct State(int Block, int Context);
     private sealed record Continuation(ControlFlowRegion Region, string Resume, int Parent);
     private readonly record struct Visible(NodeKind Kind, string Label, SourceRange? Source, int? Target = null, bool IsCaseTest = false,
-        string? TargetFilePath = null, bool RequiresRuntimeDispatch = false, SourceRange? TargetDeclaration = null);
+        string? TargetFilePath = null, bool RequiresRuntimeDispatch = false, SourceRange? TargetDeclaration = null,
+        IReadOnlyList<ImplementationCandidate>? ImplementationCandidates = null);
     private sealed record RegionEntry(ControlFlowRegion Region, ControlFlowRegion? EnclosingFinally);
 
     private readonly Dictionary<State, string> states = new();
@@ -555,6 +556,9 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         return target;
     }
 
+    private IReadOnlyList<INamedTypeSymbol>? candidateTypes;
+    private readonly Dictionary<(ISymbol Method, ISymbol Receiver), IReadOnlyList<ImplementationCandidate>> candidateCache = new();
+
     private const string ExclusionTimeout = "追跡対象外の正規表現が時間内に評価できなかったため、以降の呼び出しには除外設定を適用していません。";
 
     private static readonly SymbolDisplayFormat QualifiedTypeName = new(
@@ -587,18 +591,24 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
             dispatched = implementation is null;
             if (implementation is not null) definition = implementation;
         }
-        var target = dispatched ? null : ResolveTarget(definition);
-        // A compile-time declaration is not proof of the runtime implementation.
-        var declaration = target is null && method.MethodKind != MethodKind.DelegateInvoke
+        var target = method.MethodKind == MethodKind.DelegateInvoke ? null
+            : ResolveTarget(dispatched ? compileTimeDefinition : definition);
+        var declaration = (target is null || dispatched) && method.MethodKind != MethodKind.DelegateInvoke
             ? ResolveDeclaration(compileTimeDefinition) : null;
+        var candidates = dispatched && target is null && declaration is not null && method.IsAbstract && !method.IsStatic
+            ? FindImplementations(method, receiver) : null;
         return new Visible(NodeKind.Call, label + (dispatched ? " · 実行時に決定" : ""), OperationSource(operation),
-            target?.Offset, TargetFilePath: target?.Path, RequiresRuntimeDispatch: dispatched, TargetDeclaration: declaration);
+            target?.Offset, TargetFilePath: target?.Path, RequiresRuntimeDispatch: dispatched,
+            TargetDeclaration: declaration, ImplementationCandidates: candidates);
     }
 
-    private static IMethodSymbol? ResolveSealedReceiver(IMethodSymbol method, ITypeSymbol? receiver)
+    private static IMethodSymbol? ResolveSealedReceiver(IMethodSymbol method, ITypeSymbol? receiver) =>
+        receiver is INamedTypeSymbol { TypeKind: TypeKind.Class, IsSealed: true } exactType
+            ? ResolveClassImplementation(method, exactType) : null;
+
+    private static IMethodSymbol? ResolveClassImplementation(IMethodSymbol method, INamedTypeSymbol exactType)
     {
-        if (receiver is not INamedTypeSymbol { TypeKind: TypeKind.Class, IsSealed: true } exactType
-            || method.ContainingType.TypeKind != TypeKind.Class)
+        if (method.ContainingType.TypeKind != TypeKind.Class)
             return null;
 
         var slot = method.OriginalDefinition;
@@ -615,6 +625,60 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
             }
         }
         return null;
+    }
+
+    private IReadOnlyList<ImplementationCandidate> FindImplementations(IMethodSymbol method, ITypeSymbol? receiver)
+    {
+        if (receiver is not INamedTypeSymbol receiverType)
+            return [];
+        var key = ((ISymbol)method.ConstructedFrom, (ISymbol)receiverType);
+        if (candidateCache.TryGetValue(key, out var cached)) return cached;
+        if (candidateCache.Count >= 32) return [];
+
+        var candidates = new Dictionary<(string? Path, int Offset), ImplementationCandidate>();
+        foreach (var type in candidateTypes ??= CandidateTypes())
+        {
+            token.ThrowIfCancellationRequested();
+            if (!HasReceiverType(type, receiverType)) continue;
+            var implementation = method.ContainingType.TypeKind == TypeKind.Interface
+                ? type.FindImplementationForInterfaceMember(method.ConstructedFrom) as IMethodSymbol
+                : ResolveClassImplementation(method, type);
+            if (implementation is not { IsAbstract: false } || ResolveTarget(implementation) is not { } target
+                || ResolveDeclaration(implementation) is not { } declaration) continue;
+            var label = implementation.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+            candidates.TryAdd((target.Path, target.Offset), new ImplementationCandidate(label, declaration, target.Offset, target.Path));
+        }
+        return candidateCache[key] = candidates.Values.OrderBy(item => item.Label, StringComparer.Ordinal)
+            .ThenBy(item => item.Declaration.FilePath, StringComparer.Ordinal)
+            .ThenBy(item => item.TargetMethod).Take(16).ToArray();
+    }
+
+    private static bool HasReceiverType(INamedTypeSymbol type, INamedTypeSymbol receiver)
+    {
+        if (receiver.TypeKind == TypeKind.Interface)
+            return type.AllInterfaces.Any(item => SymbolEqualityComparer.Default.Equals(item, receiver));
+        for (INamedTypeSymbol? current = type; current is not null; current = current.BaseType)
+            if (SymbolEqualityComparer.Default.Equals(current, receiver)) return true;
+        return false;
+    }
+
+    private IReadOnlyList<INamedTypeSymbol> CandidateTypes()
+    {
+        var result = new List<INamedTypeSymbol>();
+        var pending = new Stack<INamespaceOrTypeSymbol>();
+        pending.Push(markers.Model.Compilation.Assembly.GlobalNamespace);
+        for (var visited = 0; pending.Count > 0 && visited < 5000; visited++)
+        {
+            token.ThrowIfCancellationRequested();
+            var item = pending.Pop();
+            if (item is INamedTypeSymbol { TypeKind: TypeKind.Class or TypeKind.Struct, IsAbstract: false } type)
+                result.Add(type);
+            IEnumerable<INamespaceOrTypeSymbol> children = item is INamespaceSymbol ns
+                ? ns.GetMembers() : item.GetTypeMembers();
+            foreach (var child in children.OrderByDescending(member => member.MetadataName, StringComparer.Ordinal))
+                pending.Push(child);
+        }
+        return result;
     }
 
     private (int Offset, string? Path)? ResolveTarget(IMethodSymbol method)
@@ -742,7 +806,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private string Add(Visible visible, bool reachable)
     {
         var id = "n" + nodes.Count;
-        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest, visible.TargetFilePath, visible.RequiresRuntimeDispatch, visible.TargetDeclaration));
+        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest, visible.TargetFilePath, visible.RequiresRuntimeDispatch, visible.TargetDeclaration, visible.ImplementationCandidates));
         return id;
     }
 

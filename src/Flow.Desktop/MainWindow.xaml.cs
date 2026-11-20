@@ -21,7 +21,7 @@ public partial class MainWindow : Window
     private const int MaxPreviewCharacters = 380_000;
     private readonly PreviewHost preview;
     private readonly CancellationTokenSource lifetime = new();
-    private readonly Stack<(ProjectFile File, int Method, string Node, RazorSourceFile? Razor, JavaScriptSourceFile? Script)> history = new();
+    private readonly Stack<(ProjectFile File, int Method, string Node, RazorSourceFile? Razor, JavaScriptSourceFile? Script, DefinitionView View)> history = new();
     private readonly List<string> diagnostics = [];
     private ProjectSession? project;
     private SourceFile? source;
@@ -393,6 +393,8 @@ public partial class MainWindow : Window
         appliedMarks = null;
         editorAnnotations.Clear();
         Editor.TextArea.TextView.Redraw();
+        ShowDefinitionView(DefinitionView.Direct);
+        ClearDeclarationCandidates();
         NodeLabel.Text = "ノードを選ぶとソース行へ移動";
         NodeLabel.ToolTip = null;
         NavigationStatus.Text = "";
@@ -441,7 +443,7 @@ public partial class MainWindow : Window
         NodeLabel.ToolTip = $"{NodeLabel.Text}\n{navigation}";
         FollowButton.ToolTip = navigation;
         NavigationStatus.Text = CanFollow(node) && DefinitionPath(node) is { } targetPath
-            ? $"{(node.TargetMethod is not null ? "定義" : "宣言のみ")}: {Path.GetFileName(targetPath)}" : navigation;
+            ? $"{(node.TargetMethod is null ? "宣言のみ" : node.RequiresRuntimeDispatch ? "宣言のフロー" : "定義")}: {Path.GetFileName(targetPath)}" : navigation;
         NavigationStatus.ToolTip = navigation;
         NavigationStatus.Visibility = Visibility.Visible;
         if (navigateSource && node.Source is { } range) NavigateSource(range);
@@ -465,28 +467,31 @@ public partial class MainWindow : Window
     {
         if (busy || selectedNode is not { } caller || method is not { } entry || currentFile is not { } file
             || !CanFollow(caller) || FindTargetFile(caller) is not { } targetFile) return;
-        history.Push((file, entry.Id, caller.Id, razorSource, javaScriptSource));
+        history.Push((file, entry.Id, caller.Id, razorSource, javaScriptSource, definitionView));
         if (caller.TargetMethod is not { } target)
         {
-            await NavigateDeclarationAsync(targetFile, caller.TargetDeclaration!, caller.RequiresRuntimeDispatch);
+            await NavigateDeclarationAsync(targetFile, caller.TargetDeclaration!, caller);
             return;
         }
+        var view = caller.RequiresRuntimeDispatch ? DefinitionView.RuntimeDeclaration : DefinitionView.Direct;
         if (targetFile == file && target == entry.Id)
         {
             NavigateSource(entry.Source with { Length = 0 });
             if (diagram?.Nodes.FirstOrDefault(node => node.Kind == NodeKind.Start) is { } start)
                 JumpToPreviewNode(start, navigateSource: false, keepList: true);
-            SetStatus("自己再帰: 同じメソッドの開始位置へ移動しました。");
+            ShowDefinitionView(view);
+            SetStatus(caller.RequiresRuntimeDispatch ? "宣言の開始位置へ移動しました。実装は実行時に決まります。"
+                : "自己再帰: 同じメソッドの開始位置へ移動しました。");
             SetBusy(false);
             return;
         }
-        await NavigateEntryAsync(targetFile, target, razorContext: razorSource, jsContext: javaScriptSource);
+        await NavigateEntryAsync(targetFile, target, razorContext: razorSource, jsContext: javaScriptSource, view: view);
     }
 
     private async void Back(object? sender, RoutedEventArgs args)
     {
         if (busy || !history.TryPop(out var previous)) return;
-        await NavigateEntryAsync(previous.File, previous.Method, previous.Node, previous.Razor, previous.Script);
+        await NavigateEntryAsync(previous.File, previous.Method, previous.Node, previous.Razor, previous.Script, previous.View);
     }
 
     private async Task SelectMethodAsync(int id, string? returnTo = null)
@@ -656,6 +661,8 @@ public partial class MainWindow : Window
         TraceSettingsButton.IsEnabled = !value;
         SettingsBox.IsEnabled = !value && SettingsBox.Items.Count > 1;
         BrowserPane.IsEnabled = !value;
+        OpenCandidateButton.IsEnabled = !value && CandidateBox.SelectedItem is ImplementationCandidate;
+        CandidateBox.IsEnabled = !value;
         UpdateSurface();
     }
 

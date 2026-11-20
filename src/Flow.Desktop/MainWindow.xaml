@@ -137,15 +137,19 @@
             </DockPanel>
           </Border>
           <Border Grid.Row="1" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="6,4">
-            <DockPanel LastChildFill="False">
-              <Button DockPanel.Dock="Left" x:Name="CopyButton" Content="コピー" Click="Copy" ToolTip="Mermaid をコピー" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
-              <Button DockPanel.Dock="Left" x:Name="SaveButton" Content=".mmd 保存" Click="Save" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
-              <Button DockPanel.Dock="Right" x:Name="FitButton" Content="全体" Click="Fit" ToolTip="図を全体表示" Padding="6,3" IsEnabled="False"/>
-              <Button DockPanel.Dock="Right" x:Name="ZoomIn" Content="+" Click="Zoom" ToolTip="拡大" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
-              <TextBlock DockPanel.Dock="Right" x:Name="ZoomLabel" Text="—" MinWidth="39" HorizontalAlignment="Center" TextAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Muted}"/>
-              <Button DockPanel.Dock="Right" x:Name="ZoomOut" Content="−" Click="Zoom" ToolTip="縮小" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
-              <Button DockPanel.Dock="Right" x:Name="ListButton" Content="一覧" Click="ToggleList" ToolTip="図とノード一覧を切り替え" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
-            </DockPanel>
+            <StackPanel>
+              <DockPanel LastChildFill="False">
+                <Button DockPanel.Dock="Left" x:Name="CopyButton" Content="コピー" Click="Copy" ToolTip="Mermaid をコピー" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
+                <Button DockPanel.Dock="Left" x:Name="SaveButton" Content=".mmd 保存" Click="Save" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
+                <Button DockPanel.Dock="Right" x:Name="FitButton" Content="全体" Click="Fit" ToolTip="図を全体表示" Padding="6,3" IsEnabled="False"/>
+                <Button DockPanel.Dock="Right" x:Name="ZoomIn" Content="+" Click="Zoom" ToolTip="拡大" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
+                <TextBlock DockPanel.Dock="Right" x:Name="ZoomLabel" Text="—" MinWidth="39" HorizontalAlignment="Center" TextAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Muted}"/>
+                <Button DockPanel.Dock="Right" x:Name="ZoomOut" Content="−" Click="Zoom" ToolTip="縮小" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
+                <Button DockPanel.Dock="Right" x:Name="ListButton" Content="一覧" Click="ToggleList" ToolTip="図とノード一覧を切り替え" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
+              </DockPanel>
+              <TextBlock x:Name="DefinitionBanner" Visibility="Collapsed" Margin="4,5,4,3"
+                         Foreground="{DynamicResource WarningBrush}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+            </StackPanel>
           </Border>
 
           <Grid Grid.Row="2" Background="{DynamicResource CanvasBrush}">
@@ -166,6 +170,12 @@
               </Border>
               <TextBlock x:Name="EmptyTitle" Text="プロジェクトを選択" FontSize="19" FontWeight="SemiBold" TextAlignment="Center" TextWrapping="Wrap"/>
               <TextBlock x:Name="EmptyHelp" Text="" Style="{StaticResource Muted}" Margin="0,7,0,0" TextAlignment="Center" TextWrapping="Wrap"/>
+              <StackPanel x:Name="CandidatePanel" Visibility="Collapsed" Margin="0,14,0,0">
+                <TextBlock Text="このプロジェクトの実装候補" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <ComboBox x:Name="CandidateBox" DisplayMemberPath="Label" SelectionChanged="CandidateChanged" PreviewKeyDown="CandidateKeyDown"
+                          AutomationProperties.Name="実装候補" Margin="0,5,0,5"/>
+                <Button x:Name="OpenCandidateButton" Content="候補のフローを開く" Click="OpenCandidate" IsEnabled="False"/>
+              </StackPanel>
             </StackPanel>
           </Grid>
           <Border Grid.Row="3" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,6">
