@@ -24,7 +24,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
     {
         end = Add(NodeKind.End, "JavaScript 終了", entry.Body);
         if (entry.Unit.ContainsRazor)
-            MarkPartial("Razorが生成する条件と値は未解決です。この図は静的に抽出できた処理の候補を表示します。");
+            MarkPartial("Razorが生成するJavaScriptの値と実行経路は確定できません。この図は静的に抽出できた処理の候補を表示します。");
         if (entry.Body is null)
         {
             var unavailable = Add(NodeKind.Exception, entry.Failure ?? "JavaScript解析未解決", null);
@@ -70,6 +70,11 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     return Sequence(program.Body.ToArray(), next, breakTarget, continueTarget);
                 case BlockStatement block:
                     return Sequence(block.Body.ToArray(), next, breakTarget, continueTarget);
+                case EmptyStatement when entry.Unit.RenderingSlots?.TryGetValue(statement.Start, out var slot) == true:
+                    var boundary = Add(NodeKind.Exception, "Razorが生成するJavaScript · 実行経路未解決", statement,
+                        source: slot);
+                    Connect(boundary, next, "続行する場合");
+                    return boundary;
                 case FunctionDeclaration:
                 case EmptyStatement:
                     return next;
@@ -297,12 +302,13 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
         return unknown;
     }
 
-    private string Add(NodeKind kind, string label, Node? node, int? target = null, bool ignoreLimit = false)
+    private string Add(NodeKind kind, string label, Node? node, int? target = null, bool ignoreLimit = false,
+        SourceRange? source = null)
     {
         token.ThrowIfCancellationRequested();
         if (!ignoreLimit && nodes.Count >= 1500) throw new AnalysisLimitException();
         var id = "js" + nextId++;
-        nodes.Add(new FlowNode(id, kind, label, node is null ? entry.Entry.Source : owner.Range(entry.Unit, node),
+        nodes.Add(new FlowNode(id, kind, label, source ?? (node is null ? entry.Entry.Source : owner.Range(entry.Unit, node)),
             TargetMethod: target, TargetFilePath: target is null ? null : owner.TargetPath));
         return id;
     }

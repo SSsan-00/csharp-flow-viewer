@@ -8,7 +8,10 @@ namespace Flow.Analysis;
 
 /// <summary>元文書の範囲を保ったJavaScript。Razor式が残る断片は静的なJSとみなさない。</summary>
 public sealed record RazorJavaScriptFragment(string Text, SourceRange Source, bool ContainsRazorCode = false,
-    bool IsModule = false);
+    bool IsModule = false)
+{
+    internal IReadOnlyDictionary<int, SourceRange>? RenderingSlots { get; init; }
+}
 
 /// <summary>イベントの登録候補。条件付き登録や旧IE専用のAPIを確定した動作と区別する。</summary>
 public sealed record RazorJavaScriptBinding(string Selector, string EventName, int? HandlerEntryId,
@@ -58,10 +61,21 @@ public sealed class RazorJavaScript
         {
             token.ThrowIfCancellationRequested();
             var unit = Parse(fragment, inline: false);
-            if (unit is null) continue;
-            parsed.Add(unit);
+            var name = $"JavaScript 初期化 L{fragment.Source.Line}";
             var scope = fragment.IsModule ? new Scope(null) : globals;
-            var entry = AddEntry($"JavaScript 初期化 L{fragment.Source.Line}", unit.Root, unit, scope);
+            if (unit is null)
+            {
+                if (fragment.RenderingSlots is { Count: > 0 })
+                {
+                    var failed = AddEntry(name, null,
+                        new ScriptUnit(fragment.Text, fragment.Text, fragment.Source, null!, false, true,
+                            fragment.RenderingSlots), scope);
+                    failed.Failure = "Razorによる生成部分を除いたJavaScriptは構文を確定できません。";
+                }
+                continue;
+            }
+            parsed.Add(unit);
+            var entry = AddEntry(name, unit.Root, unit, scope);
             scope.OwnerEntryId = entry.Entry.Id;
             Index(unit.Root, unit, scope, token, 0, conditional: false);
         }
@@ -100,20 +114,40 @@ public sealed class RazorJavaScript
         return new RazorJavaScriptProjector(this, entry, token).Build();
     }
 
+    internal (SourceRange Range, IReadOnlyList<SourceRange> NestedFunctions)? ScriptRenderingScope(int entryId)
+    {
+        var entry = data[entryId];
+        if (entry.Unit.RenderingSlots is not { Count: > 0 }) return null;
+        var range = entry.Body is JsProgram or null ? entry.Unit.Source : entry.Entry.Source;
+        var nested = entry.Body is null ? [] : Descendants(entry.Body)
+            .Where(node => node is IFunction).Select(node => Range(entry.Unit, node)).ToArray();
+        return (range, nested);
+    }
+
     private ScriptUnit? Parse(RazorJavaScriptFragment fragment, bool inline, bool approximate = false)
     {
         if (fragment.ContainsRazorCode)
         {
-            Notice($"L{fragment.Source.Line}: Razor式を含むJavaScriptは生成条件と動的な値を確定できません。抽出した処理は候補です。");
+            Notice($"L{fragment.Source.Line}: Razorを含むJavaScriptは生成結果と動的な値を確定できません。抽出した処理は候補です。");
         }
         try
         {
             var parser = new Parser(new ParserOptions { AllowReturnOutsideFunction = inline });
             JsProgram root = fragment.IsModule ? parser.ParseModule(fragment.Text) : parser.ParseScript(fragment.Text);
+            if (fragment.RenderingSlots is { Count: > 0 } slots)
+            {
+                var statementSlots = Descendants(root).OfType<EmptyStatement>().Select(node => node.Start).ToHashSet();
+                if (slots.Keys.Any(offset => !statementSlots.Contains(offset)))
+                {
+                    Notice($"L{fragment.Source.Line}: Razor生成部分の境界を独立したJavaScript文として確定できません。");
+                    return null;
+                }
+            }
             var original = !approximate && fragment.Source.Offset >= 0 && fragment.Source.Offset + fragment.Text.Length <= pageText.Length
                 && (fragment.Source.FilePath is null || fragment.Source.FilePath == pagePath)
                 ? pageText.Substring(fragment.Source.Offset, fragment.Text.Length) : fragment.Text;
-            return new ScriptUnit(fragment.Text, original, fragment.Source, root, approximate, fragment.ContainsRazorCode);
+            return new ScriptUnit(fragment.Text, original, fragment.Source, root, approximate, fragment.ContainsRazorCode,
+                fragment.RenderingSlots);
         }
         catch (ParseErrorException error)
         {
@@ -441,7 +475,8 @@ public sealed class RazorJavaScript
         }
     }
 
-    internal sealed record ScriptUnit(string Text, string OriginalText, SourceRange Source, JsProgram Root, bool Approximate, bool ContainsRazor);
+    internal sealed record ScriptUnit(string Text, string OriginalText, SourceRange Source, JsProgram Root,
+        bool Approximate, bool ContainsRazor, IReadOnlyDictionary<int, SourceRange>? RenderingSlots = null);
     internal sealed class EntryData(MethodEntry entry, Node? body, ScriptUnit unit, Scope scope)
     {
         public MethodEntry Entry { get; set; } = entry;

@@ -6,7 +6,7 @@ using Microsoft.CodeAnalysis.Text;
 namespace Flow.Analysis;
 
 internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<FlowNode> nodes,
-    List<FlowEdge> edges, CancellationToken token)
+    List<FlowEdge> edges, CancellationToken token, IReadOnlyList<SourceRange>? excluded = null)
 {
     private const string End = "render_end";
     private const int MaxConditions = 100;
@@ -15,15 +15,41 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<Fl
 
     public bool IsTruncated { get; private set; }
 
-    public string? Project(SourceRange pageSource)
+    internal static bool IsControl(StatementSyntax statement) => statement is IfStatementSyntax or ForStatementSyntax
+        or CommonForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax or SwitchStatementSyntax;
+
+    public string? Project(SourceRange pageSource, IReadOnlyList<StatementSyntax>? selectedControls = null)
     {
-        var first = Visit(document.ServerCode, End, null, null);
+        var first = selectedControls is null
+            ? Visit(document.ServerCode, End, null, null)
+            : ProjectSelected(selectedControls);
         if (first == End) return null;
-        nodes.Add(new FlowNode("render_start", NodeKind.Start, "サーバー側描画", pageSource));
-        nodes.Add(new FlowNode(End, NodeKind.End, "描画終了", pageSource));
+        nodes.Add(new FlowNode("render_start", NodeKind.Start, selectedControls is null ? "サーバー側描画" : "Razor · JavaScriptの生成", pageSource));
+        nodes.Add(new FlowNode(End, NodeKind.End, selectedControls is null ? "描画終了" : "Razor側の生成終了", pageSource));
         edges.Add(new FlowEdge("render_start", first));
         MarkDisconnectedPaths();
         return "render_start";
+    }
+
+    private string ProjectSelected(IReadOnlyList<StatementSyntax> selectedControls)
+    {
+        var controls = selectedControls.Where(control => !IsExcluded(control.Span)).ToHashSet();
+        var first = End;
+        for (var i = selectedControls.Count - 1; i >= 0; i--)
+        {
+            var control = selectedControls[i];
+            if (!controls.Contains(control) || control.Ancestors().OfType<StatementSyntax>().Any(controls.Contains))
+                continue;
+            first = Visit(control, first, null, null);
+        }
+        return first;
+    }
+
+    private bool IsExcluded(TextSpan span)
+    {
+        if (excluded is not { Count: > 0 }) return false;
+        var original = document.OriginalSpan(span);
+        return excluded.Any(range => original.Start >= range.Offset && original.End <= range.Offset + range.Length);
     }
 
     public string? ScopeAt(int offset) => bodies.Where(branch => branch.Body.Contains(offset))
@@ -32,6 +58,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<Fl
     private string Visit(StatementSyntax statement, string next, string? breakTo, string? continueTo)
     {
         token.ThrowIfCancellationRequested();
+        if (IsExcluded(statement.Span)) return next;
         if (statement is BlockSyntax block) return Sequence(block.Statements, next, breakTo, continueTo);
         if (statement is ReturnStatementSyntax) return Transfer("return", End);
         if (statement is ThrowStatementSyntax) return Transfer("throw", End);
@@ -46,9 +73,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<Fl
         if (statement is BreakStatementSyntax && breakTo is not null) return Transfer("break", breakTo);
         if (statement is ContinueStatementSyntax && continueTo is not null) return Transfer("continue", continueTo);
 
-        if (statement is not (IfStatementSyntax or ForStatementSyntax or CommonForEachStatementSyntax
-            or WhileStatementSyntax or DoStatementSyntax or SwitchStatementSyntax))
-            return next;
+        if (!IsControl(statement)) return next;
 
         if (conditionCount++ >= MaxConditions)
         {

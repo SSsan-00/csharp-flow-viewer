@@ -24,6 +24,7 @@ internal sealed class RazorMarkupDocument
     private readonly bool[] dynamicCharacters;
     private readonly List<RazorGuard> guards = [];
     private readonly List<TextSpan> expressions = [];
+    private readonly IReadOnlyList<StatementSyntax> renderControls;
 
     public RazorMarkupDocument(string text, string filePath, IReadOnlyList<RazorImport>? imports,
         CancellationToken token)
@@ -63,6 +64,10 @@ internal sealed class RazorMarkupDocument
             .Select(diagnostic => $"Razor · {diagnostic.Id} · L{diagnostic.Span.LineIndex + 1}: {diagnostic.GetMessage()}")
             .Distinct(StringComparer.Ordinal).ToArray();
         ServerCode = (BlockSyntax)SyntaxFactory.ParseStatement("{" + new string(code) + "}");
+        renderControls = ServerCode.DescendantNodes(static node =>
+                node is not (LocalFunctionStatementSyntax or AnonymousFunctionExpressionSyntax))
+            .OfType<StatementSyntax>().Where(statement => RazorRenderProjector.IsControl(statement)
+                || statement is TryStatementSyntax).ToArray();
         BuildGuards();
 
         void Project(IntermediateNode node, bool htmlContext)
@@ -141,6 +146,38 @@ internal sealed class RazorMarkupDocument
             if (available > 0) placeholder.CopyTo(0, projection, start, placeholder.Length);
         }
         return new string(projection);
+    }
+
+    internal RazorJavaScriptFragment ProjectScript(int offset, int length, bool isModule)
+    {
+        var range = Range(offset, length);
+        var text = ProjectJavaScript(offset, length);
+        var controls = ControlsWithin(range);
+        if (controls.Count == 0)
+            return new RazorJavaScriptFragment(text, range, IsDynamic(offset, length), isModule);
+
+        var projected = text.ToCharArray();
+        var slots = new Dictionary<int, SourceRange>();
+        var previousEnd = offset;
+        foreach (var control in controls)
+        {
+            var span = OriginalSpan(control.Span);
+            if (span.Start < previousEnd) continue;
+            for (var i = span.Start; i < span.End; i++)
+                if (projected[i - offset] is not ('\r' or '\n')) projected[i - offset] = ' ';
+            // Leave a statement-sized boundary, not a made-up JavaScript value or both branches.
+            projected[span.Start - offset] = ';';
+            slots.Add(span.Start - offset, Range(span.Start, span.Length));
+            previousEnd = span.End;
+        }
+
+        return new RazorJavaScriptFragment(new string(projected), range, true, isModule) { RenderingSlots = slots };
+    }
+
+    internal IReadOnlyList<StatementSyntax> ControlsWithin(SourceRange range)
+    {
+        var selected = new TextSpan(range.Offset, range.Length);
+        return renderControls.Where(control => selected.Contains(OriginalSpan(control.Span))).ToArray();
     }
 
     public IReadOnlyList<RazorGuard> GuardsAt(int offset) => guards
