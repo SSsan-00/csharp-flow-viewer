@@ -28,7 +28,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private readonly List<FlowEdge> edges = [];
     private readonly HashSet<string> transparent = [];
     private readonly List<RegionEntry> regionEntries = [];
-    private readonly HashSet<ControlFlowRegion> usingFinallyRegions = [];
+    private readonly HashSet<ControlFlowRegion> generatedCleanupRegions = [];
     private readonly Dictionary<CaptureId, IOperation> captures = new();
     private readonly HashSet<CaptureId> ambiguousCaptures = [];
     private ILookup<ControlFlowRegion?, BasicBlock> unreachableBlocks = null!;
@@ -73,8 +73,8 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
             var region = EnclosingFinally(block.EnclosingRegion);
             if (region is null) continue;
             if (block.Operations.SelectMany(operation => operation.DescendantsAndSelf())
-                .OfType<IInvocationOperation>().Any(IsImplicitUsingDispose))
-                usingFinallyRegions.Add(region);
+                .OfType<IInvocationOperation>().Any(IsGeneratedCleanup))
+                generatedCleanupRegions.Add(region);
         }
 
         CollectRegions(graph.Root, null);
@@ -98,7 +98,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private void CollectRegions(ControlFlowRegion region, ControlFlowRegion? enclosingFinally)
     {
         RuntimeHelpers.EnsureSufficientExecutionStack();
-        if (usingFinallyRegions.Contains(region)) return;
+        if (generatedCleanupRegions.Contains(region)) return;
         switch (region.Kind)
         {
             case ControlFlowRegionKind.Catch when region.EnclosingRegion?.Kind != ControlFlowRegionKind.FilterAndHandler:
@@ -122,7 +122,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private void AddRegionEntries(ControlFlowRegion? enclosingFinally, int context)
     {
         foreach (var block in unreachableBlocks[enclosingFinally])
-            if (EnclosingFinally(block.EnclosingRegion) is not { } region || !usingFinallyRegions.Contains(region))
+            if (EnclosingFinally(block.EnclosingRegion) is not { } region || !generatedCleanupRegions.Contains(region))
                 GetBlock(new State(block.Ordinal, context));
 
         foreach (var entry in regionEntries.Where(entry => entry.EnclosingFinally == enclosingFinally))
@@ -341,22 +341,32 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         return false;
     }
 
-    private static bool IsImplicitUsingDispose(IInvocationOperation call)
+    private static bool IsGeneratedCleanup(IInvocationOperation call)
     {
-        if (!call.IsImplicit || call.TargetMethod.Name is not ("Dispose" or "DisposeAsync")) return false;
+        if (!call.IsImplicit) return false;
+        var method = call.TargetMethod;
+        // Roslyn attaches generated cleanup calls to the resource, collection or lock expression.
+        if (call.Syntax is ExpressionSyntax expression && expression.Parent is LockStatementSyntax @lock
+            && @lock.Expression == expression)
+        {
+            return method.Name == "Exit" && method.ContainingType.ToDisplayString() == "System.Threading.Monitor"
+                || method.Name == "Dispose" && method.ContainingType.ToDisplayString() == "System.Threading.Lock.Scope";
+        }
+        if (method.Name is not ("Dispose" or "DisposeAsync")) return false;
         return call.Syntax switch
         {
             VariableDeclaratorSyntax { Parent.Parent: UsingStatementSyntax } => true,
             VariableDeclaratorSyntax { Parent.Parent: LocalDeclarationStatementSyntax declaration } =>
                 !declaration.UsingKeyword.IsKind(SyntaxKind.None),
-            ExpressionSyntax { Parent: UsingStatementSyntax statement } expression => statement.Expression == expression,
+            ExpressionSyntax { Parent: UsingStatementSyntax statement } resource => statement.Expression == resource,
+            ExpressionSyntax { Parent: CommonForEachStatementSyntax statement } collection => statement.Expression == collection,
             _ => false
         };
     }
 
     private string RunFinally(ControlFlowRegion region, string resume, int parent)
     {
-        if (usingFinallyRegions.Contains(region)) return resume;
+        if (generatedCleanupRegions.Contains(region)) return resume;
         RuntimeHelpers.EnsureSufficientExecutionStack();
         var continuation = new Continuation(region, resume, parent);
         if (!contextIds.TryGetValue(continuation, out var id))
