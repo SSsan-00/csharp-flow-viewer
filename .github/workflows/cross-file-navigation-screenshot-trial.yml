@@ -111,7 +111,7 @@ jobs:
             Select-Entry 'MethodsBox' 'externalTarget'
             Select-File 'NavigationDemo.cshtml' 'NavigationDemo[.]cshtml'
             Wait-Title 'NavigationDemo[.]cshtml'
-            Select-Entry 'MethodsBox' 'onchange'
+            Select-Entry 'MethodsBox' 'change.*orderKind'
             Invoke-Button 'ListButton'
             Select-Entry 'NodesBox' 'externalTarget'
             Invoke-Button 'FollowButton'
