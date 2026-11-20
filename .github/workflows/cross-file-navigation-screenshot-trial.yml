@@ -1,4 +1,4 @@
-name: Cross-file definition Windows verification
+name: Razor overview and callers Windows verification
 on:
   push:
     branches: [codex/cross-file-nav-screen-trial]
@@ -24,7 +24,7 @@ jobs:
           <select id="orderKind" onchange="externalTarget(this.value)"><option value="standard">Standard</option></select>
           '@ | Set-Content 'samples/OrderProcessing/Pages/NavigationDemo.cshtml' -Encoding utf8
           New-Item -ItemType Directory -Force 'samples/OrderProcessing/wwwroot/js' | Out-Null
-          'function externalTarget(kind) { const xhr = new XMLHttpRequest(); xhr.open("GET", "/Orders"); xhr.onload = responseReady; xhr.send(); } function responseReady() { console.log("loaded"); }' | Set-Content 'samples/OrderProcessing/wwwroot/js/nav-target.js' -Encoding utf8
+          'function externalTarget(kind) { const xhr = new XMLHttpRequest(); xhr.open("GET", "/Orders"); xhr.onload = responseReady; xhr.send(); } function responseReady() { console.log("loaded"); } function noCaller() { return false; }' | Set-Content 'samples/OrderProcessing/wwwroot/js/nav-target.js' -Encoding utf8
           'function externalTarget() { console.log("not referenced"); }' | Set-Content 'samples/OrderProcessing/wwwroot/js/unrelated.js' -Encoding utf8
           'namespace NavigationDemo; public static class NavigationCaller { public static void InvokeCross() => NavigationTarget.GoCross(); }' | Set-Content 'samples/OrderProcessing/NavigationCaller.cs' -Encoding utf8
           'namespace NavigationDemo; public static class NavigationTarget { public static void GoCross() => System.Console.WriteLine("target"); }' | Set-Content 'samples/OrderProcessing/NavigationTarget.cs' -Encoding utf8
@@ -106,32 +106,52 @@ jobs:
                 $bmp.Save((Join-Path $dest $name),[System.Drawing.Imaging.ImageFormat]::Png)
               } finally { $g.Dispose(); $bmp.Dispose() }
             }
+            function Wait-Text([string]$id, [string]$pattern) {
+              [void](Wait-Until { $t = Find-Id $win $id; if ($t -and $t.Current.Name -match $pattern) { $true } } "$id $pattern")
+              Write-Host "Verified $id $pattern"
+            }
+            function Enter-OverviewCall {
+              Select-File 'NavigationDemo.cshtml' 'NavigationDemo[.]cshtml'
+              Wait-Title 'NavigationDemo[.]cshtml'
+              Select-Entry 'MethodsBox' 'ページ全体'
+              $listMode = Find-Id $win 'ListButton'
+              if ($listMode.Current.Name -eq '一覧') { Invoke-Button 'ListButton' }
+              Select-Entry 'NodesBox' 'onchange.*externalTarget'
+              Wait-Text 'SourceLocation' '^L3'
+              Capture 'overview-event.png'
+              Invoke-Button 'FollowButton'
+              Wait-Title 'nav-target[.]js'
+              Wait-Text 'FlowTitle' 'externalTarget'
+            }
+            Enter-OverviewCall
+            Invoke-Button 'BackButton'
+            Wait-Title 'NavigationDemo[.]cshtml'
+            Wait-Text 'NodeLabel' 'onchange.*externalTarget'
+            Wait-Text 'SourceLocation' '^L3'
+            Enter-OverviewCall
+            Select-Entry 'MethodsBox' 'noCaller'
+            Wait-Text 'FlowTitle' 'noCaller'
+            Invoke-Button 'BackButton'
+            [void](Wait-Until { $b = Find-Id $win 'BackButton'; if ($b -and !$b.Current.IsEnabled) { $true } } 'no caller')
+            Wait-Title 'nav-target[.]js'
+            Select-File 'NavigationDemo.cshtml' 'NavigationDemo[.]cshtml'
+            Wait-Title 'NavigationDemo[.]cshtml'
             Select-File 'nav-target.js' 'nav-target[.]js'
             Wait-Title 'nav-target[.]js'
             Select-Entry 'MethodsBox' 'externalTarget'
-            Select-File 'NavigationDemo.cshtml' 'NavigationDemo[.]cshtml'
-            Wait-Title 'NavigationDemo[.]cshtml'
-            Select-Entry 'MethodsBox' 'change.*orderKind'
-            Invoke-Button 'ListButton'
-            Select-Entry 'NodesBox' 'externalTarget'
-            Invoke-Button 'FollowButton'
-            Wait-Title 'nav-target[.]js'
-            [void](Wait-Until { $t = Find-Id $win 'FlowTitle'; if ($t -and $t.Current.Name -match 'externalTarget') { $true } } 'externalTarget declaration')
-            Capture 'javascript-jump.png'
+            Wait-Text 'FlowTitle' 'externalTarget'
             Invoke-Button 'BackButton'
             Wait-Title 'NavigationDemo[.]cshtml'
-            [void](Wait-Until { $t = Find-Id $win 'NodeLabel'; if ($t -and $t.Current.Name -match 'externalTarget') { $true } } 'return to original JavaScript call node')
-            Select-File 'NavigationCaller.cs' 'NavigationCaller[.]cs'
-            Wait-Title 'NavigationCaller[.]cs'
-            Select-Entry 'MethodsBox' 'InvokeCross'
-            Invoke-Button 'ListButton'
-            Select-Entry 'NodesBox' 'GoCross'
-            Invoke-Button 'FollowButton'
+            Wait-Text 'SourceLocation' '^L3'
+            Capture 'javascript-caller.png'
+            Select-File 'NavigationTarget.cs' 'NavigationTarget[.]cs'
             Wait-Title 'NavigationTarget[.]cs'
-            [void](Wait-Until { $t = Find-Id $win 'FlowTitle'; if ($t -and $t.Current.Name -match 'GoCross') { $true } } 'GoCross declaration')
-            Capture 'csharp-jump.png'
+            Select-Entry 'MethodsBox' 'GoCross'
+            Wait-Text 'FlowTitle' 'GoCross'
             Invoke-Button 'BackButton'
             Wait-Title 'NavigationCaller[.]cs'
+            Wait-Text 'FlowTitle' 'InvokeCross'
+            Capture 'csharp-caller.png'
           } catch {
             try {
               if ($win) {
@@ -148,7 +168,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: cross-file-navigation-screens
+          name: razor-overview-caller-screens
           path: artifacts/screenshot/*.png
           if-no-files-found: warn
           retention-days: 7

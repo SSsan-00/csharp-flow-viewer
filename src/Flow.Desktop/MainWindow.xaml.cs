@@ -21,10 +21,12 @@ public partial class MainWindow : Window
     private const int MaxPreviewCharacters = 380_000;
     private readonly PreviewHost preview;
     private readonly CancellationTokenSource lifetime = new();
-    private readonly Stack<(ProjectFile File, int Method, string Node, RazorSourceFile? Razor, JavaScriptSourceFile? Script)> history = new();
+    private readonly Stack<(ProjectFile File, int Method, string Node, RazorSourceFile? Razor, JavaScriptSourceFile? Script, DefinitionView View)> history = new();
     private readonly List<string> diagnostics = [];
     private ProjectSession? project;
     private SourceFile? source;
+    private readonly Dictionary<ProjectFile, SourceFile> csharpSources = new();
+    private readonly Dictionary<(SourceFile Source, int Entry), (FlowDiagram Graph, string? Mermaid)> csharpFlows = new();
     private RazorSourceFile? razorSource;
     private JavaScriptSourceFile? javaScriptSource;
     private ProjectFile? currentFile;
@@ -208,8 +210,19 @@ public partial class MainWindow : Window
             razorSource = await Task.Run(() => current.ReadRazorAsync(file, lifetime.Token), lifetime.Token);
         else if (file.IsJavaScript)
             javaScriptSource = await Task.Run(() => current.ReadJavaScriptAsync(file, lifetime.Token, razorContext, jsContext), lifetime.Token);
-        else
+        else if (!csharpSources.TryGetValue(file, out source))
+        {
             source = await Task.Run(() => current.ReadAsync(file, lifetime.Token), lifetime.Token);
+            if (closed) return;
+            if (csharpSources.Count >= 8)
+            {
+                var first = csharpSources.First();
+                csharpSources.Remove(first.Key);
+                foreach (var key in csharpFlows.Keys.Where(key => ReferenceEquals(key.Source, first.Value)).ToArray())
+                    csharpFlows.Remove(key);
+            }
+            csharpSources[file] = source;
+        }
         if (closed) return;
         currentFile = file;
         Editor.Text = source?.Text ?? razorSource?.Text ?? javaScriptSource!.Text;
@@ -247,6 +260,7 @@ public partial class MainWindow : Window
     private async void MethodChanged(object sender, SelectionChangedEventArgs args)
     {
         if (busy || MethodsBox.SelectedItem is not MethodEntry entry) return;
+        if (method?.Id != entry.Id) history.Clear();
         await AnalyzeMethodAsync(entry);
     }
 
@@ -256,6 +270,7 @@ public partial class MainWindow : Window
         var dialog = new TraceSettingsDialog(this, excludedCalls);
         if (dialog.ShowDialog() != true) return;
         excludedCalls = dialog.ExcludedCalls;
+        csharpFlows.Clear();
         if (method is { } current)
             await AnalyzeMethodAsync(current);
         else
@@ -281,15 +296,29 @@ public partial class MainWindow : Window
                 : currentScript is not null ? "JavaScript の制御フローを解析中" : "Roslyn CFG から図を組み立てています…";
             SetState("フローを解析中", loading);
             SetStatus(loading);
-            var result = await Task.Run(() => currentSource is not null
-                ? currentSource.Analyze(entry.Id, lifetime.Token, exclusions)
-                : currentRazor is not null ? currentRazor.Analyze(entry.Id, lifetime.Token)
-                : currentScript!.Analyze(entry.Id, lifetime.Token), lifetime.Token);
-            if (closed) return;
+            if (currentSource is null || !csharpFlows.TryGetValue((currentSource, entry.Id), out var flow))
+            {
+                flow = await Task.Run(() =>
+                {
+                    var graph = currentSource is not null
+                        ? currentSource.Analyze(entry.Id, lifetime.Token, exclusions)
+                        : currentRazor is not null ? currentRazor.Analyze(entry.Id, lifetime.Token)
+                        : currentScript!.Analyze(entry.Id, lifetime.Token);
+                    return (Graph: graph, Mermaid: graph.Nodes.Count > 0 ? MermaidWriter.Write(graph) : null);
+                }, lifetime.Token);
+                if (closed) return;
+                if (currentSource is not null && flow.Graph.Nodes.Count <= 4_000 && flow.Graph.Edges.Count <= 8_000
+                    && (flow.Mermaid?.Length ?? 0) <= 350_000)
+                {
+                    if (csharpFlows.Count >= 16) csharpFlows.Remove(csharpFlows.Keys.First());
+                    csharpFlows[(currentSource, entry.Id)] = flow;
+                }
+            }
+            var result = flow.Graph;
             diagram = result;
             nodes = result.Nodes.ToDictionary(node => node.Id);
             NodesBox.ItemsSource = result.Nodes;
-            mermaid = result.Nodes.Count > 0 ? MermaidWriter.Write(result) : null;
+            mermaid = flow.Mermaid;
             UpdateAnnotationKey();
             showList = previewUnavailable;
             SetState("フロー図を取得できません", "診断を確認するか、別の解析対象を選んでください。");
@@ -315,6 +344,8 @@ public partial class MainWindow : Window
     {
         project?.Dispose();
         project = null;
+        csharpSources.Clear();
+        csharpFlows.Clear();
         FilesBox.ItemsSource = null;
         FileCount.Text = "対象ファイル";
         ResetFile();
@@ -347,6 +378,10 @@ public partial class MainWindow : Window
     {
         ++version;
         ++diagramRevision;
+        if (navigationMenu is { } menu) menu.IsOpen = false;
+        navigationMenu = null;
+        callerSearch = null;
+        BackButton.ToolTip = "今の処理の呼び出し元へ移動 (Alt+←)";
         ZoomLabel.Text = "—";
         diagram = null;
         method = null;
@@ -358,10 +393,18 @@ public partial class MainWindow : Window
         selectedNode = null;
         rendered = false;
         pendingNodeCenter = false;
+        grayCalculation = null;
+        appliedGray = null;
+        appliedMarks = null;
         editorAnnotations.Clear();
         Editor.TextArea.TextView.Redraw();
+        ShowDefinitionView(DefinitionView.Direct);
+        ClearDeclarationCandidates();
         NodeLabel.Text = "ノードを選ぶとソース行へ移動";
         NodeLabel.ToolTip = null;
+        NavigationStatus.Text = "";
+        NavigationStatus.Visibility = Visibility.Collapsed;
+        FollowButton.ToolTip = "呼び出しノードを選択してください。";
         FlowTitle.Text = "制御フロー";
         FlowTitle.ToolTip = null;
         UpdateSurface();
@@ -401,7 +444,13 @@ public partial class MainWindow : Window
     {
         selectedNode = node;
         NodeLabel.Text = node.Label + (node.IsReachable ? "" : "  ·  到達不能");
-        NodeLabel.ToolTip = NodeLabel.Text;
+        var navigation = NavigationHint(node);
+        NodeLabel.ToolTip = $"{NodeLabel.Text}\n{navigation}";
+        FollowButton.ToolTip = navigation;
+        NavigationStatus.Text = CanFollow(node) && DefinitionPath(node) is { } targetPath
+            ? $"{(node.TargetMethod is null ? "宣言のみ" : "定義")}: {Path.GetFileName(targetPath)}" : navigation;
+        NavigationStatus.ToolTip = navigation;
+        NavigationStatus.Visibility = Visibility.Visible;
         if (navigateSource && node.Source is { } range) NavigateSource(range);
         FollowButton.IsEnabled = !busy && CanFollow(node);
     }
@@ -421,23 +470,42 @@ public partial class MainWindow : Window
 
     private async Task FollowSelectedAsync()
     {
-        if (busy || selectedNode is not { TargetMethod: { } target } caller || method is not { } entry
-            || currentFile is not { } file || FindTargetFile(caller) is not { } targetFile) return;
-        history.Push((file, entry.Id, caller.Id, razorSource, javaScriptSource));
+        if (busy || selectedNode is not { } caller || !CanFollow(caller)) return;
+        var options = AvailableTargets(caller).ToArray();
+        if (options.Length > 1)
+        {
+            ShowNavigationChoices(FollowButton, options, option => $"{option.Label}  ·  {Path.GetFileName(option.FilePath)}",
+                option => FollowTargetAsync(caller with { TargetMethod = option.Method, TargetFilePath = option.FilePath }));
+            return;
+        }
+        if (options.Length == 1)
+            caller = caller with { TargetMethod = options[0].Method, TargetFilePath = options[0].FilePath };
+        await FollowTargetAsync(caller);
+    }
+
+    private async Task FollowTargetAsync(FlowNode caller)
+    {
+        if (busy || selectedNode?.Id != caller.Id || method is not { } entry || currentFile is not { } file
+            || FindTargetFile(caller) is not { } targetFile) return;
+        history.Push((file, entry.Id, caller.Id, razorSource, javaScriptSource, definitionView));
+        if (caller.TargetMethod is not { } target)
+        {
+            await NavigateDeclarationAsync(targetFile, caller.TargetDeclaration!, caller);
+            return;
+        }
         if (targetFile == file && target == entry.Id)
         {
             NavigateSource(entry.Source with { Length = 0 });
+            if (diagram?.Nodes.FirstOrDefault(node => node.Kind == NodeKind.Start) is { } start)
+                JumpToPreviewNode(start, navigateSource: false, keepList: true);
+            SetStatus("同じメソッドの開始位置へ移動しました。");
             SetBusy(false);
             return;
         }
         await NavigateEntryAsync(targetFile, target, razorContext: razorSource, jsContext: javaScriptSource);
     }
 
-    private async void Back(object? sender, RoutedEventArgs args)
-    {
-        if (busy || !history.TryPop(out var previous)) return;
-        await NavigateEntryAsync(previous.File, previous.Method, previous.Node, previous.Razor, previous.Script);
-    }
+    private async void Back(object? sender, RoutedEventArgs args) => await FindOrReturnToCallerAsync();
 
     private async Task SelectMethodAsync(int id, string? returnTo = null)
     {
@@ -606,6 +674,8 @@ public partial class MainWindow : Window
         TraceSettingsButton.IsEnabled = !value;
         SettingsBox.IsEnabled = !value && SettingsBox.Items.Count > 1;
         BrowserPane.IsEnabled = !value;
+        OpenCandidateButton.IsEnabled = !value && CandidateBox.SelectedItem is ImplementationCandidate;
+        CandidateBox.IsEnabled = !value;
         UpdateSurface();
     }
 
@@ -620,7 +690,7 @@ public partial class MainWindow : Window
         PreviewSurface.IsHitTestVisible = Web.Focusable = webVisible && rendered;
         NodesBox.Visibility = listVisible ? Visibility.Visible : Visibility.Collapsed;
         CopyButton.IsEnabled = SaveButton.IsEnabled = hasGraph && !busy;
-        BackButton.IsEnabled = !busy && history.Count > 0;
+        BackButton.IsEnabled = !busy && CanFindCaller;
         FollowButton.IsEnabled = !busy && selectedNode is { } node && CanFollow(node);
         ListButton.Content = showList ? "図" : "一覧";
         ListButton.IsEnabled = hasGraph && ready && !previewUnavailable;

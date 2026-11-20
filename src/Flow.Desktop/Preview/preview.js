@@ -119,7 +119,8 @@
           const text = node.querySelector("text");
           const label = labels.get(id);
           const normalized = value => value.replace(/\s+/g, "");
-          if (text && normalized(text.textContent) !== normalized(label)) {
+          if (text && (normalized(text.textContent) !== normalized(label)
+            || (/ {2,}/.test(label) && text.textContent.replace(/\u00a0/g, " ") !== label))) {
             const firstLine = text.querySelector("tspan");
             if (firstLine) {
               firstLine.textContent = label;

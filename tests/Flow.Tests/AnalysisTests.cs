@@ -51,6 +51,177 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    public void RuntimeDispatchShowsStaticBodiesAndOffersOnlyMatchingSourceImplementations()
+    {
+        var directory = Path.GetFullPath("FictionalProject");
+        var callerPath = Path.Combine(directory, "Caller.cs");
+        var contractPath = Path.Combine(directory, "Contracts.cs");
+        const string callerText = """
+            delegate void Callback();
+            abstract class Example
+            {
+                void Run(IContract typed, Example current, Callback callback, dynamic unknown)
+                {
+                    if (typed == null) return;
+                    typed.Execute(3);
+                    current.Abstract();
+                    current.Virtual();
+                    callback();
+                    unknown.Execute(3);
+                    System.Console.WriteLine("outside");
+                }
+                public abstract void Abstract();
+                public virtual void Virtual() {}
+            }
+            sealed class Implementation : Example, IContract
+            {
+                public void Execute(int value) {}
+                public void Execute(string value) {}
+                public override void Abstract() {}
+                public override void Virtual() {}
+            }
+            """;
+        const string contractsText = """
+            interface IContract
+            {
+                void Execute(int value);
+                void Execute(string value);
+            }
+            class ExplicitImplementation : IContract
+            {
+                void IContract.Execute(int value) {}
+                void IContract.Execute(string value) {}
+            }
+            """;
+        var callerTree = CSharpSyntaxTree.ParseText(callerText, path: callerPath);
+        var contractTree = CSharpSyntaxTree.ParseText(contractsText, path: contractPath);
+        var compilation = CSharpCompilation.Create("Fictional", [callerTree, contractTree],
+            References.Append(MetadataReference.CreateFromFile(typeof(Console).Assembly.Location)),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        Assert.IsEmpty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        var files = new HashSet<string> { callerPath, contractPath };
+        var caller = new SourceFile(compilation.GetSemanticModel(callerTree), navigableCSharpPaths: files);
+        var diagram = Diagram(caller);
+        var interfaceCall = Single(diagram, "IContract.Execute()");
+        Assert.IsTrue(interfaceCall.RequiresRuntimeDispatch);
+        Assert.IsNull(interfaceCall.TargetMethod);
+        Assert.AreEqual(new SourceRange(contractsText.IndexOf("Execute", StringComparison.Ordinal),
+            "Execute".Length, 3, contractPath), interfaceCall.TargetDeclaration);
+        Assert.IsNotNull(interfaceCall.ImplementationCandidates);
+        Assert.HasCount(2, interfaceCall.ImplementationCandidates);
+        var implementations = interfaceCall.ImplementationCandidates;
+        var explicitImplementation = implementations[0];
+        var contract = new SourceFile(compilation.GetSemanticModel(contractTree), navigableCSharpPaths: files);
+        Assert.AreEqual(contractPath, explicitImplementation.Declaration.FilePath);
+        Assert.IsNotEmpty(contract.Analyze(explicitImplementation.TargetMethod).Nodes);
+        Assert.AreEqual(caller.Methods.Single(m => m.Signature == "Implementation.Execute(int value)").Id,
+            implementations[1].TargetMethod);
+        Assert.IsTrue(implementations.All(candidate => candidate.Label.Contains("(int)", StringComparison.Ordinal)));
+        foreach (var name in new[] { "Abstract", "Virtual" })
+        {
+            var call = Single(diagram, "Example." + name + "()");
+            Assert.IsTrue(call.RequiresRuntimeDispatch);
+            if (name == "Virtual")
+            {
+                Assert.AreEqual(caller.Methods.Single(m => m.Signature == "Example.Virtual()").Id, call.TargetMethod);
+                Assert.IsNotEmpty(caller.Analyze(call.TargetMethod!.Value).Nodes);
+                Assert.IsNull(call.ImplementationCandidates);
+            }
+            else
+            {
+                Assert.IsNull(call.TargetMethod);
+                Assert.AreEqual(caller.Methods.Single(m => m.Signature == "Implementation.Abstract()").Id,
+                    Assert.ContainsSingle(call.ImplementationCandidates!).TargetMethod);
+            }
+            Assert.IsNotNull(call.TargetDeclaration);
+            var offset = callerText.IndexOf("void " + name, StringComparison.Ordinal) + "void ".Length;
+            var line = callerText[..offset].Count(character => character == '\n') + 1;
+            Assert.AreEqual(new SourceRange(offset, name.Length, line), call.TargetDeclaration);
+        }
+        Assert.IsNull(Single(diagram, "Callback.Invoke()").TargetDeclaration);
+        Assert.IsNull(Single(diagram, "呼び出し").TargetDeclaration);
+        Assert.IsNull(Single(diagram, "Console.WriteLine()").TargetDeclaration);
+
+        var unlisted = new SourceFile(compilation.GetSemanticModel(callerTree));
+        Assert.IsNull(Single(Diagram(unlisted), "IContract.Execute()").TargetDeclaration);
+    }
+
+    [TestMethod]
+    public void SealedReceiverLinksToInheritedVirtualImplementationAndBaseCallsRemainDirect()
+    {
+        var file = File("""
+            class Base
+            {
+                public virtual void Work() {}
+            }
+            class Middle : Base
+            {
+                public override void Work() {}
+            }
+            sealed class Child : Base {}
+            sealed class Grandchild : Middle {}
+            sealed class Own : Base
+            {
+                public override void Work() {}
+                public void RunBase() => base.Work();
+            }
+            class Demo
+            {
+                void Run(Child child, Grandchild grandchild, Own own, Base unknown)
+                {
+                    child.Work();
+                    grandchild.Work();
+                    own.Work();
+                    unknown.Work();
+                }
+            }
+            """);
+        var diagram = Diagram(file);
+        foreach (var type in new[] { "Base", "Middle", "Own" })
+        {
+            var target = Assert.ContainsSingle(file.Methods.Where(entry => entry.Signature == type + ".Work()"));
+            Assert.AreEqual(target.Id, Assert.ContainsSingle(diagram.Nodes.Where(node =>
+                node.Label == type + ".Work()" && !node.RequiresRuntimeDispatch)).TargetMethod);
+        }
+        var direct = Assert.ContainsSingle(diagram.Nodes.Where(node => node.Label == "Base.Work()" && !node.RequiresRuntimeDispatch));
+        var runtime = Assert.ContainsSingle(diagram.Nodes.Where(node => node.Label == "Base.Work()" && node.RequiresRuntimeDispatch));
+        Assert.AreEqual(direct.TargetMethod, runtime.TargetMethod);
+        Assert.AreEqual(direct.TargetMethod, Single(Diagram(file, "RunBase"), "Base.Work()").TargetMethod);
+    }
+
+    [TestMethod]
+    public void ConditionAndSwitchLabelsPreserveMeaningfulLiteralWhitespace()
+    {
+        var text = """"
+            class Demo
+            {
+                bool Run(string value, string name)
+                {
+                    if (value   == "A  B") return true;
+                    if (value == @"A  B") return true;
+                    if (value == """A  B""") return true;
+                    if (value == $"A  {name}") return true;
+                    if (value == @"A<TAB>B
+                        C") return true;
+                    return false;
+                }
+                int Choose(string value) => value switch { "A  B" => 1, "A B" => 2, _ => 3 };
+            }
+            """".Replace("<TAB>", "\t", StringComparison.Ordinal);
+        var file = File(text);
+        var diagram = Diagram(file);
+        foreach (var label in new[] { "value == \"A  B\"", "value == @\"A  B\"", "value == \"\"\"A  B\"\"\"", "value == $\"A  {name}\"" })
+            Assert.AreEqual(NodeKind.Condition, Single(diagram, label).Kind);
+        Assert.Contains(node => node.Kind == NodeKind.Condition && node.Label.Contains("A␉B", StringComparison.Ordinal)
+            && node.Label.Contains('␊'), diagram.Nodes);
+        var choose = Diagram(file, "Choose");
+        Assert.IsNotNull(Single(choose, "case \"A  B\" に一致"));
+        Assert.IsNotNull(Single(choose, "case \"A B\" に一致"));
+        var mermaid = MermaidWriter.Write(choose, includeSourceLines: false);
+        StringAssert.Contains(mermaid, "A #160;B");
+    }
+
+    [TestMethod]
     public void CrossFileCallsUseOriginalOffsetsAndOnlyNavigateToProjectFilesWithBodies()
     {
         var directory = Path.GetFullPath("FictionalProject");
@@ -108,7 +279,12 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.AreEqual(targetPath, hook.TargetFilePath);
         Assert.AreEqual(target.Methods.Single(method => method.Name == "Hook").Id, hook.TargetMethod);
         Assert.IsNotEmpty(target.Analyze(hook.TargetMethod!.Value).Nodes);
-        Assert.IsNull(Single(diagram, "Derived.Virtual() · 実行時に決定").TargetMethod);
+        Assert.IsNull(hook.TargetDeclaration);
+        var virtualCall = Single(diagram, "Derived.Virtual()");
+        Assert.IsTrue(virtualCall.RequiresRuntimeDispatch);
+        Assert.AreEqual(targetPath, virtualCall.TargetFilePath);
+        Assert.AreEqual(target.Methods.Single(method => method.Name == "Virtual").Id, virtualCall.TargetMethod);
+        Assert.IsNotEmpty(target.Analyze(virtualCall.TargetMethod!.Value).Nodes);
         Assert.DoesNotContain(node => node.Label.Contains("Invoke", StringComparison.Ordinal) &&
             node.TargetMethod is not null, diagram.Nodes);
         Assert.IsNull(Single(diagram, "Excluded.External()").TargetMethod);
@@ -518,7 +694,7 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.Contains(node => node.Label == "Demo.After()", result.Nodes);
         Assert.Contains(node => node.Label == "finally", result.Nodes);
         Assert.Contains(node => node.Label == "Demo.Explicit()", result.Nodes);
-        Assert.Contains(node => node.Label == "IDisposable.Dispose() · 実行時に決定", result.Nodes);
+        Assert.Contains(node => node.Label == "IDisposable.Dispose()", result.Nodes);
         var returnNode = Single(result, "return");
         var returnPath = PathFrom(result, returnNode).Select(node => node.Label).ToArray();
         CollectionAssert.Contains(returnPath, "Demo.Explicit()");
@@ -552,6 +728,128 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.Contains(node => node.Label == "Demo.After()", result.Nodes);
         Assert.DoesNotContain(node => node.Label.Contains("DisposeAsync") || node.Label.Contains("finally")
             || node.Label == "null" || node.Label.Contains("巻き戻し"), result.Nodes);
+    }
+
+    [TestMethod]
+    [DataRow("", "IEnumerable<int>", "MoveNext()", "Dispose")]
+    [DataRow("await ", "IAsyncEnumerable<int>", "MoveNextAsync()", "DisposeAsync")]
+    public void ForeachHidesOnlyGeneratedCleanup(string awaitPrefix, string collection, string moveNext, string dispose)
+    {
+        var result = Diagram(File($$"""
+            using System;
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+            class Demo
+            {
+                async Task Run({{collection}} values, bool skip, bool stop, bool quit, IDisposable explicitResource)
+                {
+                    try
+                    {
+                        {{awaitPrefix}}foreach (var value in values)
+                        {
+                            if (skip) continue;
+                            if (stop) break;
+                            if (quit) return;
+                            Work(value);
+                        }
+                        After();
+                    }
+                    finally { explicitResource.Dispose(); }
+                }
+                void Work(int value) { }
+                void After() { }
+            }
+            """));
+
+        StringAssert.Contains(Next(result, Single(result, "continue")).Label, moveNext);
+        Assert.AreEqual("Demo.After()", Next(result, Single(result, "break")).Label);
+        var returnPath = PathFrom(result, Single(result, "return")).ToArray();
+        CollectionAssert.AreEqual(new[] { "return", "finally", "IDisposable.Dispose()", "End" },
+            returnPath.Select(node => node.Label).ToArray());
+        var explicitSource = returnPath[2].Source;
+        Assert.IsNotNull(explicitSource);
+        Assert.Contains(node => node.Label == "Demo.Work()", result.Nodes);
+        Assert.DoesNotContain(node => node.Label == "null" ||
+            (node.Label.Contains(dispose + "()", StringComparison.Ordinal) && node.Source != explicitSource), result.Nodes);
+        Assert.DoesNotContain(node => node.Label.StartsWith("finally", StringComparison.Ordinal)
+            && node.Source?.Line != explicitSource.Line, result.Nodes);
+    }
+
+    [TestMethod]
+    [DataRow("object", "Monitor.Enter()", "Monitor.Exit()")]
+    [DataRow("Lock", "Lock.EnterScope()", "Scope.Dispose()")]
+    public void LockHidesGeneratedReleaseButKeepsBodyAndExplicitFinally(string gateType, string acquire, string release)
+    {
+        var result = Diagram(File($$"""
+            using System.Threading;
+            class Demo
+            {
+                void Run({{gateType}} gate, object other, bool quit)
+                {
+                    lock (gate)
+                    {
+                        try
+                        {
+                            if (quit) return;
+                            Work();
+                        }
+                        finally { Monitor.Exit(other); }
+                    }
+                    After();
+                }
+                void Work() { }
+                void After() { }
+            }
+            """));
+
+        Assert.Contains(node => node.Label == acquire, result.Nodes);
+        var returnPath = PathFrom(result, Single(result, "return")).ToArray();
+        CollectionAssert.AreEqual(new[] { "return", "finally", "Monitor.Exit()", "End" },
+            returnPath.Select(node => node.Label).ToArray());
+        var explicitSource = returnPath[2].Source;
+        Assert.IsNotNull(explicitSource);
+        Assert.DoesNotContain(node => node.Label == release && node.Source != explicitSource, result.Nodes);
+        CollectionAssert.AreEqual(new[] { "Demo.Work()", "finally", "Monitor.Exit()", "Demo.After()", "End" },
+            PathFrom(result, Single(result, "Demo.Work()")).Select(node => node.Label).ToArray());
+        Assert.DoesNotContain(node => node.Label.StartsWith("finally", StringComparison.Ordinal)
+            && node.Source?.Line != explicitSource.Line, result.Nodes);
+    }
+
+    [TestMethod]
+    public void GeneratedCleanupInsideExplicitFinallyDoesNotRemoveTheFinally()
+    {
+        var result = Diagram(File("""
+            using System;
+            using System.Collections.Generic;
+            class Demo
+            {
+                void Run(IEnumerable<int> values, object gate)
+                {
+                    try { throw new InvalidOperationException(); }
+                    finally
+                    {
+                        Before();
+                        foreach (var value in values)
+                            lock (gate) { Work(value); }
+                        After();
+                    }
+                }
+                void Before() { }
+                void Work(int value) { }
+                void After() { }
+            }
+            """));
+
+        var handler = Next(result, Single(result, "throw"));
+        Assert.AreEqual("finally", handler.Label);
+        var before = Next(result, handler);
+        Assert.AreEqual("Demo.Before()", before.Label);
+        var loopTest = PathFrom(result, before).Last();
+        Assert.AreEqual(NodeKind.Condition, loopTest.Kind);
+        Assert.AreEqual("Demo.After()", Next(result, loopTest, "False").Label);
+        Assert.Contains(node => node.Label == "Demo.Work()", result.Nodes);
+        Assert.DoesNotContain(node => node.Label.Contains("Dispose()", StringComparison.Ordinal)
+            || node.Label == "Monitor.Exit()" || node.Label == "null", result.Nodes);
     }
 
     [TestMethod]
@@ -650,9 +948,10 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.AreEqual(2, calls.Select(node => node.TargetMethod).Distinct().Count());
         foreach (var call in calls)
             Assert.IsNotNull(call.TargetMethod);
-        Assert.IsNull(Single(diagram, "Demo.Virtual() · 実行時に決定").TargetMethod);
+        Assert.AreEqual(source.Methods.Single(method => method.Name == "Virtual").Id,
+            Single(diagram, "Demo.Virtual()").TargetMethod);
         Assert.IsNull(Single(diagram, "Other.External()").TargetMethod);
-        Assert.IsNull(Single(diagram, "呼び出し · 実行時に決定").TargetMethod);
+        Assert.IsNull(Single(diagram, "呼び出し").TargetMethod);
         Assert.Contains(node => node.Label.EndsWith("Local()") && node.TargetMethod is not null, diagram.Nodes);
         var pick = source.Analyze(calls[0].TargetMethod!.Value);
         Assert.AreEqual(source.Methods.Single(method => method.Name == "Run").Id,
