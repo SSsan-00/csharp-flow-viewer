@@ -117,4 +117,4 @@ internal sealed class LocalJavaScriptFiles
     }
 }
 
-internal sealed record RazorScriptReference(string Url, SourceRange Source, bool IsModule, bool IsDynamic, bool HasDeferredExecution);
+internal sealed record RazorScriptReference(string Url, SourceRange Source, bool IsModule, bool IsDynamic, bool HasDeferredExecution, bool IsOrderedDeferred);
