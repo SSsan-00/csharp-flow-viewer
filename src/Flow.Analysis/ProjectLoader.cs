@@ -18,11 +18,12 @@ public sealed record ProjectSettings(string SdkVersion, IReadOnlyList<ProjectOpt
 public sealed record ProjectFile(DocumentId? Id, string Label, string Path)
 {
     public bool IsRazor => Path.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase);
+    public bool IsJavaScript => Path.EndsWith(".js", StringComparison.OrdinalIgnoreCase);
     public override string ToString() => Label;
 }
 
 public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, string[] notices, string? intermediateDirectory,
-    ProjectOptions options, IReadOnlyList<string>? razorFiles = null) : IDisposable
+    ProjectOptions options, IReadOnlyList<string>? razorFiles = null, IReadOnlyList<string>? javaScriptFiles = null) : IDisposable
 {
     public ProjectOptions Options { get; } = options;
     public IReadOnlyList<string> Notices { get; } = notices;
@@ -31,11 +32,17 @@ public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, 
             && (intermediateDirectory is null || !Path.GetRelativePath(intermediateDirectory, path).IsWithinDirectory()))
         .Select(doc => new ProjectFile(doc.Id,
             Path.GetRelativePath(Path.GetDirectoryName(project.FilePath!)!, doc.FilePath!), doc.FilePath!))
-        .Concat((razorFiles ?? []).Where(File.Exists)
+        .Concat((razorFiles ?? []).Concat(javaScriptFiles ?? []).Where(File.Exists)
             .Where(path => intermediateDirectory is null || !Path.GetRelativePath(intermediateDirectory, path).IsWithinDirectory())
             .Select(path => new ProjectFile(null, Path.GetRelativePath(Path.GetDirectoryName(project.FilePath!)!, path), path)))
         .DistinctBy(file => file.Path, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
         .OrderBy(file => file.Label, StringComparer.OrdinalIgnoreCase).ToArray();
+
+    private IReadOnlySet<string>? navigableCSharpPaths;
+
+    private IReadOnlySet<string> NavigableCSharpPaths => navigableCSharpPaths ??= Files
+        .Where(file => file.Id is not null).Select(file => file.Path)
+        .ToHashSet(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     public async Task<SourceFile> ReadAsync(ProjectFile file, CancellationToken token)
     {
@@ -58,12 +65,26 @@ public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, 
         if (workspace.Diagnostics.Any(item => item.Kind == WorkspaceDiagnosticKind.Failure)
             && !Notices.Any(item => item.StartsWith("解析は部分的", StringComparison.Ordinal)))
             diagnostics.Add("解析は部分的 · プロジェクトの参照解決に失敗しました。");
-        return new SourceFile(model, diagnostics, token);
+        return new SourceFile(model, diagnostics, token, NavigableCSharpPaths);
     }
 
     /// <summary>Reads a Razor document without executing it, then resolves its PageModel using the loaded compilation.</summary>
     public Task<RazorSourceFile> ReadRazorAsync(ProjectFile file, CancellationToken token) =>
         PageModelResolver.ReadAsync(project, file, Files, token);
+
+    public Task<JavaScriptSourceFile> ReadJavaScriptAsync(ProjectFile file, CancellationToken token,
+        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null)
+    {
+        token.ThrowIfCancellationRequested();
+        if (!file.IsJavaScript || !Files.Contains(file))
+            throw new ProjectLoadException("対象の JavaScript ファイルが見つかりません。");
+        if ((razorContext?.OpenScript(file.Path) ?? jsContext?.OpenScript(file.Path)) is { } existing)
+            return Task.FromResult(existing);
+        var local = new LocalJavaScriptFiles(project.FilePath!, Files);
+        var fragment = local.Read(file.Path, module: false, token)
+            ?? throw new ProjectLoadException("JavaScript ファイルを読み込めません。サイズまたはファイルの場所を確認してください。");
+        return Task.FromResult(JavaScriptSourceFile.Open(fragment, local, token));
+    }
 
     public void Dispose() => workspace.Dispose();
 }
@@ -116,7 +137,7 @@ public static class ProjectLoader
                 solution = solution.WithProjectAnalyzerReferences(referenceProject.Id, []);
             project = solution.GetProject(project.Id)!;
             var notices = workspace.Diagnostics.Select(DescribeWorkspaceDiagnostic).Distinct().ToArray();
-            return new ProjectSession(workspace, project, notices, intermediate, options, RazorFiles(evaluated, path));
+            return new ProjectSession(workspace, project, notices, intermediate, options, MarkupFiles(evaluated, path, ".cshtml"), MarkupFiles(evaluated, path, ".js"));
         }
         catch
         {
@@ -162,7 +183,7 @@ public static class ProjectLoader
     private static string Property(JsonElement evaluation, string name) =>
         evaluation.GetProperty("Properties").TryGetProperty(name, out var value) ? value.GetString() ?? "" : "";
 
-    private static string[] RazorFiles(JsonElement evaluation, string projectPath)
+    private static string[] MarkupFiles(JsonElement evaluation, string projectPath, string extension)
     {
         if (!evaluation.TryGetProperty("Items", out var items)) return [];
         var root = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
@@ -172,8 +193,10 @@ public static class ProjectLoader
         {
             var path = item.TryGetProperty("FullPath", out var fullPath) ? fullPath.GetString()
                 : item.TryGetProperty("Identity", out var identity) ? identity.GetString() : null;
-            if (path?.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase) == true)
-                paths.Add(Path.GetFullPath(path.Replace('\\', Path.DirectorySeparatorChar), root));
+            if (path?.EndsWith(extension, StringComparison.OrdinalIgnoreCase) != true) continue;
+            var full = Path.GetFullPath(path.Replace('\\', Path.DirectorySeparatorChar), root);
+            if (extension != ".js" || Path.GetRelativePath(root, full).IsWithinDirectory())
+                paths.Add(full);
         }
         return paths.Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).ToArray();
     }

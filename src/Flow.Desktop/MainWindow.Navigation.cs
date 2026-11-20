@@ -141,7 +141,8 @@ public partial class MainWindow
     private bool CanFollow(FlowNode node) => node.TargetMethod is not null && FindTargetFile(node) is not null;
 
     // Navigation keeps the originating Razor event in the same history as C# calls.
-    private async Task NavigateEntryAsync(ProjectFile file, int entryId, string? returnTo = null)
+    private async Task NavigateEntryAsync(ProjectFile file, int entryId, string? returnTo = null,
+        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null)
     {
         SetBusy(true);
         try
@@ -151,7 +152,7 @@ public partial class MainWindow
                 if (!FilesBox.Items.Contains(file)) FileFilter.Clear();
                 FilesBox.SelectedItem = file;
                 FilesBox.ScrollIntoView(file);
-                await LoadFile(file, preserveHistory: true, restoreSelection: false);
+                await LoadFile(file, preserveHistory: true, restoreSelection: false, razorContext: razorContext, jsContext: jsContext);
                 if (closed) return;
             }
             await SelectMethodAsync(entryId, returnTo);
@@ -162,15 +163,18 @@ public partial class MainWindow
         finally { if (!closed) SetBusy(false); }
     }
 
+    private string EntryTypeLabel => currentFile?.IsRazor == true ? "画面イベント"
+        : currentFile?.IsJavaScript == true ? "JavaScript 関数" : "メソッド";
+
     private void UpdateSourcePresentation()
     {
-        var isRazor = currentFile?.IsRazor == true;
-        SourceLanguage.Text = isRazor ? "Razor" : "C#";
-        EntrySearchHint.Text = isRazor ? "画面イベントを検索" : "メソッドを検索";
-        Filter.ToolTip = isRazor ? "イベント名、要素名、または行番号" : "名前、シグネチャ、または行番号";
+        SourceLanguage.Text = currentFile?.IsRazor == true ? "Razor"
+            : currentFile?.IsJavaScript == true ? "JavaScript" : "C#";
+        EntrySearchHint.Text = EntryTypeLabel + "を検索";
+        Filter.ToolTip = currentFile?.IsRazor == true ? "イベント名、要素名、または行番号" : "名前、シグネチャ、または行番号";
         AutomationProperties.SetName(Filter, EntrySearchHint.Text);
-        AutomationProperties.SetName(MethodsBox, isRazor ? "画面イベント" : "メソッド");
-        AutomationProperties.SetName(Editor, isRazor ? "Razor ソース" : "C# ソース");
+        AutomationProperties.SetName(MethodsBox, EntryTypeLabel);
+        AutomationProperties.SetName(Editor, SourceLanguage.Text + " ソース");
         ApplyTheme();
     }
 }

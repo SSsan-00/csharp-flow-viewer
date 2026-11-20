@@ -51,6 +51,73 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    public void CrossFileCallsUseOriginalOffsetsAndOnlyNavigateToProjectFilesWithBodies()
+    {
+        var directory = Path.GetFullPath("FictionalProject");
+        var callerPath = Path.Combine(directory, "Caller.cs");
+        var targetPath = Path.Combine(directory, "Targets.cs");
+        var excludedPath = Path.Combine(directory, "Excluded.cs");
+        var callerTree = CSharpSyntaxTree.ParseText("""
+            partial class Demo
+            {
+                partial void Hook();
+                void Run(Service service, Derived receiver, System.Action action)
+                {
+                    if (service is null) return;
+                    service.Save(1);
+                    service.Save("text");
+                    Hook();
+                    receiver.Virtual();
+                    action();
+                    Excluded.External();
+                    Here();
+                }
+                void Here() {}
+            }
+            """, path: callerPath);
+        var targetTree = CSharpSyntaxTree.ParseText("""
+            partial class Demo
+            {
+                partial void Hook() {}
+            }
+            class Service
+            {
+                public void Save<T>(T value) where T : struct {}
+                public void Save(string value) {}
+            }
+            class Derived
+            {
+                public virtual void Virtual() {}
+            }
+            """, path: targetPath);
+        var excludedTree = CSharpSyntaxTree.ParseText(
+            "static class Excluded { public static void External() {} }", path: excludedPath);
+        var compilation = CSharpCompilation.Create("Fictional", [callerTree, targetTree, excludedTree], References,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        Assert.IsEmpty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        var files = new HashSet<string> { callerPath, targetPath };
+        var caller = new SourceFile(compilation.GetSemanticModel(callerTree), navigableCSharpPaths: files);
+        var target = new SourceFile(compilation.GetSemanticModel(targetTree), navigableCSharpPaths: files);
+        var diagram = Diagram(caller);
+        var saves = diagram.Nodes.Where(node => node.Label == "Service.Save()").ToArray();
+        Assert.HasCount(2, saves);
+        Assert.IsTrue(saves.All(node => node.TargetFilePath == targetPath));
+        CollectionAssert.AreEquivalent(target.Methods.Where(method => method.Name == "Save")
+            .Select(method => (int?)method.Id).ToArray(), saves.Select(node => node.TargetMethod).ToArray());
+        var hook = Single(diagram, "Demo.Hook()");
+        Assert.AreEqual(targetPath, hook.TargetFilePath);
+        Assert.AreEqual(target.Methods.Single(method => method.Name == "Hook").Id, hook.TargetMethod);
+        Assert.IsNotEmpty(target.Analyze(hook.TargetMethod!.Value).Nodes);
+        Assert.IsNull(Single(diagram, "Derived.Virtual() · 実行時に決定").TargetMethod);
+        Assert.DoesNotContain(node => node.Label.Contains("Invoke", StringComparison.Ordinal) &&
+            node.TargetMethod is not null, diagram.Nodes);
+        Assert.IsNull(Single(diagram, "Excluded.External()").TargetMethod);
+        var here = Single(diagram, "Demo.Here()");
+        Assert.IsNull(here.TargetFilePath);
+        Assert.AreEqual(caller.Methods.Single(method => method.Name == "Here").Id, here.TargetMethod);
+    }
+
+    [TestMethod]
     public void SourceConditionsAndPreviewLabelFormatKeepTheirMeaning()
     {
         var result = Diagram(File("""

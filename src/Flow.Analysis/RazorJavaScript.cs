@@ -11,6 +11,7 @@ public sealed record RazorJavaScriptFragment(string Text, SourceRange Source, bo
     bool IsModule = false)
 {
     internal IReadOnlyDictionary<int, SourceRange>? RenderingSlots { get; init; }
+    internal bool IsolatedClassic { get; init; }
 }
 
 /// <summary>イベントの登録候補。条件付き登録や旧IE専用のAPIを確定した動作と区別する。</summary>
@@ -44,6 +45,9 @@ public sealed class RazorJavaScript
     private readonly Dictionary<RazorJavaScriptRequest, XhrState> requestXhrs = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<(XhrState Client, int Owner), XhrUsage> xhrUsages = [];
     private readonly Scope globals = new(null);
+    private readonly HashSet<int> windowFunctions = [];
+    private readonly Dictionary<string, ScriptUnit> externalUnits = new(LocalJavaScriptFiles.PathComparer);
+    private readonly Dictionary<string, (ScriptUnit Unit, Scope Scope)> modules = new(LocalJavaScriptFiles.PathComparer);
     private int nextId = -2;
 
     public IReadOnlyList<MethodEntry> Entries => entries;
@@ -52,36 +56,161 @@ public sealed class RazorJavaScript
     public IReadOnlyList<RazorJavaScriptRequest> Requests => requests;
 
     public RazorJavaScript(string pageText, string pagePath, IEnumerable<RazorJavaScriptFragment> fragments,
-        CancellationToken token = default)
+        CancellationToken token = default) : this(pageText, pagePath, fragments, null, token) { }
+
+    internal RazorJavaScript(string pageText, string pagePath, IEnumerable<RazorJavaScriptFragment> fragments,
+        Func<string, string, RazorJavaScriptFragment?>? loadImport, CancellationToken token,
+        bool standalone = false)
     {
         this.pageText = pageText;
         this.pagePath = pagePath;
-        var parsed = new List<ScriptUnit>();
-        foreach (var fragment in fragments)
+        var parsed = new List<(ScriptUnit Unit, Scope Scope)>();
+        foreach (var fragment in fragments) IndexFragment(fragment);
+        // Modules bind exports only after declarations from all scripts are indexed.
+        var moduleExports = modules.ToDictionary(pair => pair.Key, pair => BuildExports(pair.Value),
+            LocalJavaScriptFiles.PathComparer);
+        foreach (var (unit, scope) in parsed)
+            foreach (var import in unit.Root.Body.OfType<ImportDeclaration>())
+                BindImport(import, unit, scope);
+        foreach (var (unit, _) in parsed)
+            FindBindingsAndRequests(unit.Root, unit, token);
+
+        void IndexFragment(RazorJavaScriptFragment fragment)
         {
             token.ThrowIfCancellationRequested();
+            var path = fragment.Source.FilePath;
+            var external = path is not null && (standalone || !LocalJavaScriptFiles.PathComparer.Equals(path, pagePath));
+            if (external && externalUnits.ContainsKey(path!)) return;
+            var diagnosticsBeforeParse = notices.Count;
             var unit = Parse(fragment, inline: false);
+            if (unit is null && standalone && LocalJavaScriptFiles.PathComparer.Equals(path, pagePath) && !fragment.IsModule)
+            {
+                var classicFailure = notices.Skip(diagnosticsBeforeParse).ToArray();
+                notices.RemoveRange(diagnosticsBeforeParse, notices.Count - diagnosticsBeforeParse);
+                var module = Parse(fragment with { IsModule = true }, inline: false);
+                if (module is null)
+                {
+                    notices.RemoveRange(diagnosticsBeforeParse, notices.Count - diagnosticsBeforeParse);
+                    notices.AddRange(classicFailure);
+                }
+                else
+                {
+                    fragment = fragment with { IsModule = true };
+                    unit = module;
+                }
+            }
             var name = $"JavaScript 初期化 L{fragment.Source.Line}";
-            var scope = fragment.IsModule ? new Scope(null) : globals;
+            var scope = fragment.IsModule || fragment.IsolatedClassic ? new Scope(null) : globals;
             if (unit is null)
             {
-                if (fragment.RenderingSlots is { Count: > 0 })
+                if (external || fragment.RenderingSlots is { Count: > 0 })
                 {
-                    var failed = AddEntry(name, null,
-                        new ScriptUnit(fragment.Text, fragment.Text, fragment.Source, null!, false, true,
-                            fragment.RenderingSlots), scope);
-                    failed.Failure = "Razorによる生成部分を除いたJavaScriptは構文を確定できません。";
+                    var failedUnit = new ScriptUnit(fragment.Text, fragment.Text, fragment.Source, null!, false,
+                        fragment.ContainsRazorCode, fragment.RenderingSlots);
+                    var failed = AddEntry(name, null, failedUnit, scope);
+                    failed.Failure = external ? "JavaScriptの構文を確定できません。"
+                        : "Razorによる生成部分を除いたJavaScriptは構文を確定できません。";
+                    if (external) externalUnits.Add(path!, failedUnit);
                 }
-                continue;
+                return;
             }
-            parsed.Add(unit);
+
+            if (external) externalUnits.Add(path!, unit);
+            if (external && fragment.IsModule) modules.Add(path!, (unit, scope));
             var entry = AddEntry(name, unit.Root, unit, scope);
             scope.OwnerEntryId = entry.Entry.Id;
             Index(unit.Root, unit, scope, token, 0, conditional: false);
+            parsed.Add((unit, scope));
+
+            foreach (var import in unit.Root.Body.OfType<ImportDeclaration>())
+            {
+                var imported = LoadImport(import, unit);
+                if (imported is not null) IndexFragment(imported);
+            }
         }
-        // 全scriptの宣言を集めてから参照を解決し、前方宣言にも対応する。
-        foreach (var unit in parsed)
-            FindBindingsAndRequests(unit.Root, unit, token);
+
+        RazorJavaScriptFragment? LoadImport(ImportDeclaration import, ScriptUnit unit) =>
+            import.Attributes.Count == 0 && import.Phase == ImportPhase.None && unit.Source.FilePath is { } origin
+                ? loadImport?.Invoke(import.Source.Value, origin) : null;
+
+        void BindImport(ImportDeclaration import, ScriptUnit unit, Scope scope)
+        {
+            var dependency = LoadImport(import, unit);
+            var target = dependency?.Source.FilePath is { } importedPath
+                ? moduleExports.GetValueOrDefault(importedPath) : null;
+            if (target is null)
+                Notice($"L{Range(unit, import).Line}: 静的インポートをローカルのJavaScriptへ解決できません: {import.Source.Value}");
+            foreach (var specifier in import.Specifiers)
+            {
+                var name = specifier.Local.Name;
+                if (specifier is ImportNamespaceSpecifier && target is not null)
+                    scope.Namespaces[name] = target;
+                var exportedName = specifier switch
+                {
+                    ImportSpecifier named => ModuleName(named.Imported),
+                    ImportDefaultSpecifier => "default",
+                    _ => null
+                };
+                scope.Declare(name, exportedName is not null ? target?.GetValueOrDefault(exportedName) : null);
+            }
+        }
+    }
+
+    private static string? ModuleName(Expression expression) => expression switch
+    {
+        Identifier identifier => identifier.Name,
+        StringLiteral literal => literal.Value,
+        _ => null
+    };
+
+    private Dictionary<string, int?> BuildExports((ScriptUnit Unit, Scope Scope) module)
+    {
+        var result = new Dictionary<string, int?>(StringComparer.Ordinal);
+        foreach (var statement in module.Unit.Root.Body)
+        {
+            switch (statement)
+            {
+                case ExportDefaultDeclaration { Declaration: FunctionDeclaration { Id: { } id } }:
+                    result["default"] = FindLocal(id.Name);
+                    break;
+                case ExportDefaultDeclaration { Declaration: IFunction } byDefault:
+                    result["default"] = !module.Scope.Dynamic && functions.TryGetValue(byDefault.Declaration, out var anonymous)
+                        ? anonymous.Entry.Id : null;
+                    break;
+                case ExportDefaultDeclaration { Declaration: Identifier identifier }:
+                    result["default"] = FindLocal(identifier.Name);
+                    break;
+                case ExportNamedDeclaration { Source: null } named:
+                    if (named.Declaration is FunctionDeclaration { Id: { } function })
+                        result[function.Name] = FindLocal(function.Name);
+                    if (named.Declaration is VariableDeclaration variables)
+                        foreach (var variable in variables.Declarations)
+                            if (variable.Id is Identifier name) result[name.Name] = FindLocal(name.Name);
+                    foreach (var specifier in named.Specifiers)
+                        if (ModuleName(specifier.Exported) is { } exported && ModuleName(specifier.Local) is { } local)
+                            result[exported] = FindLocal(local);
+                    break;
+            }
+        }
+        return result;
+
+        int? FindLocal(string localName) => module.Scope.ResolveLocal(localName) is { } target
+            && ReferenceEquals(data[target].Unit, module.Unit) ? target : null;
+    }
+
+    internal JavaScriptSourceFile? OpenScript(string path,
+        Func<int, CancellationToken, FlowDiagram>? projectFlow = null)
+    {
+        if (!externalUnits.TryGetValue(path, out var unit)) return null;
+        return new JavaScriptSourceFile(path, unit.OriginalText, this, projectFlow);
+    }
+
+    internal (int? Method, string? Path) ResolveNavigationTarget(int? id)
+    {
+        if (id is not { } key || !data.TryGetValue(key, out var target)) return (null, null);
+        var source = target.Entry.Source;
+        var path = source.FilePath ?? pagePath;
+        return (externalUnits.ContainsKey(path) ? source.Offset : key, path);
     }
 
     /// <summary>onclick/onchangeなどの属性を、returnを許す関数本体として解析する。</summary>
@@ -163,7 +292,7 @@ public sealed class RazorJavaScript
 
     private EntryData AddEntry(string name, Node? body, ScriptUnit unit, Scope scope)
     {
-        var source = body is null ? unit.Source : Range(unit, body);
+        var source = body is JsProgram or null ? unit.Source : Range(unit, body);
         var entry = new MethodEntry(nextId--, name, name, source);
         entries.Add(entry);
         var detail = new EntryData(entry, body, unit, scope);
@@ -186,7 +315,10 @@ public sealed class RazorJavaScript
             functionScope.OwnerEntryId = entry.Entry.Id;
             functions[node] = entry;
             if (node is FunctionDeclaration { Id: { } id })
+            {
                 scope.Declare(id.Name, conditional ? null : entry.Entry.Id);
+                if (!conditional && ReferenceEquals(scope, globals)) windowFunctions.Add(entry.Entry.Id);
+            }
             if (function.Id is { } ownName)
                 functionScope.Declare(ownName.Name, entry.Entry.Id);
             foreach (var parameter in function.Params)
@@ -218,6 +350,13 @@ public sealed class RazorJavaScript
                 if (IsXhrConstructor(value, scope, out var legacy)) scope.Xhrs.TryAdd(variable.Name, new XhrState(legacy));
             }
         }
+        else if (node is VariableDeclarator { Id: var pattern })
+        {
+            foreach (var identifier in Descendants(pattern).OfType<Identifier>())
+                scope.Declare(identifier.Name, null);
+        }
+        else if (node is ClassDeclaration { Id: { } declaredClass })
+            scope.Declare(declaredClass.Name, null);
         else if (node is AssignmentExpression { Left: Identifier assigned } assignment)
         {
             var declarationScope = scope.DeclarationScope(assigned.Name) ?? globals;
@@ -415,10 +554,18 @@ public sealed class RazorJavaScript
         expression is CallExpression { Callee: Identifier { Name: "$" or "jQuery" } jquery } && !scope.IsDeclared(jquery.Name)
         || expression is Identifier identifier && scope.FindJQuery(identifier.Name);
 
-    internal int? ResolveCall(CallExpression call, EntryData entry) => call.Callee is Identifier id
-        ? (scopes.TryGetValue(call, out var scope) ? scope : entry.Scope).Resolve(id.Name) : null;
+    internal int? ResolveCall(CallExpression call, EntryData entry)
+    {
+        var scope = scopes.TryGetValue(call, out var indexed) ? indexed : entry.Scope;
+        if (call.Callee is Identifier id) return scope.Resolve(id.Name);
+        if (call.Callee is not MemberExpression { Object: Identifier owner } member || PropertyName(member) is not { } name)
+            return null;
+        if (scope.FindNamespace(owner.Name) is { } module) return module.GetValueOrDefault(name);
+        if (owner.Name != "window" || scope.IsDeclared("window") || scope.Resolve(name) != globals.Resolve(name)
+            || globals.Resolve(name) is not { } target) return null;
+        return windowFunctions.Contains(target) ? target : null;
+    }
     internal RazorJavaScriptRequest? Request(Node node) => requestNodes.GetValueOrDefault(node);
-    internal string TargetPath => pagePath;
     internal void Notice(string message)
     {
         var notice = "解析は部分的 · " + message;
@@ -491,6 +638,7 @@ public sealed class RazorJavaScript
         public Scope? Parent { get; } = parent;
         public int OwnerEntryId { get; set; }
         public bool Dynamic { get; set; }
+        public Dictionary<string, Dictionary<string, int?>> Namespaces { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, string> Selectors { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, XhrState> Xhrs { get; } = new(StringComparer.Ordinal);
         public HashSet<string> JQueryVariables { get; } = new(StringComparer.Ordinal);
@@ -502,6 +650,7 @@ public sealed class RazorJavaScript
         public void Block(string name)
         {
             Declare(name, null);
+            Namespaces.Remove(name);
             Selectors.Remove(name);
             Xhrs.Remove(name);
             JQueryVariables.Remove(name);
@@ -511,6 +660,11 @@ public sealed class RazorJavaScript
         public Scope? DeclarationScope(string name) => names.ContainsKey(name) ? this : Parent?.DeclarationScope(name);
         public bool IsDeclared(string name) => names.ContainsKey(name) || Parent?.IsDeclared(name) == true;
         public bool FindJQuery(string name) => names.ContainsKey(name) ? JQueryVariables.Contains(name) : Parent?.FindJQuery(name) == true;
+        public int? ResolveLocal(string name) => !Dynamic && names.TryGetValue(name, out var declared)
+            && declared.Count == 1 ? declared[0] : null;
+        public IReadOnlyDictionary<string, int?>? FindNamespace(string name) => Dynamic ? null
+            : names.TryGetValue(name, out var declared) ? declared.Count == 1 ? Namespaces.GetValueOrDefault(name) : null
+            : Parent?.FindNamespace(name);
         public int? Resolve(string name) => Dynamic ? null : names.TryGetValue(name, out var candidates)
             ? candidates.Count == 1 ? candidates[0] : null : Parent?.Resolve(name);
         public string? FindSelector(string name) => names.ContainsKey(name) ? Selectors.GetValueOrDefault(name) : Parent?.FindSelector(name);

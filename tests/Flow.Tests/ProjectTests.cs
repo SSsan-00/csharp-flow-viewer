@@ -38,7 +38,8 @@ public sealed class ProjectTests
                   <ItemGroup>
                     <ProjectReference Include="../Library/Library.csproj" />
                     <Compile Remove="Excluded.cs" />
-                    <None Remove="Excluded.cshtml;ReviewOnly.cshtml" />
+                    <None Remove="Excluded.cshtml;ReviewOnly.cshtml;wwwroot/js/excluded.js;wwwroot/js/review.js" />
+                    <Content Include="wwwroot/js/review.js" Condition="'$(Configuration)' == 'Review'" />
                     <Content Include="ContentPage.cshtml" />
                     <Content Include="ReviewOnly.cshtml" Condition="'$(Configuration)' == 'Review'" />
                     <Content Include="../Shared/Linked.cshtml" Link="Pages/Linked.cshtml" />
@@ -49,7 +50,7 @@ public sealed class ProjectTests
             await File.WriteAllTextAsync(Path.Combine(app, "Handler.cshtml.cs"), """
                 class Handler
                 {
-                    int Run() => Outside.Service.Save();
+                    int Run() => LocalService.Save() + Outside.Service.Save();
                     #if NET9_0
                     void InNine() {}
                     #else
@@ -60,20 +61,33 @@ public sealed class ProjectTests
                     #endif
                 }
                 """);
+            var localServicePath = Path.Combine(app, "LocalService.cs");
+            await File.WriteAllTextAsync(localServicePath,
+                "static class LocalService { public static int Save() => 2; }");
             await File.WriteAllTextAsync(Path.Combine(app, "Excluded.cs"), "invalid and excluded");
             foreach (var name in new[] { "View.cshtml", "ContentPage.cshtml", "ReviewOnly.cshtml", "Excluded.cshtml" })
                 await File.WriteAllTextAsync(Path.Combine(app, name), "<p>Fake example</p>");
             await File.WriteAllTextAsync(Path.Combine(shared, "Linked.cshtml"), "<p>Linked example</p>");
             Directory.CreateDirectory(Path.Combine(app, "obj"));
             await File.WriteAllTextAsync(Path.Combine(app, "obj", "Generated.cshtml"), "<p>Generated example</p>");
+            var js = Directory.CreateDirectory(Path.Combine(app, "wwwroot", "js")).FullName;
+            await File.WriteAllTextAsync(Path.Combine(js, "ordinary.js"), "function ordinary() { notify(); }");
+            await File.WriteAllTextAsync(Path.Combine(js, "review.js"), "function review() {}");
+            await File.WriteAllTextAsync(Path.Combine(js, "excluded.js"), "function excluded() {}");
             await RestoreAsync(path, root);
 
             var settings = await ProjectLoader.InspectAsync(path, TestContextToken);
             Assert.Contains(option => option is { Configuration: "Review", TargetFramework: "net9.0" }, settings.Options);
             Assert.Contains(option => option is { Configuration: "Debug", TargetFramework: "netstandard2.1" }, settings.Options);
             using var current = await ProjectLoader.OpenAsync(path, new ProjectOptions("Review", "net9.0"), TestContextToken);
-            // Razor files now participate in the existing list, while C# parsing still uses Roslyn documents.
-            var file = await current.ReadAsync(Assert.ContainsSingle(current.Files.Where(item => !item.IsRazor)), TestContextToken);
+            CollectionAssert.AreEquivalent(new[] { "ordinary.js", "review.js" },
+                current.Files.Where(item => item.IsJavaScript).Select(item => Path.GetFileName(item.Path)).ToArray());
+            var script = await current.ReadJavaScriptAsync(
+                Assert.ContainsSingle(current.Files.Where(item => item.Path == Path.Combine(js, "ordinary.js"))), TestContextToken);
+            var ordinary = Assert.ContainsSingle(script.Entries.Where(entry => entry.Name == "ordinary"));
+            Assert.Contains(node => node.Label == "notify()", script.Analyze(ordinary.Id).Nodes);
+            // Razor files use the evaluated project list; C# parsing still uses Roslyn documents.
+            var file = await current.ReadAsync(Assert.ContainsSingle(current.Files.Where(item => Path.GetFileName(item.Path) == "Handler.cshtml.cs")), TestContextToken);
             CollectionAssert.AreEquivalent(new[] { "View.cshtml", "ContentPage.cshtml", "ReviewOnly.cshtml", "Linked.cshtml" },
                 current.Files.Where(item => item.IsRazor).Select(item => Path.GetFileName(item.Path)).ToArray());
             var linked = Assert.ContainsSingle(current.Files.Where(item => item.Path == Path.Combine(shared, "Linked.cshtml")));
@@ -87,12 +101,18 @@ public sealed class ProjectTests
             Assert.Contains(method => method.Name == "InReview", file.Methods);
             Assert.DoesNotContain(method => method.Name == "InStandard", file.Methods);
             Assert.DoesNotContain(message => message.Contains("解析は部分的"), file.Notices.Concat(current.Notices));
-            Assert.IsNull(Assert.ContainsSingle(file.Analyze(file.Methods[0].Id).Nodes
-                .Where(node => node.Label == "Service.Save()")).TargetMethod);
+            var run = file.Analyze(Assert.ContainsSingle(file.Methods.Where(method => method.Name == "Run")).Id);
+            Assert.IsNull(Assert.ContainsSingle(run.Nodes.Where(node => node.Label == "Service.Save()")).TargetMethod);
+            var localLink = Assert.ContainsSingle(run.Nodes.Where(node => node.Label == "LocalService.Save()"));
+            Assert.AreEqual(localServicePath, localLink.TargetFilePath);
+            var localTarget = await current.ReadAsync(
+                Assert.ContainsSingle(current.Files.Where(item => item.Path == localServicePath)), TestContextToken);
+            Assert.AreEqual(Assert.ContainsSingle(localTarget.Methods).Id, localLink.TargetMethod);
 
             using var standard = await ProjectLoader.OpenAsync(path, new ProjectOptions("Debug", "netstandard2.1"), TestContextToken);
-            var standardFile = await standard.ReadAsync(Assert.ContainsSingle(standard.Files.Where(item => !item.IsRazor)), TestContextToken);
+            var standardFile = await standard.ReadAsync(Assert.ContainsSingle(standard.Files.Where(item => Path.GetFileName(item.Path) == "Handler.cshtml.cs")), TestContextToken);
             Assert.DoesNotContain(item => Path.GetFileName(item.Path) == "ReviewOnly.cshtml", standard.Files);
+            Assert.AreEqual("ordinary.js", Path.GetFileName(Assert.ContainsSingle(standard.Files.Where(item => item.IsJavaScript)).Path));
             Assert.DoesNotContain(item => Path.GetFileName(item.Path) == "Excluded.cshtml", standard.Files);
             Assert.Contains(method => method.Name == "InStandard", standardFile.Methods);
             Assert.DoesNotContain(method => method.Name == "InReview", standardFile.Methods);
