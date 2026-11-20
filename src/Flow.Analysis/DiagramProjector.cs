@@ -557,6 +557,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     }
 
     private IReadOnlyList<INamedTypeSymbol>? candidateTypes;
+    private IReadOnlyList<INamedTypeSymbol>? constructedCandidateTypes;
     private readonly Dictionary<(ISymbol Method, ISymbol Receiver), IReadOnlyList<ImplementationCandidate>> candidateCache = new();
 
     private const string ExclusionTimeout = "追跡対象外の正規表現が時間内に評価できなかったため、以降の呼び出しには除外設定を適用していません。";
@@ -636,27 +637,84 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         if (candidateCache.Count >= 32) return [];
 
         var candidates = new Dictionary<(string? Path, int Offset), ImplementationCandidate>();
-        foreach (var type in candidateTypes ??= CandidateTypes())
+        IEnumerable<INamedTypeSymbol> types = candidateTypes ??= CandidateTypes();
+        if (receiverType.IsGenericType)
+            types = types.Concat(constructedCandidateTypes ??= ConstructedCandidateTypes().ToArray());
+        foreach (var type in types)
         {
             token.ThrowIfCancellationRequested();
-            if (!HasReceiverType(type, receiverType)) continue;
-            var implementation = method.ContainingType.TypeKind == TypeKind.Interface
-                ? type.FindImplementationForInterfaceMember(method.ConstructedFrom) as IMethodSymbol
-                : ResolveClassImplementation(method, type);
-            if (implementation is not { IsAbstract: false } || ResolveTarget(implementation) is not { } target
-                || ResolveDeclaration(implementation) is not { } declaration) continue;
-            var label = implementation.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
-            candidates.TryAdd((target.Path, target.Offset), new ImplementationCandidate(label, declaration, target.Offset, target.Path));
+            if (receiverType.TypeKind == TypeKind.Interface)
+            {
+                foreach (var implementation in ResolveInterfaceImplementations(method.ConstructedFrom, type, receiverType))
+                    AddCandidate(implementation);
+            }
+            else if (HasBaseType(type, receiverType))
+            {
+                AddCandidate(ResolveClassImplementation(method, type));
+            }
         }
         return candidateCache[key] = candidates.Values.OrderBy(item => item.Label, StringComparer.Ordinal)
             .ThenBy(item => item.Declaration.FilePath, StringComparer.Ordinal)
             .ThenBy(item => item.TargetMethod).Take(16).ToArray();
+
+        void AddCandidate(IMethodSymbol? implementation)
+        {
+            if (implementation is not { IsAbstract: false } || ResolveTarget(implementation) is not { } target
+                || ResolveDeclaration(implementation) is not { } declaration) return;
+            var label = implementation.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+            candidates.TryAdd((target.Path, target.Offset), new ImplementationCandidate(label, declaration, target.Offset, target.Path));
+        }
     }
 
-    private static bool HasReceiverType(INamedTypeSymbol type, INamedTypeSymbol receiver)
+    private IEnumerable<IMethodSymbol> ResolveInterfaceImplementations(IMethodSymbol method, INamedTypeSymbol type,
+        INamedTypeSymbol receiver)
     {
-        if (receiver.TypeKind == TypeKind.Interface)
-            return type.AllInterfaces.Any(item => SymbolEqualityComparer.Default.Equals(item, receiver));
+        var interfaces = type.AllInterfaces;
+        var comparer = SymbolEqualityComparer.Default;
+        if (interfaces.Contains(receiver, comparer))
+        {
+            if (type.FindImplementationForInterfaceMember(method) is IMethodSymbol exact)
+                yield return exact;
+            yield break;
+        }
+        if (!receiver.OriginalDefinition.TypeParameters.Any(parameter => parameter.Variance != VarianceKind.None) ||
+            (type.IsGenericType && !IsClosedType(type)))
+            yield break;
+
+        var declaringInterface = method.ContainingType;
+        var mapped = new HashSet<INamedTypeSymbol>(comparer);
+        foreach (var actualReceiver in interfaces)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!HasVarianceConversion(actualReceiver, receiver)) continue;
+
+            // An exact slot on the implementation takes precedence over compatible variant slots.
+            if (interfaces.Contains(declaringInterface, comparer))
+            {
+                if (type.FindImplementationForInterfaceMember(method) is IMethodSymbol exact)
+                    yield return exact;
+                yield break;
+            }
+
+            foreach (var actual in actualReceiver.AllInterfaces.Prepend(actualReceiver))
+            {
+                token.ThrowIfCancellationRequested();
+                if (!HasVarianceConversion(actual, declaringInterface) || !mapped.Add(actual)) continue;
+                var slot = actual.GetMembers(method.Name).OfType<IMethodSymbol>()
+                    .FirstOrDefault(member => comparer.Equals(member.OriginalDefinition, method.OriginalDefinition));
+                if (slot is not null && type.FindImplementationForInterfaceMember(slot) is IMethodSymbol implementation)
+                    yield return implementation;
+            }
+        }
+    }
+
+    private bool HasVarianceConversion(INamedTypeSymbol actual, INamedTypeSymbol expected) =>
+        SymbolEqualityComparer.Default.Equals(actual.OriginalDefinition, expected.OriginalDefinition) &&
+        ((CSharpCompilation)markers.Model.Compilation).ClassifyConversion(actual, expected)
+            is { IsImplicit: true, IsReference: true };
+
+    private static bool HasBaseType(INamedTypeSymbol type, INamedTypeSymbol receiver)
+    {
         for (INamedTypeSymbol? current = type; current is not null; current = current.BaseType)
             if (SymbolEqualityComparer.Default.Equals(current, receiver)) return true;
         return false;
@@ -680,6 +738,39 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         }
         return result;
     }
+
+    private IEnumerable<INamedTypeSymbol> ConstructedCandidateTypes()
+    {
+        // Do not invent generic arguments or scan other methods for allocations.
+        var assembly = markers.Model.Compilation.Assembly;
+        var seen = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        IReadOnlyList<TextSpan>? errors = null;
+        foreach (var operation in graph.OriginalOperation.Descendants().Take(10000))
+        {
+            token.ThrowIfCancellationRequested();
+            if (operation is not IObjectCreationOperation { IsImplicit: false, Constructor: not null,
+                    Type: INamedTypeSymbol { IsGenericType: true, IsAbstract: false } type } ||
+                !SymbolEqualityComparer.Default.Equals(type.ContainingAssembly, assembly) ||
+                !IsClosedType(type) || seen.Contains(type)) continue;
+
+            errors ??= markers.Model.GetDiagnostics(graph.OriginalOperation.Syntax.Span, token)
+                .Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
+                .Select(diagnostic => diagnostic.Location.SourceSpan).ToArray();
+            if (errors.Any(error => operation.Syntax.Span.IntersectsWith(error))) continue;
+
+            seen.Add(type);
+            yield return type;
+            if (seen.Count >= 256) yield break;
+        }
+    }
+
+    private static bool IsClosedType(ITypeSymbol type) => type switch
+    {
+        INamedTypeSymbol named => named.TypeKind != TypeKind.Error && !named.IsUnboundGenericType &&
+            named.TypeArguments.All(IsClosedType) && (named.ContainingType is null || IsClosedType(named.ContainingType)),
+        IArrayTypeSymbol array => IsClosedType(array.ElementType),
+        _ => type.TypeKind != TypeKind.TypeParameter
+    };
 
     private (int Offset, string? Path)? ResolveTarget(IMethodSymbol method)
     {
