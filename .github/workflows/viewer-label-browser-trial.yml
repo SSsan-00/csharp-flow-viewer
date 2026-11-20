@@ -33,6 +33,7 @@ jobs:
           p.write_text(s, encoding="utf-8")
           p = Path("tools/preview/test.mjs")
           s = p.read_text(encoding="utf-8")
+          s = s.replace("    window.chrome.webview = {", "    window.chrome ??= {};\n    window.chrome.webview = {", 1)
           s = s.replace('  await page.addInitScript(() => {', '  page.on("console", message => console.log("browser:", message.text()));\n  page.on("pageerror", error => console.log("pageerror:", error.stack));\n  await page.addInitScript(() => {', 1)
           s = s.replace('  await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered"));', '  await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" || message.type === "error"));\n  assert.equal(await page.locator("#feedback").textContent(), "");', 1)
           p.write_text(s, encoding="utf-8")
