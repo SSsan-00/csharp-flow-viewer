@@ -188,13 +188,19 @@ public sealed class RazorSourceFile
         var noticeList = flow.Notices.ToList();
         var callbackIndex = 0;
         var entryRequests = javaScript.Requests.Where(request => request.OwnerEntryId == entryId).ToArray();
+        if (entryRequests.Length == 0) return flow;
+        var callbackEntries = javaScript.Entries.ToDictionary(entry => entry.Id);
+        var ambiguousRanges = new HashSet<SourceRange>();
+        var seenRanges = new HashSet<SourceRange>();
+        foreach (var request in entryRequests)
+            if (!seenRanges.Add(request.Source)) ambiguousRanges.Add(request.Source);
+        var requestNodes = new Dictionary<SourceRange, int>();
+        for (var i = 0; i < nodes.Count; ++i)
+            if (nodes[i] is { Kind: NodeKind.Transfer, Source: { } source }) requestNodes.TryAdd(source, i);
         foreach (var request in entryRequests)
         {
-            // Entity-decoded inline attributes may map several expressions to the
-            // same broad source range. Such a range is insufficient to choose one.
-            if (entryRequests.Count(candidate => candidate.Source == request.Source) != 1) continue;
-            var nodeIndex = nodes.FindIndex(node => node.Kind == NodeKind.Transfer && node.Source == request.Source);
-            if (nodeIndex < 0) continue;
+            // Entity decoding can map several expressions to the same source range.
+            if (ambiguousRanges.Contains(request.Source) || !requestNodes.TryGetValue(request.Source, out var nodeIndex)) continue;
             var requestNode = nodes[nodeIndex];
             var handler = ResolveJavaScriptHandler(request);
             if (handler is not null)
@@ -204,8 +210,7 @@ public sealed class RazorSourceFile
 
             foreach (var callbackId in request.CallbackEntryIds.Distinct())
             {
-                var callback = javaScript.Entries.FirstOrDefault(entry => entry.Id == callbackId);
-                if (callback is null) continue;
+                if (!callbackEntries.TryGetValue(callbackId, out var callback)) continue;
                 var id = $"responseCandidate{callbackIndex++}";
                 var target = javaScript.ResolveNavigationTarget(callback.Id);
                 nodes.Add(new FlowNode(id, NodeKind.Call, $"応答イベント候補: {callback.Signature}",
