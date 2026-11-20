@@ -292,6 +292,34 @@ public sealed class ExternalJavaScriptTests
             Assert.IsNull(FindCall(graph, label).TargetMethod);
     }
 
+    [TestMethod]
+    public async Task CancelledCallerSearchCanRetryAndWarmSearchPreservesPerTargetSourceLines()
+    {
+        using var tree = new Files();
+        var page = tree.Add("Pages/Index.cshtml", """
+            <script src="/js/app.js"></script>
+            <a href="/" onclick="first()">First</a>
+            <input onchange="second()">
+            """);
+        var script = tree.Add("wwwroot/js/app.js", "function first() {} function second() {}");
+        using var session = tree.Open(page, script);
+        var file = session.Files.Single(item => item.Path == script);
+        var source = await session.ReadJavaScriptAsync(file, CancellationToken.None);
+        var first = source.Entries.Single(item => item.Name == "first");
+        var second = source.Entries.Single(item => item.Name == "second");
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await session.FindCallersAsync(file, first.Id, cancelled.Token));
+        var firstResult = await session.FindCallersAsync(file, first.Id, CancellationToken.None);
+        var warmedOtherTarget = await session.FindCallersAsync(file, second.Id, CancellationToken.None);
+        Assert.AreEqual(2, Assert.ContainsSingle(firstResult.Locations).Source.Line);
+        Assert.AreEqual(3, Assert.ContainsSingle(warmedOtherTarget.Locations).Source.Line);
+        Assert.AreSame(firstResult, await session.FindCallersAsync(file, first.Id, CancellationToken.None));
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await session.FindCallersAsync(file, first.Id, cancelled.Token));
+    }
+
     private static FlowNode FindCall(FlowDiagram graph, string label) => graph.Nodes.Single(item => item.Label == label);
 
     private static Task<RazorSourceFile> ReadPage(ProjectSession session) =>

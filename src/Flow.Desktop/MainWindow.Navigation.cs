@@ -215,58 +215,46 @@ public partial class MainWindow
     private async Task FindOrReturnToCallerAsync()
     {
         if (busy || !CanFindCaller) return;
-        if (history.TryPop(out var previous))
+        if (history.TryPeek(out var previous))
         {
-            await NavigateEntryAsync(previous.File, previous.Method, previous.Node, previous.Razor, previous.Script, previous.View);
+            await NavigateEntryAsync(previous.File, previous.Method, previous.Node, previous.Razor, previous.Script, previous.View,
+                commitHistory: () => history.Pop());
             return;
         }
         if (project is not { } currentProject || currentFile is not { } targetFile || method is not { } target) return;
-        try
+        if (callerSearch is null && !await RunNavigationAsync("呼び出し元を検索中…",
+            token => Task.Run(() => currentProject.FindCallersAsync(targetFile, target.Id, token), token),
+            result => callerSearch = result)) return;
+
+        if (callerSearch is not { } found || closed) return;
+        if (found.Locations.Count == 0)
         {
-            if (callerSearch is null)
-            {
-                SetBusy(true);
-                SetStatus("呼び出し元を検索中…");
-                callerSearch = await Task.Run(() => currentProject.FindCallersAsync(targetFile, target.Id, lifetime.Token), lifetime.Token);
-                if (closed) return;
-                SetBusy(false);
-            }
-            var result = callerSearch;
-            if (result.Locations.Count == 0)
-            {
-                SetStatus(result.IsPartial ? "確認できた範囲で呼び出し元は見つかりませんでした。"
-                    : "解析対象のソースに呼び出し元は見つかりませんでした。");
-                BackButton.ToolTip = "静的に特定できる呼び出し元が見つかりません。";
-                return;
-            }
-            if (result.Locations.Count == 1 && !result.IsPartial)
-                await OpenCallerAsync(result.Locations[0]);
-            else
-            {
-                SetStatus(result.IsPartial ? "確認できた範囲の呼び出し元を表示しています。" : "呼び出し元を選択してください。");
-                ShowNavigationChoices(BackButton, result.Locations,
-                    location => $"{location.File.Label}  ·  L{location.Source.Line}", OpenCallerAsync);
-            }
+            SetStatus(found.IsPartial ? "確認できた範囲で呼び出し元は見つかりませんでした。"
+                : "解析対象のソースに呼び出し元は見つかりませんでした。");
+            BackButton.ToolTip = "静的に特定できる呼び出し元が見つかりません。";
+            return;
         }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "呼び出し元を検索できません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed && busy) SetBusy(false); }
+        if (found.Locations.Count == 1 && !found.IsPartial)
+            await OpenCallerAsync(found.Locations[0]);
+        else
+        {
+            SetStatus(found.IsPartial ? "確認できた範囲の呼び出し元を表示しています。" : "呼び出し元を選択してください。");
+            ShowNavigationChoices(BackButton, found.Locations,
+                location => $"{location.File.Label}  ·  L{location.Source.Line}", OpenCallerAsync);
+        }
     }
 
     private async Task OpenCallerAsync(CallerLocation caller)
     {
-        if (busy || project is not { } currentProject) return;
-        SetBusy(true);
-        try
+        if (project is not { } currentProject) return;
+        await RunNavigationAsync("呼び出し元の表示を準備中…", async token =>
         {
             var context = caller.RazorContext is { } page
-                ? await Task.Run(() => currentProject.ReadRazorAsync(page, lifetime.Token), lifetime.Token) : null;
-            if (closed) return;
-            await OpenNavigationFileAsync(caller.File, razorContext: context);
-            if (closed) return;
-            if (caller.EntryId is int id && CurrentEntries.Any(entry => entry.Id == id))
-                await SelectMethodAsync(id);
-            if (closed) return;
+                ? await Task.Run(() => currentProject.ReadRazorAsync(page, token), token) : null;
+            return await PrepareNavigationAsync(caller.File, caller.EntryId, context, null, token);
+        }, prepared =>
+        {
+            ApplyPreparedEntry(caller.File, prepared);
             var node = nodes.Values.Where(node => node.Source is { } range && IsCurrentSource(range)
                     && range.Offset <= caller.Source.Offset && caller.Source.Offset - range.Offset < range.Length
                     && node.Kind is NodeKind.Call or NodeKind.Transfer)
@@ -276,13 +264,8 @@ public partial class MainWindow
             NavigateSource(caller.Source);
             Editor.Focus();
             SetStatus($"呼び出し元へ移動しました · L{caller.Source.Line}");
-            SaveProjectState();
-        }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "呼び出し元に移動できません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed) SetBusy(false); }
+        });
     }
-
 
     private string NavigationHint(FlowNode node)
     {
@@ -302,7 +285,7 @@ public partial class MainWindow
             : "このノードには呼び出し先がありません。";
     }
 
-    private async Task NavigateDeclarationAsync(ProjectFile file, SourceRange declaration, FlowNode caller)
+    private async Task NavigateDeclarationAsync(ProjectFile file, SourceRange declaration, FlowNode caller, Action commitHistory)
     {
         // Candidate paths without a file are relative to the caller's tree, not the declaration's.
         var candidates = caller.ImplementationCandidates?
@@ -311,11 +294,11 @@ public partial class MainWindow
                 TargetFilePath = candidate.TargetFilePath ?? currentFile?.Path
             })
             .Where(candidate => FindDefinitionFile(candidate.TargetFilePath) is not null).ToArray() ?? [];
-        SetBusy(true);
-        try
+        await RunNavigationAsync("宣言の表示を準備中…",
+            token => ReadNavigationSourceAsync(file, null, null, token), loaded =>
         {
-            await OpenNavigationFileAsync(file);
-            if (closed) return;
+            commitHistory();
+            ApplyPreparedFile(file, loaded);
             if (diagram is not null) SaveFileState();
             MethodsBox.SelectedItem = null;
             ResetDiagram();
@@ -330,41 +313,32 @@ public partial class MainWindow
             Editor.Focus();
             SetStatus("宣言へ移動しました。呼び出し元へ (Alt+←) で戻れます。");
             SaveProjectState();
-        }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "宣言へ移動できません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed) SetBusy(false); }
+        });
     }
 
-    private async Task OpenNavigationFileAsync(ProjectFile file, RazorSourceFile? razorContext = null,
-        JavaScriptSourceFile? jsContext = null)
-    {
-        if (currentFile == file) return;
-        if (!FilesBox.Items.Contains(file)) FileFilter.Clear();
-        FilesBox.SelectedItem = file;
-        FilesBox.ScrollIntoView(file);
-        await LoadFile(file, preserveHistory: true, restoreSelection: false, razorContext: razorContext, jsContext: jsContext);
-    }
-
-    // Navigation keeps the originating Razor event in the same history as C# calls.
     private async Task NavigateEntryAsync(ProjectFile file, int entryId, string? returnTo = null,
-        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null, DefinitionView view = DefinitionView.Direct)
+        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null, DefinitionView view = DefinitionView.Direct,
+        Action? commitHistory = null)
     {
-        SetBusy(true);
-        try
+        if (!busy && currentFile == file && method?.Id == entryId && diagram is not null
+            && (jsContext is null || ReferenceEquals(jsContext, javaScriptSource))
+            && (razorContext is null || ReferenceEquals(razorContext, razorSource)))
         {
-            await OpenNavigationFileAsync(file, razorContext, jsContext);
-            if (closed) return;
-            await SelectMethodAsync(entryId, returnTo);
-            if (!closed && HasSource)
-            {
-                if (method?.Id == entryId) ShowDefinitionView(view);
-                SaveProjectState();
-            }
+            commitHistory?.Invoke();
+            if (returnTo is not null && nodes.TryGetValue(returnTo, out var node))
+                JumpToPreviewNode(node, navigateSource: true);
+            ShowDefinitionView(view);
+            UpdateSurface();
+            return;
         }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "呼び出し先に移動できません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed) SetBusy(false); }
+
+        await RunNavigationAsync(returnTo is null ? "呼び出し先の表示を準備中…" : "呼び出し元の表示を準備中…",
+            token => PrepareNavigationAsync(file, entryId, razorContext, jsContext, token),
+            prepared =>
+            {
+                commitHistory?.Invoke();
+                ApplyPreparedEntry(file, prepared, returnTo, view);
+            });
     }
 
     private string EntryTypeLabel => currentFile?.IsRazor == true ? "画面イベント"

@@ -12,6 +12,7 @@ public sealed class JavaScriptSourceFile
     internal JavaScriptSourceFile(string path, string text, RazorJavaScript analyzer,
         Func<int, CancellationToken, FlowDiagram>? projectFlow)
     {
+        FilePath = path;
         Text = text;
         this.analyzer = analyzer;
         this.projectFlow = projectFlow;
@@ -21,6 +22,8 @@ public sealed class JavaScriptSourceFile
         Entries = entries.Select(entry => entry with { Id = entry.Source.Offset }).ToArray();
     }
 
+    public string FilePath { get; }
+    public object NavigationContext => analyzer;
     public string Text { get; }
     public IReadOnlyList<MethodEntry> Entries { get; }
     public IReadOnlyList<string> Notices => analyzer.Notices;

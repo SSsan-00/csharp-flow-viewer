@@ -219,8 +219,10 @@ public sealed class RazorJavaScript
     }
 
     /// <summary>onclick/onchangeなどの属性を、returnを許す関数本体として解析する。</summary>
-    public int AddInlineHandler(string name, string code, SourceRange source, bool containsRazorCode = false)
+    public int AddInlineHandler(string name, string code, SourceRange source, bool containsRazorCode = false,
+        CancellationToken token = default)
     {
+        token.ThrowIfCancellationRequested();
         var decoded = WebUtility.HtmlDecode(code);
         var fragment = new RazorJavaScriptFragment(decoded, source, containsRazorCode);
         var unit = Parse(fragment, inline: true, approximate: decoded.Length != code.Length);
@@ -235,8 +237,8 @@ public sealed class RazorJavaScript
         scope.OwnerEntryId = entry.Entry.Id;
         // インラインイベントのeventはブラウザーが渡す引数として扱う。
         scope.Declare("event", null);
-        Index(unit.Root, unit, scope, CancellationToken.None, 0, conditional: false);
-        FindBindingsAndRequests(unit.Root, unit, CancellationToken.None);
+        Index(unit.Root, unit, scope, token, 0, conditional: false);
+        FindBindingsAndRequests(unit.Root, unit, token);
         return entry.Entry.Id;
     }
 
