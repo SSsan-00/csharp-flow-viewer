@@ -41,9 +41,10 @@ public sealed class RazorJavaScript
     private readonly Dictionary<Node, Scope> scopes = [];
     private readonly Dictionary<Node, int> owners = [];
     private readonly HashSet<Node> conditionalNodes = [];
-    private readonly Dictionary<Node, RazorJavaScriptRequest> requestNodes = [];
-    private readonly Dictionary<RazorJavaScriptBinding, XhrState> bindingXhrs = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<RazorJavaScriptRequest, XhrState> requestXhrs = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<Node, int> requestNodes = [];
+    private readonly List<XhrState> requestClients = [];
+    private readonly object callbackLock = new();
+    private bool callbacksDirty;
     private readonly Dictionary<(XhrState Client, int Owner), XhrUsage> xhrUsages = [];
     private readonly Scope globals = new(null);
     private readonly HashSet<int> windowFunctions = [];
@@ -56,7 +57,14 @@ public sealed class RazorJavaScript
     public IReadOnlyList<MethodEntry> Entries => entries;
     public IReadOnlyList<string> Notices => notices;
     public IReadOnlyList<RazorJavaScriptBinding> Bindings => bindings;
-    public IReadOnlyList<RazorJavaScriptRequest> Requests => requests;
+    public IReadOnlyList<RazorJavaScriptRequest> Requests
+    {
+        get
+        {
+            CompleteCallbacks();
+            return requests;
+        }
+    }
 
     public RazorJavaScript(string pageText, string pagePath, IEnumerable<RazorJavaScriptFragment> fragments,
         CancellationToken token = default) : this(pageText, pagePath, fragments, null, token) { }
@@ -430,23 +438,21 @@ public sealed class RazorJavaScript
                     xhr: member.Object is Identifier client ? scope.FindXhr(client.Name) : null);
             }
         }
-        // sendより後のコールバック代入も候補として表示する。呼び出し順の保証とは区別する。
-        for (var i = 0; i < requests.Count; ++i)
+    }
+
+    private void CompleteCallbacks()
+    {
+        lock (callbackLock)
         {
-            var request = requests[i];
-            if (!requestXhrs.TryGetValue(request, out var client)) continue;
-            var callbackIds = bindings.Where(binding => bindingXhrs.TryGetValue(binding, out var boundClient)
-                    && ReferenceEquals(client, boundClient) && binding.HandlerEntryId is not null)
-                .Select(binding => binding.HandlerEntryId!.Value).Distinct().ToArray();
-            if (callbackIds.Length > 0)
+            if (!callbacksDirty) return;
+            // A handler registered after send still belongs to that client, not the synchronous flow.
+            for (var i = 0; i < requests.Count; ++i)
             {
-                var updated = request with { CallbackEntryIds = callbackIds };
-                requests[i] = updated;
-                requestXhrs.Remove(request);
-                requestXhrs[updated] = client;
-                foreach (var key in requestNodes.Where(pair => ReferenceEquals(pair.Value, request)).Select(pair => pair.Key).ToArray())
-                    requestNodes[key] = updated;
+                var ids = requestClients[i].CallbackIds;
+                if (!ReferenceEquals(requests[i].CallbackEntryIds, ids) && ids.Count > 0)
+                    requests[i] = requests[i] with { CallbackEntryIds = ids };
             }
+            callbacksDirty = false;
         }
     }
 
@@ -494,7 +500,8 @@ public sealed class RazorJavaScript
         var name = target is { } id ? data[id].Entry.Name : Slice(unit, handler);
         var binding = new RazorJavaScriptBinding(selector, eventName, target, Range(unit, registration), name, delegated, conditional, legacy);
         bindings.Add(binding);
-        if (xhr is not null) bindingXhrs[binding] = xhr;
+        if (xhr is not null && target is int handlerId && xhr.RegisterCallback(handlerId))
+            callbacksDirty = true;
         if (target is null) Notice($"L{Range(unit, registration).Line}: {eventName}の関数を一意に特定できません。");
         if (legacy) Notice($"L{Range(unit, registration).Line}: {eventName}の旧式イベント登録は実行環境やライブラリの対応確認が必要です。");
         if (selector == "動的な要素") Notice($"L{Range(unit, registration).Line}: イベント対象の要素を静的に特定できません。");
@@ -529,9 +536,10 @@ public sealed class RazorJavaScript
             var request = new RazorJavaScriptRequest(owners.GetValueOrDefault(call, scope.OwnerEntryId), client, usage.Method?.ToUpperInvariant() ?? "動的なHTTPメソッド",
                 usage.Url ?? usage.UrlExpression ?? "送信先未解決", call.Arguments.Count > 0 ? Slice(unit, call.Arguments[0]) : null,
                 Range(unit, call), usage.IsAsync, resolved, []);
+            requestNodes[call] = requests.Count;
             requests.Add(request);
-            requestNodes[call] = request;
-            requestXhrs[request] = xhr;
+            requestClients.Add(xhr);
+            callbacksDirty = true;
             if (!resolved) Notice($"L{request.Source.Line}: XMLHttpRequestのメソッドまたはURLを確定できません。");
             if (xhr.Legacy) Notice($"L{request.Source.Line}: ActiveXObjectを使うHTTP送信は旧IE向けの候補です。");
         }
@@ -660,7 +668,12 @@ public sealed class RazorJavaScript
                 ? new FlowTarget(data[key].Entry.Signature, method, path) : null);
     }
 
-    internal RazorJavaScriptRequest? Request(Node node) => requestNodes.GetValueOrDefault(node);
+    internal RazorJavaScriptRequest? Request(Node node)
+    {
+        if (!requestNodes.TryGetValue(node, out var index)) return null;
+        CompleteCallbacks();
+        return requests[index];
+    }
     internal void Notice(string message)
     {
         var notice = "解析は部分的 · " + message;
@@ -770,6 +783,20 @@ public sealed class RazorJavaScript
     }
     internal sealed class XhrState(bool legacy)
     {
+        private List<int>? callbackOrder;
+        private HashSet<int>? callbacks;
+        private IReadOnlyList<int>? snapshot;
+
+        public IReadOnlyList<int> CallbackIds => snapshot ??= callbackOrder?.ToArray() ?? [];
+
+        public bool RegisterCallback(int id)
+        {
+            if (!(callbacks ??= []).Add(id)) return false;
+            (callbackOrder ??= []).Add(id);
+            snapshot = null;
+            return true;
+        }
+
         public bool Legacy { get; set; } = legacy;
         public bool ConditionalConstruction { get; set; }
     }

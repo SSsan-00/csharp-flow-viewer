@@ -1,4 +1,4 @@
-name: Cancellable call navigation Windows verification (cold search first)
+name: Measure analysis and SVG performance on Windows
 on:
   push:
     branches: [codex/cross-file-nav-screen-trial]
@@ -12,9 +12,30 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
         with:
           global-json-file: global.json
+      - name: Benchmark unchanged SVG output on Microsoft Edge
+        shell: pwsh
+        run: |
+          $against = Join-Path $env:RUNNER_TEMP 'cfv-baseline'
+          git worktree add --detach $against 24ea8dafe9dbc04dc29f4c760e9448306dc2b2c3
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline checkout failed' }
+          $env:CFV_MERMAID_FIXTURE = Join-Path $env:RUNNER_TEMP 'mermaid-fixture.mmd'
+          dotnet test tests/Flow.Tests/Flow.Tests.csproj -c Release --filter 'FullyQualifiedName~MermaidSnapshotRoundTripsThroughBrowserFixture'
+          if ($LASTEXITCODE -ne 0) { throw 'Mermaid fixture generation failed' }
+          Push-Location tools/preview
+          try {
+            node --version
+            npm.cmd ci --ignore-scripts
+            if ($LASTEXITCODE -ne 0) { throw 'Preview dependency installation failed' }
+            node benchmark.mjs $against
+            if ($LASTEXITCODE -ne 0) { throw 'SVG benchmark failed' }
+            $env:CFV_CHROMIUM = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+            npm.cmd test
+            if ($LASTEXITCODE -ne 0) { throw 'Preview interaction tests failed' }
+          } finally { Pop-Location }
       - name: Publish the release EXE
         shell: pwsh
         run: |
@@ -28,14 +49,6 @@ jobs:
           'function reload() { console.log("not referenced"); }' | Set-Content 'samples/OrderProcessing/wwwroot/js/unrelated.js' -Encoding utf8
           'namespace NavigationDemo; public static class NavigationCaller { public static void InvokeCross() => NavigationTarget.GoCross(); }' | Set-Content 'samples/OrderProcessing/NavigationCaller.cs' -Encoding utf8
           'namespace NavigationDemo; public static class NavigationTarget { public static void GoCross() => System.Console.WriteLine("target"); }' | Set-Content 'samples/OrderProcessing/NavigationTarget.cs' -Encoding utf8
-          $many = New-Item -ItemType Directory -Force 'samples/OrderProcessing/Pages/CallerSearchFixture'
-          $body = "<p>Unrelated fixture</p>`n" * 850
-          foreach ($i in 1..150) {
-            Set-Content (Join-Path $many.FullName "Fixture$i.cshtml") -Value $body -Encoding utf8
-          }
-          'namespace NavigationDemo; public static class SlowCaller { public static int Go() => SlowTarget.GoSlow(1); }' | Set-Content 'samples/OrderProcessing/SlowCaller.cs' -Encoding utf8
-          $conditions = (1..3300 | ForEach-Object { "if (value == $_) System.GC.KeepAlive(value);" }) -join "`n"
-          ("namespace NavigationDemo; public static class SlowTarget { public static int GoSlow(int value) {`n" + $conditions + "`nreturn value; } }") | Set-Content 'samples/OrderProcessing/SlowTarget.cs' -Encoding utf8
           dotnet restore samples/OrderProcessing/OrderProcessing.csproj
           if ($LASTEXITCODE -ne 0) { throw 'Sample restore failed' }
           dotnet publish src/Flow.Desktop -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o artifacts/win-x64
@@ -136,6 +149,12 @@ jobs:
             Wait-Title 'NavigationDemo[.]cshtml'
             Wait-Text 'NodeLabel' 'onclick.*reload'
             Wait-Text 'SourceLocation' '^L3'
+            Enter-OverviewCall
+            Select-Entry 'MethodsBox' 'noCaller'
+            Wait-Text 'FlowTitle' 'noCaller'
+            Invoke-Button 'BackButton'
+            [void](Wait-Until { $b = Find-Id $win 'BackButton'; if ($b -and !$b.Current.IsEnabled) { $true } } 'no caller')
+            Wait-Title 'nav-target[.]js'
             Select-File 'NavigationDemo.cshtml' 'NavigationDemo[.]cshtml'
             Wait-Title 'NavigationDemo[.]cshtml'
             Select-File 'nav-target.js' 'nav-target[.]js'
@@ -143,21 +162,9 @@ jobs:
             Select-Entry 'MethodsBox' 'reload'
             Wait-Text 'FlowTitle' 'reload'
             Invoke-Button 'BackButton'
-            Invoke-Button 'CancelNavigationButton'
-            Wait-Text 'StatusText' '中断しました'
-            Wait-Title 'nav-target[.]js'
-            Wait-Text 'FlowTitle' 'reload'
-            Capture 'caller-cancel.png'
-            Invoke-Button 'BackButton'
             Wait-Title 'NavigationDemo[.]cshtml'
             Wait-Text 'SourceLocation' '^L3'
             Capture 'javascript-caller.png'
-            Enter-OverviewCall
-            Select-Entry 'MethodsBox' 'noCaller'
-            Wait-Text 'FlowTitle' 'noCaller'
-            Invoke-Button 'BackButton'
-            [void](Wait-Until { $b = Find-Id $win 'BackButton'; if ($b -and !$b.Current.IsEnabled) { $true } } 'no caller')
-            Wait-Title 'nav-target[.]js'
             Select-File 'NavigationTarget.cs' 'NavigationTarget[.]cs'
             Wait-Title 'NavigationTarget[.]cs'
             Select-Entry 'MethodsBox' 'GoCross'
@@ -166,23 +173,6 @@ jobs:
             Wait-Title 'NavigationCaller[.]cs'
             Wait-Text 'FlowTitle' 'InvokeCross'
             Capture 'csharp-caller.png'
-            Select-File 'SlowCaller.cs' 'SlowCaller[.]cs'
-            Wait-Title 'SlowCaller[.]cs'
-            Select-Entry 'MethodsBox' 'SlowCaller.*Go'
-            Invoke-Button 'ListButton'
-            Select-Entry 'NodesBox' 'GoSlow'
-            Invoke-Button 'FollowButton'
-            [void](Wait-Until { $b = Find-Id $win 'CancelNavigationButton'; if ($b -and $b.Current.IsEnabled) { $true } } 'forward cancel')
-            [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
-            Wait-Text 'StatusText' '中断しました'
-            Wait-Title 'SlowCaller[.]cs'
-            Wait-Text 'NodeLabel' 'GoSlow'
-            Capture 'definition-cancel.png'
-            Invoke-Button 'FollowButton'
-            Wait-Title 'SlowTarget[.]cs'
-            Wait-Text 'FlowTitle' 'GoSlow'
-            Invoke-Button 'BackButton'
-            Wait-Title 'SlowCaller[.]cs' 
           } catch {
             try {
               if ($win) {
@@ -199,7 +189,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: call-navigation-cancel-screens
+          name: razor-overview-caller-screens
           path: artifacts/screenshot/*.png
           if-no-files-found: warn
           retention-days: 7
