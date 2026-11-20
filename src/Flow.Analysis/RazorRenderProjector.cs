@@ -1,0 +1,176 @@
+using Flow.Model;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
+
+namespace Flow.Analysis;
+
+internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<FlowNode> nodes,
+    List<FlowEdge> edges, CancellationToken token)
+{
+    private const string End = "render_end";
+    private const int MaxConditions = 100;
+    private readonly List<(TextSpan Body, string Id)> bodies = [];
+    private int conditionCount;
+
+    public bool IsTruncated { get; private set; }
+
+    public string? Project(SourceRange pageSource)
+    {
+        var first = Visit(document.ServerCode, End, null, null);
+        if (first == End) return null;
+        nodes.Add(new FlowNode("render_start", NodeKind.Start, "サーバー側描画", pageSource));
+        nodes.Add(new FlowNode(End, NodeKind.End, "描画終了", pageSource));
+        edges.Add(new FlowEdge("render_start", first));
+        MarkDisconnectedPaths();
+        return "render_start";
+    }
+
+    public string? ScopeAt(int offset) => bodies.Where(branch => branch.Body.Contains(offset))
+        .OrderBy(branch => branch.Body.Length).Select(branch => branch.Id).FirstOrDefault();
+
+    private string Visit(StatementSyntax statement, string next, string? breakTo, string? continueTo)
+    {
+        token.ThrowIfCancellationRequested();
+        if (statement is BlockSyntax block) return Sequence(block.Statements, next, breakTo, continueTo);
+        if (statement is ReturnStatementSyntax) return Transfer("return", End);
+        if (statement is ThrowStatementSyntax) return Transfer("throw", End);
+        if (statement is GotoStatementSyntax)
+            return Node("boundary", NodeKind.Transfer, "goto の移動先は解析対象外", statement);
+        if (statement is TryStatementSyntax)
+        {
+            var boundary = Node("boundary", NodeKind.Exception, "try / catch の内部フローは解析対象外", statement);
+            edges.Add(new FlowEdge(boundary, next, "通常完了した場合"));
+            return boundary;
+        }
+        if (statement is BreakStatementSyntax && breakTo is not null) return Transfer("break", breakTo);
+        if (statement is ContinueStatementSyntax && continueTo is not null) return Transfer("continue", continueTo);
+
+        if (statement is not (IfStatementSyntax or ForStatementSyntax or CommonForEachStatementSyntax
+            or WhileStatementSyntax or DoStatementSyntax or SwitchStatementSyntax))
+            return next;
+
+        if (conditionCount++ >= MaxConditions)
+        {
+            IsTruncated = true;
+            return next;
+        }
+
+        switch (statement)
+        {
+            case IfStatementSyntax conditional:
+            {
+                var id = Node("if", NodeKind.Condition, $"描画条件: {conditional.Condition}", conditional.Condition);
+                var join = Node("join", NodeKind.Junction, "合流", conditional);
+                edges.Add(new FlowEdge(join, next));
+                Branch(id, "true", "True", "条件成立時に描画", conditional.Statement, join, breakTo, continueTo);
+                if (conditional.Else is { } alternative)
+                    Branch(id, "false", "False", "条件不成立時に描画", alternative.Statement, join, breakTo, continueTo);
+                else
+                    edges.Add(new FlowEdge(id, join, "False"));
+                return id;
+            }
+            case ForStatementSyntax loop:
+                return Loop(loop.Statement, "for", loop.Condition, loop.ForKeyword.Span);
+            case WhileStatementSyntax loop:
+                return Loop(loop.Statement, "while", loop.Condition, loop.WhileKeyword.Span);
+            case DoStatementSyntax loop:
+                return Loop(loop.Statement, "do / while", loop.Condition, loop.DoKeyword.Span, firstBody: true);
+            case CommonForEachStatementSyntax loop:
+                return Loop(loop.Statement, "foreach", loop.Expression, loop.ForEachKeyword.Span);
+            case SwitchStatementSyntax choice:
+            {
+                var id = Node("switch", NodeKind.Condition, $"描画分岐: switch ({choice.Expression})", choice.Expression);
+                foreach (var section in choice.Sections)
+                {
+                    var sectionId = Node("case", NodeKind.Junction, "選択された分岐を描画", section);
+                    bodies.Add((document.OriginalSpan(section.Span), sectionId));
+                    edges.Add(new FlowEdge(id, sectionId, string.Join(" / ", section.Labels.Select(label => label.ToString().TrimEnd(':')))));
+                    edges.Add(new FlowEdge(sectionId, Sequence(section.Statements, next, next, continueTo)));
+                }
+                if (!choice.Sections.SelectMany(section => section.Labels).Any(label => label is DefaultSwitchLabelSyntax))
+                    edges.Add(new FlowEdge(id, next, "一致なし"));
+                return id;
+            }
+        }
+
+        return next;
+
+        string Loop(StatementSyntax body, string kind, ExpressionSyntax? condition, TextSpan keyword, bool firstBody = false)
+        {
+            var check = condition?.Span ?? keyword;
+            var id = NodeAt("loop", NodeKind.Condition, kind == "foreach" ? $"次の要素: {condition}"
+                : $"描画条件: {kind} ({condition?.ToString() ?? "条件省略"})", check);
+            var repeatId = NodeAt("repeat", NodeKind.Junction, kind == "for" ? "更新して次の反復へ" : "次の反復へ", keyword);
+            edges.Add(new FlowEdge(repeatId, id));
+            if (condition is not null)
+                edges.Add(new FlowEdge(id, next, kind == "foreach" ? "要素なし" : "False"));
+            var entry = Branch(id, "body", kind == "foreach" ? "要素あり" : "True", "ループ本体を描画",
+                body, repeatId, next, repeatId);
+            return firstBody ? entry : id;
+        }
+
+        string Transfer(string label, string target)
+        {
+            var id = Node("transfer", NodeKind.Transfer, label, statement);
+            edges.Add(new FlowEdge(id, target));
+            return id;
+        }
+    }
+
+    private void MarkDisconnectedPaths()
+    {
+        var outgoing = edges.ToLookup(edge => edge.From, edge => edge.To);
+        var reachable = new HashSet<string>();
+        var pending = new Stack<string>();
+        pending.Push("render_start");
+        while (pending.TryPop(out var id))
+        {
+            token.ThrowIfCancellationRequested();
+            if (!reachable.Add(id)) continue;
+            foreach (var next in outgoing[id]) pending.Push(next);
+        }
+        for (var index = 0; index < nodes.Count; index++)
+        {
+            var node = nodes[index];
+            if (node.Id.StartsWith("render_", StringComparison.Ordinal) && !reachable.Contains(node.Id))
+                nodes[index] = node with { IsReachable = false };
+        }
+        for (var index = 0; index < edges.Count; index++)
+        {
+            var edge = edges[index];
+            if (edge.From.StartsWith("render_", StringComparison.Ordinal) && !reachable.Contains(edge.From))
+                edges[index] = edge with { IsReachable = false };
+        }
+    }
+
+    private string Sequence(SyntaxList<StatementSyntax> statements, string next, string? breakTo, string? continueTo)
+    {
+        for (var index = statements.Count - 1; index >= 0; index--)
+            next = Visit(statements[index], next, breakTo, continueTo);
+        return next;
+    }
+
+    private string Branch(string from, string suffix, string outcome, string label, StatementSyntax body,
+        string next, string? breakTo, string? continueTo)
+    {
+        var span = document.OriginalSpan(body.Span);
+        var id = from + "_" + suffix;
+        nodes.Add(new FlowNode(id, NodeKind.Junction, label, document.Range(span.Start, span.Length)));
+        bodies.Add((span, id));
+        edges.Add(new FlowEdge(from, id, outcome));
+        edges.Add(new FlowEdge(id, Visit(body, next, breakTo, continueTo)));
+        return id;
+    }
+
+    private string Node(string prefix, NodeKind kind, string label, SyntaxNode node) =>
+        NodeAt(prefix, kind, label, node.Span);
+
+    private string NodeAt(string prefix, NodeKind kind, string label, TextSpan range)
+    {
+        var span = document.OriginalSpan(range);
+        var id = $"render_{prefix}{span.Start}";
+        nodes.Add(new FlowNode(id, kind, label, document.Range(span.Start, span.Length)));
+        return id;
+    }
+}
