@@ -78,7 +78,7 @@ public sealed class RazorSourceFile
                 var eventLabel = $"{attribute.Name[2..]} · {label}";
                 var code = attribute.IsDynamic ? document.ProjectJavaScript(attribute.ValueStart, attribute.ValueLength) : attribute.RawValue;
                 var id = javaScript.AddInlineHandler(eventLabel, code,
-                    document.Range(attribute.ValueStart, attribute.ValueLength), attribute.IsDynamic);
+                    document.Range(attribute.ValueStart, attribute.ValueLength), attribute.IsDynamic, token);
                 inlineLabels[id] = (attribute.Name, document.Range(attribute.Start, attribute.Length), ElementId(element));
                 if (element.TagName == "a" && attribute.Name.Equals("onclick", StringComparison.OrdinalIgnoreCase))
                 {
@@ -96,7 +96,7 @@ public sealed class RazorSourceFile
                         ? document.ProjectJavaScript(href.ValueStart + colon + 1, href.ValueLength - colon - 1)
                         : href.RawValue[(colon + 1)..];
                     var id = javaScript.AddInlineHandler($"click · {label}", code,
-                        document.Range(href.ValueStart + colon + 1, href.ValueLength - colon - 1), href.IsDynamic);
+                        document.Range(href.ValueStart + colon + 1, href.ValueLength - colon - 1), href.IsDynamic, token);
                     inlineLabels[id] = ("href", document.Range(href.Start, href.Length), ElementId(element));
                     if (anchorOnclick is not null) namedAnchorEvents.Add(id);
                 }
@@ -122,6 +122,7 @@ public sealed class RazorSourceFile
     }
 
     public string Text { get; }
+    public string FilePath => filePath;
     public string? ModelName => document.ModelName;
     public bool IsPage => document.IsPage;
     public string? RouteTemplate => document.RouteTemplate;

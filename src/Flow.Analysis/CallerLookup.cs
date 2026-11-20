@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Flow.Model;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -14,34 +15,56 @@ public sealed partial class ProjectSession
     private const int CallerLimit = 100;
     private const int JavaScriptFileLimit = 256;
 
+    private const int CallerResultLimit = 64;
+    private const int IndexedSiteLimit = 50_000;
+    private readonly object callerCacheLock = new();
+    private readonly Dictionary<(ProjectFile, int), CallerSearch> callerResults = [];
+    private readonly Dictionary<ProjectFile, IReadOnlyDictionary<(ProjectFile, int), List<CallerLocation>>> jsCallerIndexes = [];
+    private int indexedSiteCount;
+
     public async Task<CallerSearch> FindCallersAsync(ProjectFile targetFile, int targetId, CancellationToken token)
     {
-        if (!Files.Contains(targetFile)) return new CallerSearch([]);
-        if (targetFile.Id is { } documentId && project.GetDocument(documentId) is { } document)
-            return await FindCSharpCallersAsync(document, targetId, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        var key = (targetFile, targetId);
+        lock (callerCacheLock)
+            if (callerResults.TryGetValue(key, out var cached)) return cached;
 
+        if (!Files.Contains(targetFile)) return new CallerSearch([]);
+        var result = targetFile.Id is { } documentId && project.GetDocument(documentId) is { } document
+            ? await FindCSharpCallersAsync(document, targetId, token).ConfigureAwait(false)
+            : await FindJavaScriptCallersAsync(targetFile, targetId, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        lock (callerCacheLock)
+        {
+            if (!result.IsPartial)
+            {
+                if (callerResults.Count >= CallerResultLimit) callerResults.Remove(callerResults.Keys.First());
+                callerResults[key] = result;
+            }
+        }
+        return result;
+    }
+
+    private async Task<CallerSearch> FindJavaScriptCallersAsync(ProjectFile targetFile, int targetId, CancellationToken token)
+    {
         var locations = new Dictionary<(string Path, int Offset, int Length), CallerLocation>();
         var filesByPath = Files.ToDictionary(file => file.Path, LocalJavaScriptFiles.PathComparer);
         var candidates = Files.Where(file => file.IsRazor || file.IsJavaScript)
             .Where(file => !targetFile.IsRazor || file == targetFile)
             .OrderByDescending(file => file == targetFile).Take(JavaScriptFileLimit + 1).ToArray();
         var partial = candidates.Length > JavaScriptFileLimit;
+        var key = (targetFile, targetId);
         foreach (var file in candidates.Take(JavaScriptFileLimit))
         {
             token.ThrowIfCancellationRequested();
-            IEnumerable<RazorJavaScript.CallSite> sites;
             try
             {
-                sites = file.IsRazor ? (await ReadRazorAsync(file, token).ConfigureAwait(false)).CallSites(token)
-                    : (await ReadJavaScriptAsync(file, token).ConfigureAwait(false)).CallSites(token);
-                foreach (var site in sites)
+                var index = await ReadJavaScriptCallerIndexAsync(file, filesByPath, key, token).ConfigureAwait(false);
+                if (!index.TryGetValue(key, out var matches)) continue;
+                foreach (var location in matches)
                 {
-                    if (site.Target?.Method != targetId
-                        || !LocalJavaScriptFiles.PathComparer.Equals(site.Target.FilePath, targetFile.Path)) continue;
-                    if (site.Source.FilePath is not { } path || !filesByPath.TryGetValue(path, out var owner)) continue;
-                    var entryId = owner.IsJavaScript ? site.Owner.Source.Offset : site.Owner.Id;
-                    locations.TryAdd((owner.Path, site.Source.Offset, site.Source.Length),
-                        new CallerLocation(owner, entryId, site.Source, file.IsRazor && owner != file ? file : null));
+                    token.ThrowIfCancellationRequested();
+                    locations.TryAdd((location.File.Path, location.Source.Offset, location.Source.Length), location);
                     if (locations.Count >= CallerLimit) return SortCallers(locations.Values, true);
                 }
             }
@@ -51,6 +74,55 @@ public sealed partial class ProjectSession
             }
         }
         return SortCallers(locations.Values, partial);
+    }
+
+    private async Task<IReadOnlyDictionary<(ProjectFile, int), List<CallerLocation>>> ReadJavaScriptCallerIndexAsync(
+        ProjectFile file, IReadOnlyDictionary<string, ProjectFile> files, (ProjectFile, int) targetKey, CancellationToken token)
+    {
+        int budget;
+        lock (callerCacheLock)
+        {
+            if (jsCallerIndexes.TryGetValue(file, out var cached)) return cached;
+            budget = IndexedSiteLimit - indexedSiteCount;
+        }
+
+        // Browser call sites don't depend on Razor's server-side PageModel binding.
+        var sites = file.IsRazor
+            ? (await PageModelResolver.ReadAsync(project, file, Files, token, bindHandlers: false).ConfigureAwait(false)).CallSites(token)
+            : (await ReadJavaScriptAsync(file, token).ConfigureAwait(false)).CallSites(token);
+        var index = new Dictionary<(ProjectFile, int), List<CallerLocation>>();
+        var count = 0;
+        var cacheable = true;
+        foreach (var site in sites)
+        {
+            token.ThrowIfCancellationRequested();
+            if (site.Target is not { } target || !files.TryGetValue(target.FilePath, out var destination)
+                || site.Source.FilePath is not { } path || !files.TryGetValue(path, out var owner)) continue;
+            var key = (destination, target.Method);
+            if (cacheable && count >= budget)
+            {
+                index.TryGetValue(targetKey, out var retained);
+                index.Clear();
+                if (retained is not null) index.Add(targetKey, retained);
+                cacheable = false;
+            }
+            if (!cacheable && key != targetKey) continue;
+            if (!index.TryGetValue(key, out var matches)) index.Add(key, matches = []);
+            var entryId = owner.IsJavaScript ? site.Owner.Source.Offset : site.Owner.Id;
+            matches.Add(new CallerLocation(owner, entryId, site.Source, file.IsRazor && owner != file ? file : null));
+            count++;
+        }
+
+        token.ThrowIfCancellationRequested();
+        lock (callerCacheLock)
+        {
+            if (cacheable && indexedSiteCount + count <= IndexedSiteLimit && !jsCallerIndexes.ContainsKey(file))
+            {
+                jsCallerIndexes.Add(file, index);
+                indexedSiteCount += count;
+            }
+        }
+        return index;
     }
 
     private async Task<CallerSearch> FindCSharpCallersAsync(Document document, int targetId, CancellationToken token)
@@ -66,7 +138,8 @@ public sealed partial class ProjectSession
         var definition = Canonical(target);
         var filesById = Files.Where(file => file.Id is not null).ToDictionary(file => file.Id!);
         var result = new List<CallerLocation>();
-        var references = await SymbolFinder.FindReferencesAsync(definition, project.Solution, token).ConfigureAwait(false);
+        var documents = project.Documents.Where(item => filesById.ContainsKey(item.Id)).ToImmutableHashSet();
+        var references = await SymbolFinder.FindReferencesAsync(definition, project.Solution, documents, token).ConfigureAwait(false);
         foreach (var group in references)
         {
             if (group.Definition is not IMethodSymbol symbol || !IsSameMethod(Canonical(symbol), definition)) continue;

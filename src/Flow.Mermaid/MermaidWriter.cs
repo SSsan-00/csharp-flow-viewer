@@ -6,11 +6,14 @@ namespace Flow.Mermaid;
 
 public static class MermaidWriter
 {
-    public static string Write(FlowDiagram diagram, bool light = false, bool includeSourceLines = true)
+    public static string Write(FlowDiagram diagram, bool light = false, bool includeSourceLines = true,
+        CancellationToken token = default)
     {
+        token.ThrowIfCancellationRequested();
         var text = new StringBuilder("flowchart TD\n");
         foreach (var node in diagram.Nodes)
         {
+            token.ThrowIfCancellationRequested();
             var (open, close) = node.Kind switch
             {
                 NodeKind.Start or NodeKind.End => ("([", "])"),
@@ -24,6 +27,7 @@ public static class MermaidWriter
         }
         foreach (var edge in diagram.Edges)
         {
+            token.ThrowIfCancellationRequested();
             text.Append("  ").Append(edge.From).Append(edge.IsReachable ? " -->" : " -.->");
             if (edge.Label is { } label)
                 text.Append("|\"").Append(Escape(label)).Append("\"|");

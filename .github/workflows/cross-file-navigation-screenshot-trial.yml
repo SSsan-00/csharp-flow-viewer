@@ -1,4 +1,4 @@
-name: Razor anchor onclick definition Windows verification
+name: Cancellable call navigation Windows verification
 on:
   push:
     branches: [codex/cross-file-nav-screen-trial]
@@ -28,6 +28,14 @@ jobs:
           'function reload() { console.log("not referenced"); }' | Set-Content 'samples/OrderProcessing/wwwroot/js/unrelated.js' -Encoding utf8
           'namespace NavigationDemo; public static class NavigationCaller { public static void InvokeCross() => NavigationTarget.GoCross(); }' | Set-Content 'samples/OrderProcessing/NavigationCaller.cs' -Encoding utf8
           'namespace NavigationDemo; public static class NavigationTarget { public static void GoCross() => System.Console.WriteLine("target"); }' | Set-Content 'samples/OrderProcessing/NavigationTarget.cs' -Encoding utf8
+          $many = New-Item -ItemType Directory -Force 'samples/OrderProcessing/Pages/CallerSearchFixture'
+          $body = "<p>Unrelated fixture</p>`n" * 850
+          foreach ($i in 1..150) {
+            Set-Content (Join-Path $many.FullName "Fixture$i.cshtml") -Value $body -Encoding utf8
+          }
+          'namespace NavigationDemo; public static class SlowCaller { public static int Go() => SlowTarget.GoSlow(1); }' | Set-Content 'samples/OrderProcessing/SlowCaller.cs' -Encoding utf8
+          $conditions = (1..3300 | ForEach-Object { "if (value == $_) System.GC.KeepAlive(value);" }) -join "`n"
+          ("namespace NavigationDemo; public static class SlowTarget { public static int GoSlow(int value) {`n" + $conditions + "`nreturn value; } }") | Set-Content 'samples/OrderProcessing/SlowTarget.cs' -Encoding utf8
           dotnet restore samples/OrderProcessing/OrderProcessing.csproj
           if ($LASTEXITCODE -ne 0) { throw 'Sample restore failed' }
           dotnet publish src/Flow.Desktop -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o artifacts/win-x64
@@ -141,6 +149,12 @@ jobs:
             Select-Entry 'MethodsBox' 'reload'
             Wait-Text 'FlowTitle' 'reload'
             Invoke-Button 'BackButton'
+            Invoke-Button 'CancelNavigationButton'
+            Wait-Text 'StatusText' '中断しました'
+            Wait-Title 'nav-target[.]js'
+            Wait-Text 'FlowTitle' 'reload'
+            Capture 'caller-cancel.png'
+            Invoke-Button 'BackButton'
             Wait-Title 'NavigationDemo[.]cshtml'
             Wait-Text 'SourceLocation' '^L3'
             Capture 'javascript-caller.png'
@@ -152,6 +166,23 @@ jobs:
             Wait-Title 'NavigationCaller[.]cs'
             Wait-Text 'FlowTitle' 'InvokeCross'
             Capture 'csharp-caller.png'
+            Select-File 'SlowCaller.cs' 'SlowCaller[.]cs'
+            Wait-Title 'SlowCaller[.]cs'
+            Select-Entry 'MethodsBox' 'SlowCaller.*Go'
+            Invoke-Button 'ListButton'
+            Select-Entry 'NodesBox' 'GoSlow'
+            Invoke-Button 'FollowButton'
+            [void](Wait-Until { $b = Find-Id $win 'CancelNavigationButton'; if ($b -and $b.Current.IsEnabled) { $true } } 'forward cancel')
+            [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+            Wait-Text 'StatusText' '中断しました'
+            Wait-Title 'SlowCaller[.]cs'
+            Wait-Text 'NodeLabel' 'GoSlow'
+            Capture 'definition-cancel.png'
+            Invoke-Button 'FollowButton'
+            Wait-Title 'SlowTarget[.]cs'
+            Wait-Text 'FlowTitle' 'GoSlow'
+            Invoke-Button 'BackButton'
+            Wait-Title 'SlowCaller[.]cs' 
           } catch {
             try {
               if ($win) {
@@ -168,7 +199,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: razor-overview-caller-screens
+          name: call-navigation-cancel-screens
           path: artifacts/screenshot/*.png
           if-no-files-found: warn
           retention-days: 7
