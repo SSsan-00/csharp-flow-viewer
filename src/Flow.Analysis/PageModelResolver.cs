@@ -10,7 +10,7 @@ namespace Flow.Analysis;
 internal static class PageModelResolver
 {
     public static async Task<RazorSourceFile> ReadAsync(Project project, ProjectFile file,
-        IReadOnlyList<ProjectFile> files, CancellationToken token)
+        IReadOnlyList<ProjectFile> files, CancellationToken token, bool bindHandlers = true)
     {
         if (!file.IsRazor || !files.Contains(file))
             throw new ProjectLoadException("対象の Razor ファイルが見つかりません。");
@@ -22,7 +22,7 @@ internal static class PageModelResolver
         var text = await File.ReadAllTextAsync(file.Path, token).ConfigureAwait(false);
         var imports = await ReadImportsAsync(project, file.Path, token).ConfigureAwait(false);
         var page = new RazorSourceFile(text, file.Path, imports, token, new LocalJavaScriptFiles(project.FilePath!, files));
-        if (!page.IsPage)
+        if (!bindHandlers || !page.IsPage)
         {
             page.BindHandlers([], notices);
             return page;
