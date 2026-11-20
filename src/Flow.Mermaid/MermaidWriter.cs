@@ -17,8 +17,8 @@ public static class MermaidWriter
                 NodeKind.Condition => ("{", "}"),
                 _ => ("[", "]")
             };
-            var label = node.Label + (includeSourceLines && node.Source is { } source ? $"  ·  L{source.Line}" : "");
-            text.Append("  ").Append(node.Id).Append(open).Append('"').Append(Escape(label))
+            var label = Escape(node.Label) + (includeSourceLines && node.Source is { } source ? $"  ·  L{source.Line}" : "");
+            text.Append("  ").Append(node.Id).Append(open).Append('"').Append(label)
                 .Append('"').Append(close).Append(":::flow_").Append(node.IsReachable
                     ? node.Kind.ToString().ToLowerInvariant() : "unreachable").Append('\n');
         }
@@ -54,14 +54,18 @@ public static class MermaidWriter
     private static string Escape(string value)
     {
         var text = new StringBuilder();
+        var previousSpace = false;
         foreach (var rune in value.EnumerateRunes())
         {
-            if (Rune.IsWhiteSpace(rune) || Rune.IsControl(rune))
-                text.Append(' ');
+            var space = Rune.IsWhiteSpace(rune) || Rune.IsControl(rune);
+            // SVG/HTML collapse adjacent ASCII spaces, including spaces in a C# literal.
+            if (space)
+                text.Append(previousSpace ? "#160;" : " ");
             else if (rune.IsAscii && !Rune.IsLetterOrDigit(rune))
                 text.Append('#').Append(rune.Value.ToString(CultureInfo.InvariantCulture)).Append(';');
             else
                 text.Append(rune);
+            previousSpace = space;
         }
         return text.ToString();
     }

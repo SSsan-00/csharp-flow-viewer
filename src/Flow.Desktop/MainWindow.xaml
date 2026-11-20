@@ -126,7 +126,7 @@
       <Border Grid.Column="2" Style="{StaticResource Panel}">
         <Grid>
           <Grid.RowDefinitions>
-            <RowDefinition Height="42"/><RowDefinition Height="39"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="42"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
           <Border Style="{StaticResource PanelHeader}">
             <DockPanel>
@@ -137,16 +137,21 @@
             </DockPanel>
           </Border>
           <Border Grid.Row="1" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="6,4">
-            <DockPanel LastChildFill="False">
-              <Button DockPanel.Dock="Left" x:Name="BackButton" Content="‹ 戻る" Click="Back" ToolTip="呼び出し元に戻る (Alt+←)" Padding="8,3" IsEnabled="False"/>
-              <Button DockPanel.Dock="Left" x:Name="CopyButton" Content="コピー" Click="Copy" ToolTip="Mermaid をコピー" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
-              <Button DockPanel.Dock="Left" x:Name="SaveButton" Content=".mmd 保存" Click="Save" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
-              <Button DockPanel.Dock="Right" x:Name="FitButton" Content="全体" Click="Fit" ToolTip="図を全体表示" Padding="6,3" IsEnabled="False"/>
-              <Button DockPanel.Dock="Right" x:Name="ZoomIn" Content="+" Click="Zoom" ToolTip="拡大" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
-              <TextBlock DockPanel.Dock="Right" x:Name="ZoomLabel" Text="—" MinWidth="39" HorizontalAlignment="Center" TextAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Muted}"/>
-              <Button DockPanel.Dock="Right" x:Name="ZoomOut" Content="−" Click="Zoom" ToolTip="縮小" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
-              <Button DockPanel.Dock="Right" x:Name="ListButton" Content="一覧" Click="ToggleList" ToolTip="図とノード一覧を切り替え" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
-            </DockPanel>
+            <StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                <Button x:Name="BackButton" Content="‹ 戻る" Click="Back" ToolTip="呼び出し元に戻る (Alt+←)" Padding="8,3" IsEnabled="False"/>
+                <Button x:Name="FollowButton" Click="Follow" Content="呼び出し先へ ›" ToolTip="選択した呼び出しの定義へ移動 (F12)" IsEnabled="False" Margin="4,0,0,0" ToolTipService.ShowOnDisabled="True"/>
+              </StackPanel>
+              <DockPanel LastChildFill="False">
+                <Button DockPanel.Dock="Left" x:Name="CopyButton" Content="コピー" Click="Copy" ToolTip="Mermaid をコピー" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
+                <Button DockPanel.Dock="Left" x:Name="SaveButton" Content=".mmd 保存" Click="Save" Margin="4,0,0,0" Padding="6,3" IsEnabled="False"/>
+                <Button DockPanel.Dock="Right" x:Name="FitButton" Content="全体" Click="Fit" ToolTip="図を全体表示" Padding="6,3" IsEnabled="False"/>
+                <Button DockPanel.Dock="Right" x:Name="ZoomIn" Content="+" Click="Zoom" ToolTip="拡大" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
+                <TextBlock DockPanel.Dock="Right" x:Name="ZoomLabel" Text="—" MinWidth="39" HorizontalAlignment="Center" TextAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Muted}"/>
+                <Button DockPanel.Dock="Right" x:Name="ZoomOut" Content="−" Click="Zoom" ToolTip="縮小" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
+                <Button DockPanel.Dock="Right" x:Name="ListButton" Content="一覧" Click="ToggleList" ToolTip="図とノード一覧を切り替え" Margin="0,0,4,0" Padding="6,3" IsEnabled="False"/>
+              </DockPanel>
+            </StackPanel>
           </Border>
 
           <Grid Grid.Row="2" Background="{DynamicResource CanvasBrush}">
@@ -182,8 +187,10 @@
                   </ContextMenu>
                 </Button.ContextMenu>
               </Button>
-              <Button x:Name="FollowButton" DockPanel.Dock="Right" Click="Follow" Content="呼び出し先へ ›" ToolTip="選択した呼び出しの定義へ移動 (F12)" IsEnabled="False" Margin="8,0,0,0"/>
-              <TextBlock x:Name="NodeLabel" Text="ノードを選ぶとソース行へ移動" Style="{StaticResource Muted}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+              <StackPanel>
+                <TextBlock x:Name="NodeLabel" Text="ノードを選ぶとソース行へ移動" Style="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="NavigationStatus" Style="{StaticResource Muted}" FontSize="11" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+              </StackPanel>
             </DockPanel>
           </Border>
         </Grid>
