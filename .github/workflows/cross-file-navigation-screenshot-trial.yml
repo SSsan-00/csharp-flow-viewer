@@ -1,4 +1,4 @@
-name: Cancellable call navigation Windows verification
+name: Cancellable call navigation Windows verification (cold search first)
 on:
   push:
     branches: [codex/cross-file-nav-screen-trial]
@@ -136,12 +136,6 @@ jobs:
             Wait-Title 'NavigationDemo[.]cshtml'
             Wait-Text 'NodeLabel' 'onclick.*reload'
             Wait-Text 'SourceLocation' '^L3'
-            Enter-OverviewCall
-            Select-Entry 'MethodsBox' 'noCaller'
-            Wait-Text 'FlowTitle' 'noCaller'
-            Invoke-Button 'BackButton'
-            [void](Wait-Until { $b = Find-Id $win 'BackButton'; if ($b -and !$b.Current.IsEnabled) { $true } } 'no caller')
-            Wait-Title 'nav-target[.]js'
             Select-File 'NavigationDemo.cshtml' 'NavigationDemo[.]cshtml'
             Wait-Title 'NavigationDemo[.]cshtml'
             Select-File 'nav-target.js' 'nav-target[.]js'
@@ -158,6 +152,12 @@ jobs:
             Wait-Title 'NavigationDemo[.]cshtml'
             Wait-Text 'SourceLocation' '^L3'
             Capture 'javascript-caller.png'
+            Enter-OverviewCall
+            Select-Entry 'MethodsBox' 'noCaller'
+            Wait-Text 'FlowTitle' 'noCaller'
+            Invoke-Button 'BackButton'
+            [void](Wait-Until { $b = Find-Id $win 'BackButton'; if ($b -and !$b.Current.IsEnabled) { $true } } 'no caller')
+            Wait-Title 'nav-target[.]js'
             Select-File 'NavigationTarget.cs' 'NavigationTarget[.]cs'
             Wait-Title 'NavigationTarget[.]cs'
             Select-Entry 'MethodsBox' 'GoCross'
