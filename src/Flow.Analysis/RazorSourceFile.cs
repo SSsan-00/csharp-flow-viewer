@@ -107,7 +107,24 @@ public sealed class RazorSourceFile
         if (requests.TryGetValue(entryId, out var element)) return BuildRequestFlow(element, token);
         if (!Entries.Any(entry => entry.Id == entryId)) throw new ArgumentOutOfRangeException(nameof(entryId));
         var flow = ConnectJavaScriptRequests(entryId, javaScript.Analyze(entryId, token));
+        flow = IncludeScriptRendering(entryId, flow, token);
         return flow with { Notices = flow.Notices.Concat(Notices).Distinct(StringComparer.Ordinal).ToArray() };
+    }
+
+    private FlowDiagram IncludeScriptRendering(int entryId, FlowDiagram flow, CancellationToken token)
+    {
+        if (javaScript.ScriptRenderingScope(entryId) is not { } scope) return flow;
+        var controls = document.ControlsWithin(scope.Range);
+        if (controls.Count == 0) return flow;
+        var nodes = flow.Nodes.ToList();
+        var edges = flow.Edges.ToList();
+        var rendering = new RazorRenderProjector(document, nodes, edges, token, scope.NestedFunctions);
+        if (rendering.Project(scope.Range, controls) is null) return flow;
+        // The server emits source before a browser can run it; there is no browser edge into Razor.
+        var notices = flow.Notices.Append("Razorの生成フローとブラウザー側の実行候補は別々に表示します。").ToList();
+        if (rendering.IsTruncated)
+            notices.Add("サーバー側の描画フローは最大100件の制御構文を表示しています。");
+        return flow with { Nodes = nodes, Edges = edges, Notices = notices };
     }
 
     /// <summary>

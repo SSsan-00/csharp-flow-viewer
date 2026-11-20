@@ -99,9 +99,7 @@ internal sealed class RazorMarkupReader
                         notices.Add($"L{document.Range(start, 1).Line}: 外部スクリプト {scriptSource.Value} はこのページ単独の解析範囲外です。");
                     else if (IsJavaScript(element))
                     {
-                        var code = document.ProjectJavaScript(position, contentEnd - position);
-                        scripts.Add(new RazorJavaScriptFragment(code,
-                            document.Range(position, contentEnd - position), document.IsDynamic(position, contentEnd - position),
+                        scripts.Add(document.ProjectScript(position, contentEnd - position,
                             element.Attribute("type")?.Value.Trim().Equals("module", StringComparison.OrdinalIgnoreCase) == true));
                     }
                     else if (element.Attribute("language") is { } language && !language.Value.Equals("javascript", StringComparison.OrdinalIgnoreCase))
