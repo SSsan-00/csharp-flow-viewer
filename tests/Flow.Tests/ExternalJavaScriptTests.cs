@@ -37,7 +37,7 @@ public sealed class ExternalJavaScriptTests
         Assert.AreEqual(targetPath, definition.Source.FilePath);
         Assert.AreEqual(definition.Id, call.TargetMethod);
         Assert.AreEqual(definition.Id, standalone.Entries.Single(item => item.Name == "confirmOrder").Id);
-        var scriptLink = page.Analyze(-1).Nodes.Single(item => item.Label == "外部 JavaScript: target.js");
+        var scriptLink = page.Analyze(-1).Nodes.Single(item => item.Label == "target.js");
         Assert.AreEqual(linked.Entries[0].Id, scriptLink.TargetMethod);
         Assert.AreEqual(0, linked.Entries[0].Id);
 
@@ -140,6 +140,82 @@ public sealed class ExternalJavaScriptTests
         Assert.Contains(node => node.Label == "return false;", source.Analyze(legacy.Id).Nodes);
     }
 
+    [TestMethod]
+    public async Task OverviewEventsLinkToKnownFunctionsAndCallerSearchUsesOnlyReferencesInScope()
+    {
+        using var tree = new Files();
+        var first = tree.Add("Pages/First.cshtml", """
+            @page
+            <script src="/js/application.js"></script>
+            <button onclick="foo()">Run</button>
+            <select onchange="if (this.value) foo(); bar(); missing(); setTimeout(() => nested());"></select>
+            <div oninput="unresolved()"></div>
+            <script>
+                var xhr = new XMLHttpRequest();
+                xhr.open("GET", "/First");
+                xhr.addEventListener("error", bar);
+                xhr.send();
+                document.addEventListener("DOMContentLoaded", bar);
+            </script>
+            """);
+        var second = tree.Add("Pages/Second.cshtml", """
+            <script src="/js/application.js"></script>
+            <button onclick="foo()">Run</button>
+            """);
+        var application = tree.Add("wwwroot/js/application.js", "function foo() {} function bar() {} function nested() {}");
+        var other = tree.Add("wwwroot/js/other.js", "function foo() {} function unrelated() { foo(); }");
+        using var session = tree.OpenPages([first, second], application, other);
+        var pageFile = session.Files.Single(file => file.Path == first);
+        var targetFile = session.Files.Single(file => file.Path == application);
+        var page = await session.ReadRazorAsync(pageFile, CancellationToken.None);
+        var standalone = await session.ReadJavaScriptAsync(targetFile, CancellationToken.None);
+        var target = standalone.Entries.Single(entry => entry.Name == "foo");
+        var overview = page.Analyze(-1);
+        var click = Assert.ContainsSingle(overview.Nodes.Where(node => node.Label == "onclick → foo()"));
+        Assert.AreEqual(target.Id, click.TargetMethod);
+        Assert.AreEqual(application, click.TargetFilePath);
+        Assert.AreEqual("onclick=\"foo()\"", page.Text.Substring(click.Source!.Offset, click.Source.Length));
+        var change = Assert.ContainsSingle(overview.Nodes.Where(node => node.Label.StartsWith("onchange → foo() / bar() / missing()", StringComparison.Ordinal)));
+        Assert.IsNotNull(change.CallTargets);
+        CollectionAssert.AreEqual(new[] { "foo", "bar" }, change.CallTargets.Select(item => item.Label).ToArray());
+        Assert.DoesNotContain(node => node.Label.StartsWith("error", StringComparison.Ordinal)
+            || node.Label.StartsWith("DOMContentLoaded", StringComparison.Ordinal), overview.Nodes);
+        Assert.Contains(node => node.Kind == NodeKind.Transfer && node.Label.Contains("GET /First", StringComparison.Ordinal), overview.Nodes);
+        Assert.IsNull(Assert.ContainsSingle(overview.Nodes.Where(node => node.Label == "oninput → unresolved()")).TargetMethod);
+        var callers = await session.FindCallersAsync(targetFile, target.Id, CancellationToken.None);
+        Assert.IsFalse(callers.IsPartial);
+        CollectionAssert.AreEqual(new[] { first, first, second }, callers.Locations.Select(caller => caller.File.Path).ToArray());
+        CollectionAssert.AreEqual(new[] { 3, 4, 2 }, callers.Locations.Select(caller => caller.Source.Line).ToArray());
+        Assert.IsTrue(callers.Locations.All(caller => caller.EntryId == -1));
+    }
+
+    [TestMethod]
+    public async Task CallerSearchInCSharpUsesBoundOverloadInsteadOfTextualMatches()
+    {
+        using var tree = new Files();
+        using var session = tree.OpenCSharp(
+            ("Service.cs", "class Service { public void Run(int x) {} public void Run(string x) {} }"),
+            ("Caller.cs", """
+                class Caller {
+                    void Go(Service svc) {
+                        svc.Run(1);
+                        svc.Run("wrong overload");
+                        System.Action<int> referenceOnly = svc.Run;
+                        var stringOnly = "svc.Run(2)";
+                    }
+                }
+                """));
+        var serviceFile = session.Files.Single(file => file.Label == "Service.cs");
+        var service = await session.ReadAsync(serviceFile, CancellationToken.None);
+        var target = Assert.ContainsSingle(service.Methods.Where(method => method.Signature.Contains("int x", StringComparison.Ordinal)));
+        var callers = await session.FindCallersAsync(serviceFile, target.Id, CancellationToken.None);
+        var actual = Assert.ContainsSingle(callers.Locations);
+        Assert.AreEqual("Caller.cs", actual.File.Label);
+        Assert.AreEqual(3, actual.Source.Line);
+        Assert.AreEqual("svc.Run(1)", File.ReadAllText(actual.File.Path).Substring(actual.Source.Offset, actual.Source.Length));
+        Assert.IsNotNull(actual.EntryId);
+    }
+
     private static FlowNode FindCall(FlowDiagram graph, string label) => graph.Nodes.Single(item => item.Label == label);
 
     private static Task<RazorSourceFile> ReadPage(ProjectSession session) =>
@@ -158,13 +234,22 @@ public sealed class ExternalJavaScriptTests
             return fullPath;
         }
 
-        public ProjectSession Open(string? page, params string[] scripts)
+        public ProjectSession Open(string? page, params string[] scripts) => OpenPages(page is null ? [] : [page], scripts);
+
+        public ProjectSession OpenPages(string[] pages, params string[] scripts) =>
+            new(MSBuildWorkspace.Create(), CreateProject(), [], null, new ProjectOptions("Debug", "net9.0"), pages, scripts);
+
+        public ProjectSession OpenCSharp(params (string Name, string Code)[] files)
         {
-            var project = workspace.AddProject(ProjectInfo.Create(ProjectId.CreateNewId(), VersionStamp.Create(),
-                "Application", "Application", LanguageNames.CSharp, filePath: Path.Combine(root, "Application.csproj")));
-            return new ProjectSession(MSBuildWorkspace.Create(), project, [], null,
-                new ProjectOptions("Debug", "net9.0"), page is null ? [] : [page], scripts);
+            var project = CreateProject();
+            foreach (var (name, code) in files)
+                project = project.AddDocument(name, code, filePath: Add(name, code)).Project;
+            return new ProjectSession(MSBuildWorkspace.Create(), project, [], null, new ProjectOptions("Debug", "net9.0"));
         }
+
+        private Project CreateProject() => workspace.AddProject(ProjectInfo.Create(ProjectId.CreateNewId(), VersionStamp.Create(),
+            "Application", "Application", LanguageNames.CSharp, filePath: Path.Combine(root, "Application.csproj"),
+            metadataReferences: [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)]));
 
         public void Dispose()
         {

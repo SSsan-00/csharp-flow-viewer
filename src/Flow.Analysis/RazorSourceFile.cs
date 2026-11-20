@@ -22,7 +22,7 @@ public sealed class RazorSourceFile
     private readonly List<string> scriptNotices = [];
     private readonly List<(SourceRange Source, string Path)> scriptLinks = [];
     private readonly Dictionary<int, RazorElement> requests = [];
-    private readonly Dictionary<int, string> inlineLabels = [];
+    private readonly Dictionary<int, (string Name, SourceRange Source, string? ElementId)> inlineLabels = [];
     private readonly List<string> bindingNotices = [];
     private IReadOnlyList<RazorHandler> handlers = [];
 
@@ -73,7 +73,7 @@ public sealed class RazorSourceFile
                 var code = attribute.IsDynamic ? document.ProjectJavaScript(attribute.ValueStart, attribute.ValueLength) : attribute.RawValue;
                 var id = javaScript.AddInlineHandler(eventLabel, code,
                     document.Range(attribute.ValueStart, attribute.ValueLength), attribute.IsDynamic);
-                inlineLabels[id] = eventLabel;
+                inlineLabels[id] = (attribute.Name, document.Range(attribute.Start, attribute.Length), ElementId(element));
             }
             if (element.TagName == "a" && element.Attribute("href") is { } href
                 && href.Value.TrimStart().StartsWith("javascript:", StringComparison.OrdinalIgnoreCase))
@@ -86,7 +86,7 @@ public sealed class RazorSourceFile
                         : href.RawValue[(colon + 1)..];
                     var id = javaScript.AddInlineHandler($"click · {label}", code,
                         document.Range(href.ValueStart + colon + 1, href.ValueLength - colon - 1), href.IsDynamic);
-                    inlineLabels[id] = $"click · {label}（javascript:）";
+                    inlineLabels[id] = ("click", document.Range(href.Start, href.Length), ElementId(element));
                 }
                 continue;
             }
@@ -115,6 +115,10 @@ public sealed class RazorSourceFile
         .Concat(bindingNotices).Concat(scriptNotices).Concat(hasBaseHref
             ? ["base hrefがあるため、相対URLのJavaScript送信・リンクを現在のPageModelへ自動接続しません。"] : [])
         .Distinct(StringComparer.Ordinal).ToArray();
+
+    internal IEnumerable<RazorJavaScript.CallSite> CallSites(CancellationToken token) =>
+        javaScript.CallSites(null, token).Select(site => inlineLabels.TryGetValue(site.Owner.Id, out var inline)
+            ? site with { Source = inline.Source, Owner = IsRegistrationOnly(inline.Name) ? site.Owner : Entries[0] } : site);
 
     internal JavaScriptSourceFile? OpenScript(string path) => javaScript.OpenScript(path,
         (id, token) => ConnectJavaScriptRequests(id, javaScript.Analyze(id, token)));
@@ -220,24 +224,39 @@ public sealed class RazorSourceFile
         {
             var (source, path) = scriptLinks[index];
             var scriptId = $"script{index}";
-            nodes.Add(new FlowNode(scriptId, NodeKind.Call, "外部 JavaScript: " + Path.GetFileName(path),
+            nodes.Add(new FlowNode(scriptId, NodeKind.Call, Path.GetFileName(path),
                 source, TargetMethod: 0, TargetFilePath: path));
             var scope = rendering.ScopeAt(source.Offset);
             edges.Add(new FlowEdge(scope ?? "page", scriptId, scope is null ? "外部スクリプト" : "この描画経路の外部スクリプト"));
         }
+        var visibleBindings = javaScript.Bindings.Where(binding => !IsRegistrationOnly(binding.EventName)).ToArray();
+        var visibleEntries = Entries.Where(entry => requests.ContainsKey(entry.Id)
+            || inlineLabels.TryGetValue(entry.Id, out var label) && !IsRegistrationOnly(label.Name)).ToArray();
         var eventCount = 0;
-        foreach (var entry in Entries.Where(entry => requests.ContainsKey(entry.Id) || inlineLabels.ContainsKey(entry.Id)).Take(200))
+        foreach (var entry in visibleEntries.Take(200))
         {
             token.ThrowIfCancellationRequested();
-            AddEvent($"event{eventCount++}", entry.Signature, entry.Source, entry.Id);
+            if (inlineLabels.TryGetValue(entry.Id, out var inline))
+            {
+                var calls = javaScript.CallSites(entry.Id, token).ToArray();
+                var names = calls.Select(call => call.Name).OfType<string>().Distinct(StringComparer.Ordinal).Take(4).ToArray();
+                var summary = names.Length == 0 ? "インライン処理"
+                    : string.Join(" / ", names.Take(3).Select(name => name + "()")) + (names.Length > 3 ? " …" : "");
+                var destinations = calls.Select(call => call.Target).OfType<FlowTarget>().Distinct().ToArray();
+                var label = inline.Name + " → " + summary;
+                if (inline.ElementId is { } elementId) label += $" · #{elementId}";
+                AddEvent($"event{eventCount++}", label, inline.Source, null, destinations);
+            }
+            else AddEvent($"event{eventCount++}", entry.Signature, entry.Source, entry.Id);
         }
-        foreach (var binding in javaScript.Bindings.Take(Math.Max(0, 200 - eventCount)))
+        foreach (var binding in visibleBindings.Take(Math.Max(0, 200 - eventCount)))
         {
             token.ThrowIfCancellationRequested();
-            var qualifier = binding.IsLegacy ? " · 旧API" : "";
-            if (binding.IsConditional) qualifier += " · 条件付き";
-            AddEvent($"event{eventCount++}", $"{binding.EventName} · {binding.Selector}{qualifier}",
-                binding.Source, binding.HandlerEntryId);
+            var function = binding.HandlerEntryId is int id ? javaScript.GetEntry(id)?.Name : null;
+            var label = function is not null && !function.StartsWith("無名関数 ", StringComparison.Ordinal)
+                ? $"{binding.EventName} → {function}()" : binding.EventName;
+            if (binding.Selector != "動的な要素") label += " · " + binding.Selector;
+            AddEvent($"event{eventCount++}", label, binding.Source, binding.HandlerEntryId);
         }
         var requestIndex = 0;
         foreach (var request in javaScript.Requests.Take(50))
@@ -254,19 +273,22 @@ public sealed class RazorSourceFile
             nodes.Add(new FlowNode("empty", NodeKind.End, "静的に識別できる画面イベントはありません", pageSource));
             edges.Add(new FlowEdge("page", "empty"));
         }
-        if (requests.Count + inlineLabels.Count + javaScript.Bindings.Count > 200)
+        if (visibleEntries.Length + visibleBindings.Length > 200)
             notices.Add("ページ全体では先頭200件のイベントを表示しています。各処理は一覧から選択できます。");
         if (javaScript.Requests.Count > 50) notices.Add("ページ全体では先頭50件のJavaScript HTTP送信を表示しています。各処理は一覧から選択できます。");
         return new FlowDiagram(nodes, edges, notices, true);
 
-        void AddEvent(string id, string label, SourceRange source, int? target)
+        void AddEvent(string id, string label, SourceRange source, int? target, FlowTarget[]? destinations = null)
         {
             var onPage = IsPageSource(source);
             var scope = onPage ? rendering.ScopeAt(source.Offset) : null;
             var navigation = target is < 0 ? javaScript.ResolveNavigationTarget(target) : (target, null);
-            nodes.Add(new FlowNode(id, NodeKind.Call, label, source, navigation.Item1, TargetFilePath: navigation.Item2));
+            nodes.Add(new FlowNode(id, NodeKind.Call, label, source,
+                destinations is { Length: 1 } ? destinations[0].Method : navigation.Item1,
+                TargetFilePath: destinations is { Length: 1 } ? destinations[0].FilePath : navigation.Item2,
+                CallTargets: destinations is { Length: > 1 } ? destinations : null));
             var qualifier = scope is not null ? "この描画経路のイベント候補"
-                : onPage && document.GuardsAt(source.Offset).Count > 0 ? "条件付きイベント候補" : "イベント候補";
+                : "イベント候補";
             edges.Add(new FlowEdge(scope ?? "page", id, qualifier));
             if (target is { } targetId && requests.TryGetValue(targetId, out var element))
             {
@@ -285,6 +307,10 @@ public sealed class RazorSourceFile
             }
         }
     }
+
+    private static bool IsRegistrationOnly(string eventName) =>
+        (eventName.StartsWith("on", StringComparison.OrdinalIgnoreCase) ? eventName[2..] : eventName)
+            .ToLowerInvariant() is "error" or "abort" or "timeout" or "readystatechange" or "load" or "domcontentloaded" or "unload";
 
     private bool IsPageSource(SourceRange source) => source.FilePath is null ||
         LocalJavaScriptFiles.PathComparer.Equals(source.FilePath, filePath);
@@ -450,6 +476,9 @@ public sealed class RazorSourceFile
             || element.TagName == "input" && (type?.Value.Equals("submit", StringComparison.OrdinalIgnoreCase) == true
                 || type?.Value.Equals("image", StringComparison.OrdinalIgnoreCase) == true);
     }
+
+    private static string? ElementId(RazorElement element) =>
+        element.Attribute("id") is { IsDynamic: false, Value.Length: > 0 } id ? Compact(id.Value, 40) : null;
 
     private string ElementLabel(RazorElement element)
     {

@@ -260,6 +260,7 @@ public partial class MainWindow : Window
     private async void MethodChanged(object sender, SelectionChangedEventArgs args)
     {
         if (busy || MethodsBox.SelectedItem is not MethodEntry entry) return;
+        if (method?.Id != entry.Id) history.Clear();
         await AnalyzeMethodAsync(entry);
     }
 
@@ -377,6 +378,10 @@ public partial class MainWindow : Window
     {
         ++version;
         ++diagramRevision;
+        if (navigationMenu is { } menu) menu.IsOpen = false;
+        navigationMenu = null;
+        callerSearch = null;
+        BackButton.ToolTip = "今の処理の呼び出し元へ移動 (Alt+←)";
         ZoomLabel.Text = "—";
         diagram = null;
         method = null;
@@ -443,7 +448,7 @@ public partial class MainWindow : Window
         NodeLabel.ToolTip = $"{NodeLabel.Text}\n{navigation}";
         FollowButton.ToolTip = navigation;
         NavigationStatus.Text = CanFollow(node) && DefinitionPath(node) is { } targetPath
-            ? $"{(node.TargetMethod is null ? "宣言のみ" : node.RequiresRuntimeDispatch ? "宣言のフロー" : "定義")}: {Path.GetFileName(targetPath)}" : navigation;
+            ? $"{(node.TargetMethod is null ? "宣言のみ" : "定義")}: {Path.GetFileName(targetPath)}" : navigation;
         NavigationStatus.ToolTip = navigation;
         NavigationStatus.Visibility = Visibility.Visible;
         if (navigateSource && node.Source is { } range) NavigateSource(range);
@@ -465,34 +470,42 @@ public partial class MainWindow : Window
 
     private async Task FollowSelectedAsync()
     {
-        if (busy || selectedNode is not { } caller || method is not { } entry || currentFile is not { } file
-            || !CanFollow(caller) || FindTargetFile(caller) is not { } targetFile) return;
+        if (busy || selectedNode is not { } caller || !CanFollow(caller)) return;
+        var options = AvailableTargets(caller).ToArray();
+        if (options.Length > 1)
+        {
+            ShowNavigationChoices(FollowButton, options, option => $"{option.Label}  ·  {Path.GetFileName(option.FilePath)}",
+                option => FollowTargetAsync(caller with { TargetMethod = option.Method, TargetFilePath = option.FilePath }));
+            return;
+        }
+        if (options.Length == 1)
+            caller = caller with { TargetMethod = options[0].Method, TargetFilePath = options[0].FilePath };
+        await FollowTargetAsync(caller);
+    }
+
+    private async Task FollowTargetAsync(FlowNode caller)
+    {
+        if (busy || selectedNode?.Id != caller.Id || method is not { } entry || currentFile is not { } file
+            || FindTargetFile(caller) is not { } targetFile) return;
         history.Push((file, entry.Id, caller.Id, razorSource, javaScriptSource, definitionView));
         if (caller.TargetMethod is not { } target)
         {
             await NavigateDeclarationAsync(targetFile, caller.TargetDeclaration!, caller);
             return;
         }
-        var view = caller.RequiresRuntimeDispatch ? DefinitionView.RuntimeDeclaration : DefinitionView.Direct;
         if (targetFile == file && target == entry.Id)
         {
             NavigateSource(entry.Source with { Length = 0 });
             if (diagram?.Nodes.FirstOrDefault(node => node.Kind == NodeKind.Start) is { } start)
                 JumpToPreviewNode(start, navigateSource: false, keepList: true);
-            ShowDefinitionView(view);
-            SetStatus(caller.RequiresRuntimeDispatch ? "宣言の開始位置へ移動しました。実装は実行時に決まります。"
-                : "自己再帰: 同じメソッドの開始位置へ移動しました。");
+            SetStatus("同じメソッドの開始位置へ移動しました。");
             SetBusy(false);
             return;
         }
-        await NavigateEntryAsync(targetFile, target, razorContext: razorSource, jsContext: javaScriptSource, view: view);
+        await NavigateEntryAsync(targetFile, target, razorContext: razorSource, jsContext: javaScriptSource);
     }
 
-    private async void Back(object? sender, RoutedEventArgs args)
-    {
-        if (busy || !history.TryPop(out var previous)) return;
-        await NavigateEntryAsync(previous.File, previous.Method, previous.Node, previous.Razor, previous.Script, previous.View);
-    }
+    private async void Back(object? sender, RoutedEventArgs args) => await FindOrReturnToCallerAsync();
 
     private async Task SelectMethodAsync(int id, string? returnTo = null)
     {
@@ -677,7 +690,7 @@ public partial class MainWindow : Window
         PreviewSurface.IsHitTestVisible = Web.Focusable = webVisible && rendered;
         NodesBox.Visibility = listVisible ? Visibility.Visible : Visibility.Collapsed;
         CopyButton.IsEnabled = SaveButton.IsEnabled = hasGraph && !busy;
-        BackButton.IsEnabled = !busy && history.Count > 0;
+        BackButton.IsEnabled = !busy && CanFindCaller;
         FollowButton.IsEnabled = !busy && selectedNode is { } node && CanFollow(node);
         ListButton.Content = showList ? "図" : "一覧";
         ListButton.IsEnabled = hasGraph && ready && !previewUnavailable;

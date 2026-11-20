@@ -494,10 +494,10 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                 yield return Call(call.TargetMethod, call, Name(call.TargetMethod) + "()", call.IsVirtual, call.Instance?.Type);
                 break;
             case IDynamicInvocationOperation or IFunctionPointerInvocationOperation or IDynamicObjectCreationOperation:
-                yield return new Visible(NodeKind.Call, "呼び出し · 実行時に決定", OperationSource(operation));
+                yield return new Visible(NodeKind.Call, "呼び出し", OperationSource(operation));
                 break;
             case IDynamicMemberReferenceOperation or IDynamicIndexerAccessOperation:
-                yield return new Visible(NodeKind.Call, "動的メンバーアクセス · 実行時に決定", OperationSource(operation));
+                yield return new Visible(NodeKind.Call, "動的メンバーアクセス", OperationSource(operation));
                 break;
             case IObjectCreationOperation creation when creation.Constructor is { } ctor:
                 yield return Call(ctor, creation, "new " + ctor.ContainingType.Name + "()");
@@ -538,7 +538,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     {
         target = ResolveStorage(target);
         if (target is IDynamicMemberReferenceOperation or IDynamicIndexerAccessOperation)
-            yield return new Visible(NodeKind.Call, write ? "書き込み · 実行時に決定" : "読み取り · 実行時に決定", OperationSource(target));
+            yield return new Visible(NodeKind.Call, write ? "書き込み" : "読み取り", OperationSource(target));
     }
 
     private static bool IsVirtual(IMethodSymbol method, IOperation? instance) =>
@@ -598,7 +598,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
             ? ResolveDeclaration(compileTimeDefinition) : null;
         var candidates = dispatched && target is null && declaration is not null && method.IsAbstract && !method.IsStatic
             ? FindImplementations(method, receiver) : null;
-        return new Visible(NodeKind.Call, label + (dispatched ? " · 実行時に決定" : ""), OperationSource(operation),
+        return new Visible(NodeKind.Call, label, OperationSource(operation),
             target?.Offset, TargetFilePath: target?.Path, RequiresRuntimeDispatch: dispatched,
             TargetDeclaration: declaration, ImplementationCandidates: candidates);
     }

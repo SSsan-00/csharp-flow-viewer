@@ -182,7 +182,7 @@
             <StackPanel>
               <DockPanel LastChildFill="False" Margin="0,0,0,4">
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-                  <Button x:Name="BackButton" Content="‹ 戻る" Click="Back" ToolTip="呼び出し元に戻る (Alt+←)" Padding="8,3" IsEnabled="False"/>
+                  <Button x:Name="BackButton" Content="呼び出し元へ" Click="Back" ToolTip="今の処理の呼び出し元へ移動 (Alt+←)" Padding="8,3" IsEnabled="False"/>
                   <Button x:Name="FollowButton" Click="Follow" Content="呼び出し先へ ›" ToolTip="選択した呼び出しの定義へ移動 (F12)" IsEnabled="False" Margin="4,0,0,0" ToolTipService.ShowOnDisabled="True"/>
                 </StackPanel>
                 <Button x:Name="AnnotationsButton" DockPanel.Dock="Right" Click="OpenAnnotationsMenu" Content="注釈…" IsEnabled="False" Margin="8,0,0,0">

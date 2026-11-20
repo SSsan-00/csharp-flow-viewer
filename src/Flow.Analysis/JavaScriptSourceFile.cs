@@ -32,6 +32,8 @@ public sealed class JavaScriptSourceFile
         return flow with { Notices = flow.Notices.Concat(Notices).Distinct(StringComparer.Ordinal).ToArray() };
     }
 
+    internal IEnumerable<RazorJavaScript.CallSite> CallSites(CancellationToken token) => analyzer.CallSites(null, token);
+
     internal JavaScriptSourceFile? OpenScript(string path) => analyzer.OpenScript(path, projectFlow);
 
     internal static JavaScriptSourceFile Open(RazorJavaScriptFragment fragment, LocalJavaScriptFiles local,
