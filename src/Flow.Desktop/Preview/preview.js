@@ -108,6 +108,7 @@
       height = svgNode.viewBox.baseVal.height;
       svgNode.style.width = width + "px";
       svgNode.style.height = height + "px";
+      const labelShapes = [];
       for (const node of svgNode.querySelectorAll(".node")) {
         const id = node.dataset.flowId ?? /^diagram\d+-flowchart-([a-z0-9_]+)-\d+$/.exec(node.id)?.[1];
         if (!id) continue;
@@ -133,16 +134,20 @@
         }
         const shape = node.querySelector(":scope > rect, :scope > polygon, :scope > path, :scope > circle");
         const text = node.querySelector("text");
-        if (shape && text) {
-          const shapeBounds = shape.getBoundingClientRect();
-          const textBounds = text.getBoundingClientRect();
-          // Leave extra room at the sloping sides of condition shapes.
-          const availableWidth = shapeBounds.width * (node.classList.contains("flow_condition") ? .68 : .85);
-          if (textBounds.width > availableWidth && availableWidth > 0) {
-            text.setAttribute("textLength", String(text.getComputedTextLength() * availableWidth / textBounds.width));
-            text.setAttribute("lengthAdjust", "spacingAndGlyphs");
-          }
-        }
+        if (shape && text) labelShapes.push({ shape, text, ratio: node.classList.contains("flow_condition") ? .68 : .85 });
+      }
+      // Read the whole diagram's geometry before changing any textLength attributes.
+      // Interleaving those reads and writes forces Chromium to lay out the SVG again for every long label.
+      const fits = [];
+      for (const { shape, text, ratio } of labelShapes) {
+        const availableWidth = shape.getBoundingClientRect().width * ratio;
+        const textWidth = text.getBoundingClientRect().width;
+        if (textWidth > availableWidth && availableWidth > 0)
+          fits.push({ text, length: text.getComputedTextLength() * availableWidth / textWidth });
+      }
+      for (const { text, length } of fits) {
+        text.setAttribute("textLength", String(length));
+        text.setAttribute("lengthAdjust", "spacingAndGlyphs");
       }
       feedback.textContent = "";
       if (message.preserveViewport && fittedRevision === message.diagramRevision) {

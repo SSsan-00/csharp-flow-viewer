@@ -44,6 +44,21 @@ public sealed partial class ProjectSession(MSBuildWorkspace workspace, Project p
         .Where(file => file.Id is not null).Select(file => file.Path)
         .ToHashSet(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
+    private (Compilation Compilation, Diagnostic[] Diagnostics)? declarationDiagnostics;
+    private readonly object declarationLock = new();
+
+    private Diagnostic[] DeclarationDiagnostics(Compilation compilation, CancellationToken token)
+    {
+        lock (declarationLock)
+            if (declarationDiagnostics is { } cached && ReferenceEquals(cached.Compilation, compilation))
+                return cached.Diagnostics;
+        var diagnostics = compilation.GetDeclarationDiagnostics(token)
+            .Where(item => item.Severity is DiagnosticSeverity.Error or DiagnosticSeverity.Warning).ToArray();
+        token.ThrowIfCancellationRequested();
+        lock (declarationLock) declarationDiagnostics = (compilation, diagnostics);
+        return diagnostics;
+    }
+
     public async Task<SourceFile> ReadAsync(ProjectFile file, CancellationToken token)
     {
         var document = file.Id is { } id ? project.GetDocument(id) : null;
@@ -51,7 +66,7 @@ public sealed partial class ProjectSession(MSBuildWorkspace workspace, Project p
         var model = await document.GetSemanticModelAsync(token).ConfigureAwait(false)
             ?? throw new ProjectLoadException("コンパイルとセマンティックモデルを取得できません。");
         var diagnostics = model.GetDiagnostics(cancellationToken: token)
-            .Concat(model.Compilation.GetDeclarationDiagnostics(token))
+            .Concat(DeclarationDiagnostics(model.Compilation, token))
             .Where(item => item.Severity is DiagnosticSeverity.Error or DiagnosticSeverity.Warning)
             .DistinctBy(item => (item.Id, item.Location))
             .GroupBy(item => (item.Id, item.Severity))

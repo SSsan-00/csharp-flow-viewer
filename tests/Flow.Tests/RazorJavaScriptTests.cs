@@ -110,6 +110,34 @@ public sealed class RazorJavaScriptTests
     }
 
     [TestMethod]
+    public void XhrCallbacksRemainDeduplicatedAndOrderedAcrossScriptsAndSends()
+    {
+        const string first = """
+            function first() { return 1; }
+            function second() { return 2; }
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", "/Orders");
+            xhr.send();
+            """;
+        const string second = """
+            xhr.onload = first;
+            xhr.addEventListener("load", first);
+            xhr.onerror = second;
+            xhr.send();
+            """;
+        var source = new RazorJavaScript(first + "\n" + second, PagePath,
+        [
+            new(first, new SourceRange(0, first.Length, 1, PagePath)),
+            new(second, new SourceRange(first.Length + 1, second.Length, 6, PagePath))
+        ]);
+        Assert.HasCount(2, source.Requests);
+        var expected = new[] { "first", "second" }.Select(name => source.Entries.Single(entry => entry.Name == name).Id).ToArray();
+        foreach (var request in source.Requests)
+            CollectionAssert.AreEqual(expected, request.CallbackEntryIds.ToArray());
+        Assert.HasCount(3, source.Bindings);
+    }
+
+    [TestMethod]
     public void XhrInstancesWithSameVariableNameDoNotShareCallbacksOrOpenConfiguration()
     {
         var source = Parse("""
