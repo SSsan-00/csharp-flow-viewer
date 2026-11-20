@@ -78,6 +78,7 @@ public sealed class RazorMarkupTests
             || node.Label.Contains("#template", StringComparison.Ordinal), overview.Nodes);
 
         var handler = page.Entries.Single(entry => entry.Id == eventNode.TargetMethod);
-        Assert.AreEqual("save()", text.Substring(handler.Source.Offset, handler.Source.Length));
+        Assert.AreEqual("save", handler.Name);
+        Assert.AreEqual("onclick=\"save()\"", text.Substring(eventNode.Source!.Offset, eventNode.Source.Length));
     }
 }

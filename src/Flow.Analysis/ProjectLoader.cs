@@ -22,7 +22,7 @@ public sealed record ProjectFile(DocumentId? Id, string Label, string Path)
     public override string ToString() => Label;
 }
 
-public sealed class ProjectSession(MSBuildWorkspace workspace, Project project, string[] notices, string? intermediateDirectory,
+public sealed partial class ProjectSession(MSBuildWorkspace workspace, Project project, string[] notices, string? intermediateDirectory,
     ProjectOptions options, IReadOnlyList<string>? razorFiles = null, IReadOnlyList<string>? javaScriptFiles = null) : IDisposable
 {
     public ProjectOptions Options { get; } = options;

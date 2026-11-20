@@ -102,7 +102,7 @@ public sealed class AnalysisTests(TestContext testContext)
         var files = new HashSet<string> { callerPath, contractPath };
         var caller = new SourceFile(compilation.GetSemanticModel(callerTree), navigableCSharpPaths: files);
         var diagram = Diagram(caller);
-        var interfaceCall = Single(diagram, "IContract.Execute() · 実行時に決定");
+        var interfaceCall = Single(diagram, "IContract.Execute()");
         Assert.IsTrue(interfaceCall.RequiresRuntimeDispatch);
         Assert.IsNull(interfaceCall.TargetMethod);
         Assert.AreEqual(new SourceRange(contractsText.IndexOf("Execute", StringComparison.Ordinal),
@@ -119,7 +119,7 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.IsTrue(implementations.All(candidate => candidate.Label.Contains("(int)", StringComparison.Ordinal)));
         foreach (var name in new[] { "Abstract", "Virtual" })
         {
-            var call = Single(diagram, "Example." + name + "() · 実行時に決定");
+            var call = Single(diagram, "Example." + name + "()");
             Assert.IsTrue(call.RequiresRuntimeDispatch);
             if (name == "Virtual")
             {
@@ -138,12 +138,12 @@ public sealed class AnalysisTests(TestContext testContext)
             var line = callerText[..offset].Count(character => character == '\n') + 1;
             Assert.AreEqual(new SourceRange(offset, name.Length, line), call.TargetDeclaration);
         }
-        Assert.IsNull(Single(diagram, "Callback.Invoke() · 実行時に決定").TargetDeclaration);
-        Assert.IsNull(Single(diagram, "呼び出し · 実行時に決定").TargetDeclaration);
+        Assert.IsNull(Single(diagram, "Callback.Invoke()").TargetDeclaration);
+        Assert.IsNull(Single(diagram, "呼び出し").TargetDeclaration);
         Assert.IsNull(Single(diagram, "Console.WriteLine()").TargetDeclaration);
 
         var unlisted = new SourceFile(compilation.GetSemanticModel(callerTree));
-        Assert.IsNull(Single(Diagram(unlisted), "IContract.Execute() · 実行時に決定").TargetDeclaration);
+        Assert.IsNull(Single(Diagram(unlisted), "IContract.Execute()").TargetDeclaration);
     }
 
     [TestMethod]
@@ -180,12 +180,13 @@ public sealed class AnalysisTests(TestContext testContext)
         foreach (var type in new[] { "Base", "Middle", "Own" })
         {
             var target = Assert.ContainsSingle(file.Methods.Where(entry => entry.Signature == type + ".Work()"));
-            Assert.AreEqual(target.Id, Single(diagram, type + ".Work()").TargetMethod);
+            Assert.AreEqual(target.Id, Assert.ContainsSingle(diagram.Nodes.Where(node =>
+                node.Label == type + ".Work()" && !node.RequiresRuntimeDispatch)).TargetMethod);
         }
-        Assert.AreEqual(Single(diagram, "Base.Work()").TargetMethod,
-            Single(diagram, "Base.Work() · 実行時に決定").TargetMethod);
-        Assert.AreEqual(Single(diagram, "Base.Work()").TargetMethod,
-            Single(Diagram(file, "RunBase"), "Base.Work()").TargetMethod);
+        var direct = Assert.ContainsSingle(diagram.Nodes.Where(node => node.Label == "Base.Work()" && !node.RequiresRuntimeDispatch));
+        var runtime = Assert.ContainsSingle(diagram.Nodes.Where(node => node.Label == "Base.Work()" && node.RequiresRuntimeDispatch));
+        Assert.AreEqual(direct.TargetMethod, runtime.TargetMethod);
+        Assert.AreEqual(direct.TargetMethod, Single(Diagram(file, "RunBase"), "Base.Work()").TargetMethod);
     }
 
     [TestMethod]
@@ -279,7 +280,7 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.AreEqual(target.Methods.Single(method => method.Name == "Hook").Id, hook.TargetMethod);
         Assert.IsNotEmpty(target.Analyze(hook.TargetMethod!.Value).Nodes);
         Assert.IsNull(hook.TargetDeclaration);
-        var virtualCall = Single(diagram, "Derived.Virtual() · 実行時に決定");
+        var virtualCall = Single(diagram, "Derived.Virtual()");
         Assert.IsTrue(virtualCall.RequiresRuntimeDispatch);
         Assert.AreEqual(targetPath, virtualCall.TargetFilePath);
         Assert.AreEqual(target.Methods.Single(method => method.Name == "Virtual").Id, virtualCall.TargetMethod);
@@ -693,7 +694,7 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.Contains(node => node.Label == "Demo.After()", result.Nodes);
         Assert.Contains(node => node.Label == "finally", result.Nodes);
         Assert.Contains(node => node.Label == "Demo.Explicit()", result.Nodes);
-        Assert.Contains(node => node.Label == "IDisposable.Dispose() · 実行時に決定", result.Nodes);
+        Assert.Contains(node => node.Label == "IDisposable.Dispose()", result.Nodes);
         var returnNode = Single(result, "return");
         var returnPath = PathFrom(result, returnNode).Select(node => node.Label).ToArray();
         CollectionAssert.Contains(returnPath, "Demo.Explicit()");
@@ -763,7 +764,7 @@ public sealed class AnalysisTests(TestContext testContext)
         StringAssert.Contains(Next(result, Single(result, "continue")).Label, moveNext);
         Assert.AreEqual("Demo.After()", Next(result, Single(result, "break")).Label);
         var returnPath = PathFrom(result, Single(result, "return")).ToArray();
-        CollectionAssert.AreEqual(new[] { "return", "finally", "IDisposable.Dispose() · 実行時に決定", "End" },
+        CollectionAssert.AreEqual(new[] { "return", "finally", "IDisposable.Dispose()", "End" },
             returnPath.Select(node => node.Label).ToArray());
         var explicitSource = returnPath[2].Source;
         Assert.IsNotNull(explicitSource);
@@ -948,9 +949,9 @@ public sealed class AnalysisTests(TestContext testContext)
         foreach (var call in calls)
             Assert.IsNotNull(call.TargetMethod);
         Assert.AreEqual(source.Methods.Single(method => method.Name == "Virtual").Id,
-            Single(diagram, "Demo.Virtual() · 実行時に決定").TargetMethod);
+            Single(diagram, "Demo.Virtual()").TargetMethod);
         Assert.IsNull(Single(diagram, "Other.External()").TargetMethod);
-        Assert.IsNull(Single(diagram, "呼び出し · 実行時に決定").TargetMethod);
+        Assert.IsNull(Single(diagram, "呼び出し").TargetMethod);
         Assert.Contains(node => node.Label.EndsWith("Local()") && node.TargetMethod is not null, diagram.Nodes);
         var pick = source.Analyze(calls[0].TargetMethod!.Value);
         Assert.AreEqual(source.Methods.Single(method => method.Name == "Run").Id,

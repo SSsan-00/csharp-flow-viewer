@@ -565,6 +565,48 @@ public sealed class RazorJavaScript
             || globals.Resolve(name) is not { } target) return null;
         return windowFunctions.Contains(target) ? target : null;
     }
+    internal MethodEntry? GetEntry(int id) => data.GetValueOrDefault(id)?.Entry;
+
+    internal record CallSite(string? Name, SourceRange Source, MethodEntry Owner, FlowTarget? Target);
+
+    internal IEnumerable<CallSite> CallSites(int? ownerId, CancellationToken token)
+    {
+        if (ownerId is int selected)
+        {
+            if (data.TryGetValue(selected, out var entry) && entry.Body is { } body)
+                foreach (var call in Descendants(body).OfType<CallExpression>())
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (owners.TryGetValue(call, out var owner) && owner == selected)
+                        yield return DescribeCall(call, entry);
+                }
+            yield break;
+        }
+
+        foreach (var (node, owner) in owners)
+        {
+            token.ThrowIfCancellationRequested();
+            if (node is CallExpression call && owner is int key && data.TryGetValue(key, out var entry))
+                yield return DescribeCall(call, entry);
+        }
+    }
+
+    private CallSite DescribeCall(CallExpression call, EntryData entry)
+    {
+        var name = call.Callee switch
+        {
+            Identifier identifier => identifier.Name,
+            MemberExpression { Object: Identifier receiver } member when PropertyName(member) is { } property
+                => receiver.Name + "." + property,
+            _ => null
+        };
+        var id = ResolveCall(call, entry);
+        var target = ResolveNavigationTarget(id);
+        return new CallSite(name, Range(entry.Unit, call), entry.Entry,
+            target is (int method, string path) && id is int key
+                ? new FlowTarget(data[key].Entry.Signature, method, path) : null);
+    }
+
     internal RazorJavaScriptRequest? Request(Node node) => requestNodes.GetValueOrDefault(node);
     internal void Notice(string message)
     {
