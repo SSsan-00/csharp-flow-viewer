@@ -8,7 +8,7 @@ public enum NodeKind { Start, End, Call, Condition, Transfer, Exception, Junctio
 
 public sealed record FlowNode(string Id, NodeKind Kind, string Label, SourceRange? Source,
     int? TargetMethod = null, bool IsReachable = true, bool IsCaseTest = false,
-    string? TargetFilePath = null, bool RequiresRuntimeDispatch = false);
+    string? TargetFilePath = null, bool RequiresRuntimeDispatch = false, SourceRange? TargetDeclaration = null);
 
 public sealed record FlowEdge(string From, string To, string? Label = null, bool IsReachable = true);
 

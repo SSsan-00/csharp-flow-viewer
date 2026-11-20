@@ -133,22 +133,64 @@ public partial class MainWindow
     private bool IsCurrentSource(SourceRange range) => range.FilePath is null
         || string.Equals(range.FilePath, currentFile?.Path, StringComparison.OrdinalIgnoreCase);
 
-    private ProjectFile? FindTargetFile(FlowNode node) => node.TargetFilePath is null
-        ? currentFile
-        : project?.Files.FirstOrDefault(file =>
-            string.Equals(file.Path, node.TargetFilePath, StringComparison.OrdinalIgnoreCase));
+    private static string? DefinitionPath(FlowNode node) => node.TargetMethod is not null
+        ? node.TargetFilePath : node.TargetDeclaration?.FilePath;
 
-    private bool CanFollow(FlowNode node) => node.TargetMethod is not null && FindTargetFile(node) is not null;
+    private ProjectFile? FindTargetFile(FlowNode node) => DefinitionPath(node) is { } path
+        ? project?.Files.FirstOrDefault(file => string.Equals(file.Path, path, StringComparison.OrdinalIgnoreCase))
+        : currentFile;
+
+    private bool CanFollow(FlowNode node) =>
+        (node.TargetMethod is not null || node.TargetDeclaration is not null) && FindTargetFile(node) is not null;
+
 
     private string NavigationHint(FlowNode node)
     {
-        if (node.TargetMethod is not null) return "移動先のファイルが対象ファイル一覧にありません。";
+        if (CanFollow(node))
+            return node.TargetMethod is not null ? "選択した呼び出しの定義へ移動 (F12)"
+                : "宣言へ移動 (F12)。実装先のフローは表示しません。";
+        if (node.TargetMethod is not null || node.TargetDeclaration is not null)
+            return "移動先のファイルが対象ファイル一覧にありません。";
         if (node.Kind == NodeKind.Condition) return "条件ノードです。移動するには対応する呼び出しノードを選んでください。";
         if (node.RequiresRuntimeDispatch)
             return "実行時に決まるため、呼び出し先を一意に特定できません。";
         return node.Kind == NodeKind.Call || node.Kind == NodeKind.Transfer
             ? "解析対象のソースで対応する定義を一意に特定できません。"
             : "このノードには呼び出し先がありません。";
+    }
+
+    private async Task NavigateDeclarationAsync(ProjectFile file, SourceRange declaration, bool requiresRuntimeDispatch)
+    {
+        SetBusy(true);
+        try
+        {
+            await OpenNavigationFileAsync(file);
+            if (closed) return;
+            if (diagram is not null) SaveFileState();
+            MethodsBox.SelectedItem = null;
+            ResetDiagram();
+            RefreshDiagnostics();
+            SetState("宣言のみ表示", requiresRuntimeDispatch
+                ? "実際に呼ばれる実装は実行時に決まります。宣言のソース位置だけを表示します。"
+                : "この宣言を呼び出し先のフローとして表示できません。宣言のソース位置だけを表示します。");
+            NavigateSource(declaration);
+            Editor.Focus();
+            SetStatus("宣言に移動しました。戻る (Alt+←) で呼び出し元に戻れます。");
+            SaveProjectState();
+        }
+        catch (Exception exception) when (!closed) { ShowFailure(exception, "宣言へ移動できません"); }
+        catch (Exception) when (closed) { }
+        finally { if (!closed) SetBusy(false); }
+    }
+
+    private async Task OpenNavigationFileAsync(ProjectFile file, RazorSourceFile? razorContext = null,
+        JavaScriptSourceFile? jsContext = null)
+    {
+        if (currentFile == file) return;
+        if (!FilesBox.Items.Contains(file)) FileFilter.Clear();
+        FilesBox.SelectedItem = file;
+        FilesBox.ScrollIntoView(file);
+        await LoadFile(file, preserveHistory: true, restoreSelection: false, razorContext: razorContext, jsContext: jsContext);
     }
 
     // Navigation keeps the originating Razor event in the same history as C# calls.
@@ -158,14 +200,8 @@ public partial class MainWindow
         SetBusy(true);
         try
         {
-            if (currentFile != file)
-            {
-                if (!FilesBox.Items.Contains(file)) FileFilter.Clear();
-                FilesBox.SelectedItem = file;
-                FilesBox.ScrollIntoView(file);
-                await LoadFile(file, preserveHistory: true, restoreSelection: false, razorContext: razorContext, jsContext: jsContext);
-                if (closed) return;
-            }
+            await OpenNavigationFileAsync(file, razorContext, jsContext);
+            if (closed) return;
             await SelectMethodAsync(entryId, returnTo);
             if (!closed && HasSource) SaveProjectState();
         }

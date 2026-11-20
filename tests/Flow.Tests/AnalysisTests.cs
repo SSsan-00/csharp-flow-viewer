@@ -51,6 +51,75 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    public void RuntimeDispatchLinksToSourceDeclarationNotToAnyImplementation()
+    {
+        var directory = Path.GetFullPath("FictionalProject");
+        var callerPath = Path.Combine(directory, "Caller.cs");
+        var contractPath = Path.Combine(directory, "Contracts.cs");
+        const string callerText = """
+            delegate void Callback();
+            abstract class Example
+            {
+                void Run(IContract typed, Example current, Callback callback, dynamic unknown)
+                {
+                    if (typed == null) return;
+                    typed.Execute(3);
+                    current.Abstract();
+                    current.Virtual();
+                    callback();
+                    unknown.Execute(3);
+                    System.Console.WriteLine("outside");
+                }
+                public abstract void Abstract();
+                public virtual void Virtual() {}
+            }
+            sealed class Implementation : Example, IContract
+            {
+                public void Execute(int value) {}
+                public void Execute(string value) {}
+                public override void Abstract() {}
+                public override void Virtual() {}
+            }
+            """;
+        const string contractsText = """
+            interface IContract
+            {
+                void Execute(int value);
+                void Execute(string value);
+            }
+            """;
+        var callerTree = CSharpSyntaxTree.ParseText(callerText, path: callerPath);
+        var contractTree = CSharpSyntaxTree.ParseText(contractsText, path: contractPath);
+        var compilation = CSharpCompilation.Create("Fictional", [callerTree, contractTree],
+            References.Append(MetadataReference.CreateFromFile(typeof(Console).Assembly.Location)),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        Assert.IsEmpty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        var files = new HashSet<string> { callerPath, contractPath };
+        var caller = new SourceFile(compilation.GetSemanticModel(callerTree), navigableCSharpPaths: files);
+        var diagram = Diagram(caller);
+        var interfaceCall = Single(diagram, "IContract.Execute() · 実行時に決定");
+        Assert.IsTrue(interfaceCall.RequiresRuntimeDispatch);
+        Assert.IsNull(interfaceCall.TargetMethod);
+        Assert.AreEqual(new SourceRange(contractsText.IndexOf("Execute", StringComparison.Ordinal),
+            "Execute".Length, 3, contractPath), interfaceCall.TargetDeclaration);
+        foreach (var name in new[] { "Abstract", "Virtual" })
+        {
+            var call = Single(diagram, "Example." + name + "() · 実行時に決定");
+            Assert.IsNull(call.TargetMethod);
+            Assert.IsNotNull(call.TargetDeclaration);
+            var offset = callerText.IndexOf("void " + name, StringComparison.Ordinal) + "void ".Length;
+            var line = callerText[..offset].Count(character => character == '\n') + 1;
+            Assert.AreEqual(new SourceRange(offset, name.Length, line), call.TargetDeclaration);
+        }
+        Assert.IsNull(Single(diagram, "Callback.Invoke() · 実行時に決定").TargetDeclaration);
+        Assert.IsNull(Single(diagram, "呼び出し · 実行時に決定").TargetDeclaration);
+        Assert.IsNull(Single(diagram, "Console.WriteLine()").TargetDeclaration);
+
+        var unlisted = new SourceFile(compilation.GetSemanticModel(callerTree));
+        Assert.IsNull(Single(Diagram(unlisted), "IContract.Execute() · 実行時に決定").TargetDeclaration);
+    }
+
+    [TestMethod]
     public void SealedReceiverLinksToInheritedVirtualImplementationAndBaseCallsRemainDirect()
     {
         var file = File("""
@@ -181,6 +250,7 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.AreEqual(targetPath, hook.TargetFilePath);
         Assert.AreEqual(target.Methods.Single(method => method.Name == "Hook").Id, hook.TargetMethod);
         Assert.IsNotEmpty(target.Analyze(hook.TargetMethod!.Value).Nodes);
+        Assert.IsNull(hook.TargetDeclaration);
         Assert.IsNull(Single(diagram, "Derived.Virtual() · 実行時に決定").TargetMethod);
         Assert.DoesNotContain(node => node.Label.Contains("Invoke", StringComparison.Ordinal) &&
             node.TargetMethod is not null, diagram.Nodes);

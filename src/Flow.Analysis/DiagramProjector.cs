@@ -17,7 +17,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private readonly record struct State(int Block, int Context);
     private sealed record Continuation(ControlFlowRegion Region, string Resume, int Parent);
     private readonly record struct Visible(NodeKind Kind, string Label, SourceRange? Source, int? Target = null, bool IsCaseTest = false,
-        string? TargetFilePath = null, bool RequiresRuntimeDispatch = false);
+        string? TargetFilePath = null, bool RequiresRuntimeDispatch = false, SourceRange? TargetDeclaration = null);
     private sealed record RegionEntry(ControlFlowRegion Region, ControlFlowRegion? EnclosingFinally);
 
     private readonly Dictionary<State, string> states = new();
@@ -554,7 +554,8 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     {
         if (method.MethodKind is MethodKind.UserDefinedOperator or MethodKind.Conversion)
             return null;
-        var definition = method.ReducedFrom ?? method;
+        var compileTimeDefinition = method.ReducedFrom ?? method;
+        var definition = compileTimeDefinition;
         if (excludedCalls is { Patterns.Count: > 0 } && !notices.Contains(ExclusionTimeout))
         {
             try
@@ -577,8 +578,11 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
             if (implementation is not null) definition = implementation;
         }
         var target = dispatched ? null : ResolveTarget(definition);
+        // A compile-time declaration is not proof of the runtime implementation.
+        var declaration = target is null && method.MethodKind != MethodKind.DelegateInvoke
+            ? ResolveDeclaration(compileTimeDefinition) : null;
         return new Visible(NodeKind.Call, label + (dispatched ? " · 実行時に決定" : ""), OperationSource(operation),
-            target?.Offset, TargetFilePath: target?.Path, RequiresRuntimeDispatch: dispatched);
+            target?.Offset, TargetFilePath: target?.Path, RequiresRuntimeDispatch: dispatched, TargetDeclaration: declaration);
     }
 
     private static IMethodSymbol? ResolveSealedReceiver(IMethodSymbol method, ITypeSymbol? receiver)
@@ -610,10 +614,10 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         (int Offset, string? Path)? target = null;
         foreach (var reference in definition.DeclaringSyntaxReferences)
         {
-            var sameFile = reference.SyntaxTree == markers.Model.SyntaxTree;
-            var path = sameFile ? null : reference.SyntaxTree.FilePath;
-            if (!sameFile && (string.IsNullOrEmpty(path) || navigableCSharpPaths?.Contains(path) != true))
+            if (!TryGetTargetPath(reference.SyntaxTree, out var path))
                 continue;
+
+            var sameFile = path is null;
 
             // Only the instrumented caller tree has synthetic statements. Other trees
             // already use the exact declaration offset exposed in their own method list.
@@ -626,6 +630,40 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
             target = (offset, path);
         }
         return target;
+    }
+
+    private SourceRange? ResolveDeclaration(IMethodSymbol method)
+    {
+        var definition = method.OriginalDefinition;
+        definition = definition.PartialDefinitionPart ?? definition;
+        SourceRange? target = null;
+        foreach (var reference in definition.DeclaringSyntaxReferences)
+        {
+            if (!TryGetTargetPath(reference.SyntaxTree, out var path))
+                continue;
+
+            var span = reference.GetSyntax(token) switch
+            {
+                MethodDeclarationSyntax declaration => declaration.Identifier.Span,
+                ConstructorDeclarationSyntax declaration => declaration.Identifier.Span,
+                DestructorDeclarationSyntax declaration => declaration.Identifier.Span,
+                LocalFunctionStatementSyntax declaration => declaration.Identifier.Span,
+                AccessorDeclarationSyntax declaration => declaration.Keyword.Span,
+                _ => default
+            };
+            if (span.IsEmpty) continue;
+            if (target is not null) return null;
+            target = path is null ? range(markers.OriginalSpan(span))
+                : new SourceRange(span.Start, span.Length,
+                    reference.SyntaxTree.GetLineSpan(span, token).StartLinePosition.Line + 1, path);
+        }
+        return target;
+    }
+
+    private bool TryGetTargetPath(SyntaxTree tree, out string? path)
+    {
+        path = tree == markers.Model.SyntaxTree ? null : tree.FilePath;
+        return path is null || path.Length != 0 && navigableCSharpPaths?.Contains(path) == true;
     }
 
     private static string Name(ISymbol symbol) => symbol.ContainingType.Name + "." + symbol.Name;
@@ -694,7 +732,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private string Add(Visible visible, bool reachable)
     {
         var id = "n" + nodes.Count;
-        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest, visible.TargetFilePath, visible.RequiresRuntimeDispatch));
+        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest, visible.TargetFilePath, visible.RequiresRuntimeDispatch, visible.TargetDeclaration));
         return id;
     }
 
