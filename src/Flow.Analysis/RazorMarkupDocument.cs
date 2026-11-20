@@ -62,7 +62,8 @@ internal sealed class RazorMarkupDocument
         Notices = document.GetCSharpDocument().Diagnostics
             .Select(diagnostic => $"Razor · {diagnostic.Id} · L{diagnostic.Span.LineIndex + 1}: {diagnostic.GetMessage()}")
             .Distinct(StringComparer.Ordinal).ToArray();
-        BuildGuards(new string(code));
+        ServerCode = (BlockSyntax)SyntaxFactory.ParseStatement("{" + new string(code) + "}");
+        BuildGuards();
 
         void Project(IntermediateNode node, bool htmlContext)
         {
@@ -99,6 +100,7 @@ internal sealed class RazorMarkupDocument
     }
 
     public string Html { get; }
+    public BlockSyntax ServerCode { get; }
     public string? ModelName { get; }
     public bool IsPage { get; }
     public string? RouteTemplate { get; }
@@ -154,11 +156,9 @@ internal sealed class RazorMarkupDocument
         return true;
     }
 
-    private void BuildGuards(string code)
+    private void BuildGuards()
     {
-        // The leading brace introduces a single parsing offset, removed by Span().
-        var block = SyntaxFactory.ParseStatement("{" + code + "}");
-        foreach (var node in block.DescendantNodes())
+        foreach (var node in ServerCode.DescendantNodes())
         {
             switch (node)
             {
@@ -182,18 +182,19 @@ internal sealed class RazorMarkupDocument
 
         void Add(StatementSyntax body, Microsoft.CodeAnalysis.SyntaxNode condition, string label)
         {
-            var bodySpan = Span(body.Span);
-            var conditionSpan = Span(condition.Span);
+            var bodySpan = OriginalSpan(body.Span);
+            var conditionSpan = OriginalSpan(condition.Span);
             if (bodySpan.Length == 0 || conditionSpan.Length == 0) return;
             guards.Add(new RazorGuard(label, Range(conditionSpan.Start, conditionSpan.Length), bodySpan));
         }
+    }
 
-        TextSpan Span(TextSpan value)
-        {
-            var start = Math.Clamp(value.Start - 1, 0, source.Length);
-            var end = Math.Clamp(value.End - 1, start, source.Length);
-            return TextSpan.FromBounds(start, end);
-        }
+    // ServerCode has an artificial leading brace; every other offset is preserved.
+    internal TextSpan OriginalSpan(TextSpan value)
+    {
+        var start = Math.Clamp(value.Start - 1, 0, source.Length);
+        var end = Math.Clamp(value.End - 1, start, source.Length);
+        return TextSpan.FromBounds(start, end);
     }
 
     private static char[] Blank(string text) => text.Select(character => character is '\r' or '\n' ? character : ' ').ToArray();

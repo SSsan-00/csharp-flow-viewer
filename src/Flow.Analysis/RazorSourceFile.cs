@@ -164,6 +164,11 @@ public sealed class RazorSourceFile
         var edges = new List<FlowEdge>();
         var notices = Notices.ToList();
         notices.Add("イベントとHTTP送信は静的な候補です。描画時の条件、JavaScriptによる取消・変更、外部スクリプトによって実際の動作は変わります。");
+        var rendering = new RazorRenderProjector(document, nodes, edges, token);
+        if (rendering.Project(pageSource) is { } renderStart)
+            edges.Add(new FlowEdge("page", renderStart, "サーバー側の描画フロー"));
+        if (rendering.IsTruncated)
+            notices.Add("サーバー側の描画フローは最大100件の制御構文を表示しています。");
         var eventCount = 0;
         foreach (var entry in Entries.Where(entry => requests.ContainsKey(entry.Id) || inlineLabels.ContainsKey(entry.Id)).Take(200))
         {
@@ -185,7 +190,7 @@ public sealed class RazorSourceFile
             var handler = ResolveJavaScriptHandler(request);
             nodes.Add(new FlowNode(requestId, NodeKind.Transfer, $"{request.Client} · {request.HttpMethod} {request.Url}",
                 request.Source, handler?.MethodId, TargetFilePath: handler?.FilePath));
-            edges.Add(new FlowEdge("page", requestId, "JavaScript 内のHTTP候補"));
+            edges.Add(new FlowEdge(rendering.ScopeAt(request.Source.Offset) ?? "page", requestId, "JavaScript 内のHTTP候補"));
         }
         if (eventCount == 0)
         {
@@ -199,17 +204,11 @@ public sealed class RazorSourceFile
 
         void AddEvent(string id, string label, SourceRange source, int? target)
         {
-            var previous = "page";
-            var guardIndex = 0;
-            foreach (var guard in document.GuardsAt(source.Offset))
-            {
-                var guardId = $"{id}_guard{guardIndex++}";
-                nodes.Add(new FlowNode(guardId, NodeKind.Condition, $"描画条件: {guard.Label}", guard.Source));
-                edges.Add(new FlowEdge(previous, guardId, previous == "page" ? "イベント候補" : "成立"));
-                previous = guardId;
-            }
+            var scope = rendering.ScopeAt(source.Offset);
             nodes.Add(new FlowNode(id, NodeKind.Call, label, source, target));
-            edges.Add(new FlowEdge(previous, id, previous == "page" ? "イベント候補" : "成立時に表示"));
+            var qualifier = scope is not null ? "この描画経路のイベント候補"
+                : document.GuardsAt(source.Offset).Count > 0 ? "条件付きイベント候補" : "イベント候補";
+            edges.Add(new FlowEdge(scope ?? "page", id, qualifier));
             if (target is { } targetId && requests.TryGetValue(targetId, out var element))
             {
                 var request = DescribeRequest(element);
