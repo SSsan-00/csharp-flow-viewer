@@ -11,6 +11,46 @@ public partial class MainWindow
     private bool pendingNodeCenter;
     private Point? editorPress;
     private bool selectingFromSource;
+    private DefinitionView definitionView;
+
+    private enum DefinitionView { Direct, RuntimeDeclaration, ImplementationCandidate }
+
+    private void ShowDefinitionView(DefinitionView view)
+    {
+        definitionView = view;
+        DefinitionBanner.Text = view switch
+        {
+            DefinitionView.RuntimeDeclaration => "宣言のフロー · 実際に呼ばれる実装は実行時に決まります。",
+            DefinitionView.ImplementationCandidate => "実装候補のフロー · 実際に呼ばれる実装とは限りません。",
+            _ => ""
+        };
+        DefinitionBanner.Visibility = view == DefinitionView.Direct ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void ClearDeclarationCandidates()
+    {
+        CandidateBox.ItemsSource = null;
+        CandidatePanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void CandidateChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs args) =>
+        OpenCandidateButton.IsEnabled = !busy && CandidateBox.SelectedItem is ImplementationCandidate;
+
+    private async void OpenCandidate(object sender, RoutedEventArgs args) => await OpenSelectedCandidateAsync();
+
+    private async void CandidateKeyDown(object sender, KeyEventArgs args)
+    {
+        if (args.Key != Key.Enter || CandidateBox.IsDropDownOpen || !OpenCandidateButton.IsEnabled) return;
+        args.Handled = true;
+        await OpenSelectedCandidateAsync();
+    }
+
+    private async Task OpenSelectedCandidateAsync()
+    {
+        if (busy || CandidateBox.SelectedItem is not ImplementationCandidate candidate
+            || FindDefinitionFile(candidate.TargetFilePath) is not { } file) return;
+        await NavigateEntryAsync(file, candidate.TargetMethod, view: DefinitionView.ImplementationCandidate);
+    }
 
     private void OpenGoToLine()
     {
@@ -136,7 +176,9 @@ public partial class MainWindow
     private static string? DefinitionPath(FlowNode node) => node.TargetMethod is not null
         ? node.TargetFilePath : node.TargetDeclaration?.FilePath;
 
-    private ProjectFile? FindTargetFile(FlowNode node) => DefinitionPath(node) is { } path
+    private ProjectFile? FindTargetFile(FlowNode node) => FindDefinitionFile(DefinitionPath(node));
+
+    private ProjectFile? FindDefinitionFile(string? path) => path is not null
         ? project?.Files.FirstOrDefault(file => string.Equals(file.Path, path, StringComparison.OrdinalIgnoreCase))
         : currentFile;
 
@@ -147,8 +189,11 @@ public partial class MainWindow
     private string NavigationHint(FlowNode node)
     {
         if (CanFollow(node))
-            return node.TargetMethod is not null ? "選択した呼び出しの定義へ移動 (F12)"
-                : "宣言へ移動 (F12)。実装先のフローは表示しません。";
+            return node.TargetMethod is not null
+                ? node.RequiresRuntimeDispatch ? "宣言のフローへ移動 (F12)。実際に呼ばれる実装は未確定です。"
+                    : "選択した呼び出しの定義へ移動 (F12)"
+                : node.ImplementationCandidates is { Count: > 0 } ? "宣言へ移動 (F12)。実装候補も確認できます。"
+                    : "宣言へ移動 (F12)。表示できる本体はありません。";
         if (node.TargetMethod is not null || node.TargetDeclaration is not null)
             return "移動先のファイルが対象ファイル一覧にありません。";
         if (node.Kind == NodeKind.Condition) return "条件ノードです。移動するには対応する呼び出しノードを選んでください。";
@@ -159,8 +204,15 @@ public partial class MainWindow
             : "このノードには呼び出し先がありません。";
     }
 
-    private async Task NavigateDeclarationAsync(ProjectFile file, SourceRange declaration, bool requiresRuntimeDispatch)
+    private async Task NavigateDeclarationAsync(ProjectFile file, SourceRange declaration, FlowNode caller)
     {
+        // Candidate paths without a file are relative to the caller's tree, not the declaration's.
+        var candidates = caller.ImplementationCandidates?
+            .Select(candidate => candidate with
+            {
+                TargetFilePath = candidate.TargetFilePath ?? currentFile?.Path
+            })
+            .Where(candidate => FindDefinitionFile(candidate.TargetFilePath) is not null).ToArray() ?? [];
         SetBusy(true);
         try
         {
@@ -170,9 +222,14 @@ public partial class MainWindow
             MethodsBox.SelectedItem = null;
             ResetDiagram();
             RefreshDiagnostics();
-            SetState("宣言のみ表示", requiresRuntimeDispatch
-                ? "実際に呼ばれる実装は実行時に決まります。宣言のソース位置だけを表示します。"
-                : "この宣言を呼び出し先のフローとして表示できません。宣言のソース位置だけを表示します。");
+            SetState("宣言のみ表示", caller.RequiresRuntimeDispatch
+                ? "宣言には表示できる本体がありません。実際に呼ばれる実装は実行時に決まります。"
+                : "この宣言には表示できるフローがありません。宣言のソース位置を表示します。");
+            if (candidates.Length > 0)
+            {
+                CandidateBox.ItemsSource = candidates;
+                CandidatePanel.Visibility = Visibility.Visible;
+            }
             NavigateSource(declaration);
             Editor.Focus();
             SetStatus("宣言に移動しました。戻る (Alt+←) で呼び出し元に戻れます。");
@@ -195,7 +252,7 @@ public partial class MainWindow
 
     // Navigation keeps the originating Razor event in the same history as C# calls.
     private async Task NavigateEntryAsync(ProjectFile file, int entryId, string? returnTo = null,
-        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null)
+        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null, DefinitionView view = DefinitionView.Direct)
     {
         SetBusy(true);
         try
@@ -203,7 +260,11 @@ public partial class MainWindow
             await OpenNavigationFileAsync(file, razorContext, jsContext);
             if (closed) return;
             await SelectMethodAsync(entryId, returnTo);
-            if (!closed && HasSource) SaveProjectState();
+            if (!closed && HasSource)
+            {
+                if (method?.Id == entryId) ShowDefinitionView(view);
+                SaveProjectState();
+            }
         }
         catch (Exception exception) when (!closed) { ShowFailure(exception, "呼び出し先に移動できません"); }
         catch (Exception) when (closed) { }

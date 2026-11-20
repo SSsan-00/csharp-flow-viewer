@@ -51,7 +51,7 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
-    public void RuntimeDispatchLinksToSourceDeclarationNotToAnyImplementation()
+    public void RuntimeDispatchShowsStaticBodiesAndOffersOnlyMatchingSourceImplementations()
     {
         var directory = Path.GetFullPath("FictionalProject");
         var callerPath = Path.Combine(directory, "Caller.cs");
@@ -87,6 +87,11 @@ public sealed class AnalysisTests(TestContext testContext)
                 void Execute(int value);
                 void Execute(string value);
             }
+            class ExplicitImplementation : IContract
+            {
+                void IContract.Execute(int value) {}
+                void IContract.Execute(string value) {}
+            }
             """;
         var callerTree = CSharpSyntaxTree.ParseText(callerText, path: callerPath);
         var contractTree = CSharpSyntaxTree.ParseText(contractsText, path: contractPath);
@@ -102,10 +107,32 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.IsNull(interfaceCall.TargetMethod);
         Assert.AreEqual(new SourceRange(contractsText.IndexOf("Execute", StringComparison.Ordinal),
             "Execute".Length, 3, contractPath), interfaceCall.TargetDeclaration);
+        Assert.IsNotNull(interfaceCall.ImplementationCandidates);
+        Assert.HasCount(2, interfaceCall.ImplementationCandidates);
+        var implementations = interfaceCall.ImplementationCandidates;
+        var explicitImplementation = implementations[0];
+        var contract = new SourceFile(compilation.GetSemanticModel(contractTree), navigableCSharpPaths: files);
+        Assert.AreEqual(contractPath, explicitImplementation.Declaration.FilePath);
+        Assert.IsNotEmpty(contract.Analyze(explicitImplementation.TargetMethod).Nodes);
+        Assert.AreEqual(caller.Methods.Single(m => m.Signature == "Implementation.Execute(int value)").Id,
+            implementations[1].TargetMethod);
+        Assert.IsTrue(implementations.All(candidate => candidate.Label.Contains("(int)", StringComparison.Ordinal)));
         foreach (var name in new[] { "Abstract", "Virtual" })
         {
             var call = Single(diagram, "Example." + name + "() · 実行時に決定");
-            Assert.IsNull(call.TargetMethod);
+            Assert.IsTrue(call.RequiresRuntimeDispatch);
+            if (name == "Virtual")
+            {
+                Assert.AreEqual(caller.Methods.Single(m => m.Signature == "Example.Virtual()").Id, call.TargetMethod);
+                Assert.IsNotEmpty(caller.Analyze(call.TargetMethod!.Value).Nodes);
+                Assert.IsNull(call.ImplementationCandidates);
+            }
+            else
+            {
+                Assert.IsNull(call.TargetMethod);
+                Assert.AreEqual(caller.Methods.Single(m => m.Signature == "Implementation.Abstract()").Id,
+                    Assert.ContainsSingle(call.ImplementationCandidates!).TargetMethod);
+            }
             Assert.IsNotNull(call.TargetDeclaration);
             var offset = callerText.IndexOf("void " + name, StringComparison.Ordinal) + "void ".Length;
             var line = callerText[..offset].Count(character => character == '\n') + 1;
@@ -155,7 +182,8 @@ public sealed class AnalysisTests(TestContext testContext)
             var target = Assert.ContainsSingle(file.Methods.Where(entry => entry.Signature == type + ".Work()"));
             Assert.AreEqual(target.Id, Single(diagram, type + ".Work()").TargetMethod);
         }
-        Assert.IsNull(Single(diagram, "Base.Work() · 実行時に決定").TargetMethod);
+        Assert.AreEqual(Single(diagram, "Base.Work()").TargetMethod,
+            Single(diagram, "Base.Work() · 実行時に決定").TargetMethod);
         Assert.AreEqual(Single(diagram, "Base.Work()").TargetMethod,
             Single(Diagram(file, "RunBase"), "Base.Work()").TargetMethod);
     }
@@ -251,7 +279,11 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.AreEqual(target.Methods.Single(method => method.Name == "Hook").Id, hook.TargetMethod);
         Assert.IsNotEmpty(target.Analyze(hook.TargetMethod!.Value).Nodes);
         Assert.IsNull(hook.TargetDeclaration);
-        Assert.IsNull(Single(diagram, "Derived.Virtual() · 実行時に決定").TargetMethod);
+        var virtualCall = Single(diagram, "Derived.Virtual() · 実行時に決定");
+        Assert.IsTrue(virtualCall.RequiresRuntimeDispatch);
+        Assert.AreEqual(targetPath, virtualCall.TargetFilePath);
+        Assert.AreEqual(target.Methods.Single(method => method.Name == "Virtual").Id, virtualCall.TargetMethod);
+        Assert.IsNotEmpty(target.Analyze(virtualCall.TargetMethod!.Value).Nodes);
         Assert.DoesNotContain(node => node.Label.Contains("Invoke", StringComparison.Ordinal) &&
             node.TargetMethod is not null, diagram.Nodes);
         Assert.IsNull(Single(diagram, "Excluded.External()").TargetMethod);
@@ -915,7 +947,8 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.AreEqual(2, calls.Select(node => node.TargetMethod).Distinct().Count());
         foreach (var call in calls)
             Assert.IsNotNull(call.TargetMethod);
-        Assert.IsNull(Single(diagram, "Demo.Virtual() · 実行時に決定").TargetMethod);
+        Assert.AreEqual(source.Methods.Single(method => method.Name == "Virtual").Id,
+            Single(diagram, "Demo.Virtual() · 実行時に決定").TargetMethod);
         Assert.IsNull(Single(diagram, "Other.External()").TargetMethod);
         Assert.IsNull(Single(diagram, "呼び出し · 実行時に決定").TargetMethod);
         Assert.Contains(node => node.Label.EndsWith("Local()") && node.TargetMethod is not null, diagram.Nodes);
