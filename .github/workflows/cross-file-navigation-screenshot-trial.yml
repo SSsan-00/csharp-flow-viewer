@@ -1,4 +1,4 @@
-name: Measure analysis and SVG performance on Windows
+name: Measure SVG and verify the desktop preview payload
 on:
   push:
     branches: [codex/cross-file-nav-screen-trial]
@@ -33,6 +33,10 @@ jobs:
             node benchmark.mjs $against
             if ($LASTEXITCODE -ne 0) { throw 'SVG benchmark failed' }
             $env:CFV_CHROMIUM = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+            $baselineTools = Join-Path $against 'tools/preview'
+            New-Item -ItemType Junction -Path (Join-Path $baselineTools 'node_modules') -Target (Join-Path $PWD 'node_modules') | Out-Null
+            npm.cmd --prefix $baselineTools test
+            Write-Host "Baseline preview fixture exit code: $LASTEXITCODE"
             npm.cmd test
             if ($LASTEXITCODE -ne 0) { throw 'Preview interaction tests failed' }
           } finally { Pop-Location }
