@@ -21,7 +21,7 @@ internal static class PageModelResolver
             notices.Add("解析は部分的 · プロジェクト外のリンクされた Razor ファイルでは、論理パスに基づく _ViewImports を解決していません。ページ内のディレクティブを基に解析します。");
         var text = await File.ReadAllTextAsync(file.Path, token).ConfigureAwait(false);
         var imports = await ReadImportsAsync(project, file.Path, token).ConfigureAwait(false);
-        var page = new RazorSourceFile(text, file.Path, imports, token);
+        var page = new RazorSourceFile(text, file.Path, imports, token, new LocalJavaScriptFiles(project.FilePath!, files));
         if (!page.IsPage)
         {
             page.BindHandlers([], notices);
@@ -158,7 +158,7 @@ internal static class PageModelResolver
             var verb = name[2..Math.Min(boundary, name.Length)].ToUpperInvariant();
             var handlerName = boundary >= name.Length ? null : name[boundary..];
             var declaration = (method.PartialImplementationPart ?? method).DeclaringSyntaxReferences.FirstOrDefault();
-            if (declaration is null || !files.Any(file => !file.IsRazor && PathEquals(file.Path, declaration.SyntaxTree.FilePath)))
+            if (declaration is null || !files.Any(file => file.Id is not null && PathEquals(file.Path, declaration.SyntaxTree.FilePath)))
             {
                 notices.Add($"解析は部分的 · {method.Name} の本体が選択中プロジェクトのソース一覧にありません。");
                 continue;

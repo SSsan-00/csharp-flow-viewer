@@ -21,6 +21,7 @@ internal sealed class RazorMarkupReader
         var elements = new List<RazorElement>();
         var stack = new List<RazorElement>();
         var scripts = new List<RazorJavaScriptFragment>();
+        var references = new List<RazorScriptReference>();
         var notices = new List<string>();
         var position = 0;
         while (position < html.Length)
@@ -95,12 +96,14 @@ internal sealed class RazorMarkupReader
                 element.End = contentEnd;
                 if (tag == "script")
                 {
-                    if (element.Attribute("src") is { } scriptSource)
-                        notices.Add($"L{document.Range(start, 1).Line}: 外部スクリプト {scriptSource.Value} はこのページ単独の解析範囲外です。");
-                    else if (IsJavaScript(element))
+                    if (IsJavaScript(element))
                     {
-                        scripts.Add(document.ProjectScript(position, contentEnd - position,
-                            element.Attribute("type")?.Value.Trim().Equals("module", StringComparison.OrdinalIgnoreCase) == true));
+                        var module = element.Attribute("type")?.Value.Trim().Equals("module", StringComparison.OrdinalIgnoreCase) == true;
+                        if (element.Attribute("src") is { } scriptSource)
+                            references.Add(new RazorScriptReference(scriptSource.Value,
+                                document.Range(scriptSource.ValueStart, scriptSource.ValueLength), module, scriptSource.IsDynamic,
+                                element.Attributes.Keys.Any(name => name is "async" or "defer" or "nomodule")));
+                        else scripts.Add(document.ProjectScript(position, contentEnd - position, module));
                     }
                     else if (element.Attribute("language") is { } language && !language.Value.Equals("javascript", StringComparison.OrdinalIgnoreCase))
                         notices.Add($"L{document.Range(start, 1).Line}: {language.Value} のスクリプトはJavaScriptとして解析しません。");
@@ -111,6 +114,7 @@ internal sealed class RazorMarkupReader
         }
         Elements = elements;
         Scripts = scripts;
+        References = references;
         Notices = notices;
 
         void SkipWhite() { while (position < html.Length && char.IsWhiteSpace(html[position])) position++; }
@@ -118,6 +122,7 @@ internal sealed class RazorMarkupReader
 
     public IReadOnlyList<RazorElement> Elements { get; }
     public IReadOnlyList<RazorJavaScriptFragment> Scripts { get; }
+    public IReadOnlyList<RazorScriptReference> References { get; }
     public IReadOnlyList<string> Notices { get; }
 
     private static bool IsName(char value) => char.IsLetterOrDigit(value) || value is '-' or '_' or ':' or '.';

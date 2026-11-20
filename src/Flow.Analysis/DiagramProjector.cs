@@ -10,11 +10,13 @@ using Microsoft.CodeAnalysis.Text;
 namespace Flow.Analysis;
 
 internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers markers,
-    Func<TextSpan, SourceRange> range, IReadOnlySet<int> targets, CancellationToken token, CallExclusions? excludedCalls)
+    Func<TextSpan, SourceRange> range, IReadOnlySet<int> targets, CancellationToken token, CallExclusions? excludedCalls,
+    IReadOnlySet<string>? navigableCSharpPaths)
 {
     private readonly record struct State(int Block, int Context);
     private sealed record Continuation(ControlFlowRegion Region, string Resume, int Parent);
-    private readonly record struct Visible(NodeKind Kind, string Label, SourceRange? Source, int? Target = null, bool IsCaseTest = false);
+    private readonly record struct Visible(NodeKind Kind, string Label, SourceRange? Source, int? Target = null, bool IsCaseTest = false,
+        string? TargetFilePath = null);
     private sealed record RegionEntry(ControlFlowRegion Region, ControlFlowRegion? EnclosingFinally);
 
     private readonly Dictionary<State, string> states = new();
@@ -569,19 +571,34 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
         var dispatched = method.MethodKind == MethodKind.DelegateInvoke || method.IsStatic && method.IsAbstract ||
             virtualCall && !method.IsSealed && !method.ContainingType.IsSealed &&
             !(receiver?.IsSealed == true && SymbolEqualityComparer.Default.Equals(receiver, method.ContainingType));
-        int? target = null;
-        if (!dispatched)
+        var target = dispatched ? null : ResolveTarget(definition);
+        return new Visible(NodeKind.Call, label + (dispatched ? " · 実行時に決定" : ""), OperationSource(operation),
+            target?.Offset, TargetFilePath: target?.Path);
+    }
+
+    private (int Offset, string? Path)? ResolveTarget(IMethodSymbol method)
+    {
+        var definition = method.OriginalDefinition;
+        definition = definition.PartialImplementationPart ?? definition;
+        (int Offset, string? Path)? target = null;
+        foreach (var reference in definition.DeclaringSyntaxReferences)
         {
-            definition = definition.PartialImplementationPart ?? definition;
-            if (definition.OriginalDefinition.DeclaringSyntaxReferences.FirstOrDefault(s => s.SyntaxTree == markers.Model.SyntaxTree) is { } syntax)
-            {
-                var declaration = syntax.GetSyntax(token);
-                var offset = markers.OriginalSpan(declaration.Span).Start;
-                if (targets.Contains(offset))
-                    target = offset;
-            }
+            var sameFile = reference.SyntaxTree == markers.Model.SyntaxTree;
+            var path = sameFile ? null : reference.SyntaxTree.FilePath;
+            if (!sameFile && (string.IsNullOrEmpty(path) || navigableCSharpPaths?.Contains(path) != true))
+                continue;
+
+            // Only the instrumented caller tree has synthetic statements. Other trees
+            // already use the exact declaration offset exposed in their own method list.
+            if (sameFile ? !targets.Contains(markers.OriginalSpan(reference.Span).Start)
+                : !SourceFile.HasBody(reference.GetSyntax(token)))
+                continue;
+            if (target is not null)
+                return null;
+            var offset = sameFile ? markers.OriginalSpan(reference.Span).Start : reference.Span.Start;
+            target = (offset, path);
         }
-        return new Visible(NodeKind.Call, label + (dispatched ? " · 実行時に決定" : ""), OperationSource(operation), target);
+        return target;
     }
 
     private static string Name(ISymbol symbol) => symbol.ContainingType.Name + "." + symbol.Name;
@@ -633,7 +650,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private string Add(Visible visible, bool reachable)
     {
         var id = "n" + nodes.Count;
-        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest));
+        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest, visible.TargetFilePath));
         return id;
     }
 

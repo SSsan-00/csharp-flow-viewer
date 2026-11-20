@@ -21,11 +21,12 @@ public partial class MainWindow : Window
     private const int MaxPreviewCharacters = 380_000;
     private readonly PreviewHost preview;
     private readonly CancellationTokenSource lifetime = new();
-    private readonly Stack<(ProjectFile File, int Method, string Node)> history = new();
+    private readonly Stack<(ProjectFile File, int Method, string Node, RazorSourceFile? Razor, JavaScriptSourceFile? Script)> history = new();
     private readonly List<string> diagnostics = [];
     private ProjectSession? project;
     private SourceFile? source;
     private RazorSourceFile? razorSource;
+    private JavaScriptSourceFile? javaScriptSource;
     private ProjectFile? currentFile;
     private FlowDiagram? diagram;
     private Dictionary<string, FlowNode> nodes = [];
@@ -44,9 +45,8 @@ public partial class MainWindow : Window
     private int diagramRevision;
     private CallExclusions excludedCalls = new([]);
 
-    // Both C# methods and Razor entry points use source-backed list entries.
-    private IReadOnlyList<MethodEntry> CurrentEntries => source?.Methods ?? razorSource?.Entries ?? [];
-    private bool HasSource => source is not null || razorSource is not null;
+    private IReadOnlyList<MethodEntry> CurrentEntries => source?.Methods ?? razorSource?.Entries ?? javaScriptSource?.Entries ?? [];
+    private bool HasSource => source is not null || razorSource is not null || javaScriptSource is not null;
 
     public MainWindow()
     {
@@ -169,7 +169,7 @@ public partial class MainWindow : Window
         if (loaded.Files.Count == 0)
         {
             SetState("対象ファイルがありません", "構成、対象フレームワーク、Compile 項目と診断を確認してください。");
-            SetStatus("選択できる C# / Razor ファイルがありません。", attention: true);
+            SetStatus("選択できる C# / Razor / JavaScript ファイルがありません。", attention: true);
             return;
         }
         if (loaded.Files.FirstOrDefault(file => file.Path == previousFile) is { } previous)
@@ -194,20 +194,25 @@ public partial class MainWindow : Window
         finally { if (!closed) SetBusy(false); }
     }
 
-    private async Task LoadFile(ProjectFile file, bool preserveHistory = false, bool restoreSelection = true)
+    private async Task LoadFile(ProjectFile file, bool preserveHistory = false, bool restoreSelection = true,
+        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null)
     {
         ResetFile(preserveHistory);
-        SetState("ソースを解析中", file.IsRazor
-            ? "Razor の画面イベントと送信先を調べています…" : "Roslyn で型とメソッドを調べています…");
-        SetStatus(file.IsRazor ? "Razor ページを解析中" : "コンパイルとセマンティックモデルを取得中");
+        var loading = file.IsRazor ? "Razor ページを解析中"
+            : file.IsJavaScript ? "JavaScript の宣言と参照を解析中"
+            : "コンパイルとセマンティックモデルを取得中";
+        SetState("ソースを解析中", loading);
+        SetStatus(loading);
         var current = project!;
         if (file.IsRazor)
             razorSource = await Task.Run(() => current.ReadRazorAsync(file, lifetime.Token), lifetime.Token);
+        else if (file.IsJavaScript)
+            javaScriptSource = await Task.Run(() => current.ReadJavaScriptAsync(file, lifetime.Token, razorContext, jsContext), lifetime.Token);
         else
             source = await Task.Run(() => current.ReadAsync(file, lifetime.Token), lifetime.Token);
         if (closed) return;
         currentFile = file;
-        Editor.Text = source?.Text ?? razorSource!.Text;
+        Editor.Text = source?.Text ?? razorSource?.Text ?? javaScriptSource!.Text;
         var restored = ReadFileState(file);
         SourceTitle.Text = file.Label;
         SourceTitle.ToolTip = file.Label;
@@ -218,9 +223,9 @@ public partial class MainWindow : Window
         UpdateMethodCount();
         RefreshDiagnostics();
         SetState(CurrentEntries.Count > 0 ? "解析対象を選択" : "解析対象が見つかりません",
-            CurrentEntries.Count > 0 ? "左の一覧でメソッドまたは画面イベントを選ぶと、フローを表示します。"
+            CurrentEntries.Count > 0 ? "左の一覧で解析対象を選ぶと、フローを表示します。"
                 : "ほかのファイルを選ぶか、構成と診断を確認してください。");
-        var notices = source?.Notices ?? razorSource!.Notices;
+        var notices = source?.Notices ?? razorSource?.Notices ?? javaScriptSource!.Notices;
         SetStatus(notices.Any(IsPartial) ? "部分解析 · 診断で解析範囲を確認できます。" : "ソースの読み込み完了",
             attention: notices.Any(IsPartial));
         if (!restoreSelection) return;
@@ -230,9 +235,8 @@ public partial class MainWindow : Window
             MethodsBox.ScrollIntoView(entry);
             await AnalyzeMethodAsync(entry, restored: restored);
         }
-        else if (file.IsRazor && CurrentEntries.FirstOrDefault() is { } overview)
+        else if ((file.IsRazor || file.IsJavaScript) && CurrentEntries.FirstOrDefault() is { } overview)
         {
-            // A Razor file opens its page results immediately; no extra mode or click is needed.
             MethodsBox.SelectedItem = overview;
             await AnalyzeMethodAsync(overview, restored: restored);
         }
@@ -262,7 +266,8 @@ public partial class MainWindow : Window
     {
         var currentSource = source;
         var currentRazor = razorSource;
-        if (currentSource is null && currentRazor is null) return;
+        var currentScript = javaScriptSource;
+        if (currentSource is null && currentRazor is null && currentScript is null) return;
         SetBusy(true);
         var exclusions = excludedCalls;
         try
@@ -272,12 +277,14 @@ public partial class MainWindow : Window
             FlowTitle.Text = entry.Signature;
             FlowTitle.ToolTip = entry.Signature;
             NavigateSource(entry.Source with { Length = 0 });
-            SetState("フローを解析中", currentRazor is not null
-                ? "画面イベントと送信先から図を組み立てています…" : "Roslyn CFG から図を組み立てています…");
-            SetStatus(currentRazor is not null ? "選択した画面イベントを解析中" : "選択したメソッドを解析中");
+            var loading = currentRazor is not null ? "画面イベントと送信先を解析中"
+                : currentScript is not null ? "JavaScript の制御フローを解析中" : "Roslyn CFG から図を組み立てています…";
+            SetState("フローを解析中", loading);
+            SetStatus(loading);
             var result = await Task.Run(() => currentSource is not null
                 ? currentSource.Analyze(entry.Id, lifetime.Token, exclusions)
-                : currentRazor!.Analyze(entry.Id, lifetime.Token), lifetime.Token);
+                : currentRazor is not null ? currentRazor.Analyze(entry.Id, lifetime.Token)
+                : currentScript!.Analyze(entry.Id, lifetime.Token), lifetime.Token);
             if (closed) return;
             diagram = result;
             nodes = result.Nodes.ToDictionary(node => node.Id);
@@ -285,7 +292,7 @@ public partial class MainWindow : Window
             mermaid = result.Nodes.Count > 0 ? MermaidWriter.Write(result) : null;
             UpdateAnnotationKey();
             showList = previewUnavailable;
-            SetState("フロー図を取得できません", "診断を確認するか、別のメソッドを選んでください。");
+            SetState("フロー図を取得できません", "診断を確認するか、別の解析対象を選んでください。");
             RefreshDiagnostics();
             UpdateSurface();
             if (returnTo is not null && nodes.TryGetValue(returnTo, out var caller))
@@ -296,7 +303,8 @@ public partial class MainWindow : Window
             ShowAnnotations();
             SetStatus(result.IsPartial ? "部分解析 · 診断を確認してください。"
                 : $"{result.Nodes.Count:N0} ノード  /  {result.Edges.Count:N0} 遷移" +
-                    (currentRazor is null ? "  ·  単純な代入値は図から省略" : "  ·  画面イベントと送信先"), result.IsPartial);
+                    (currentSource is not null ? "  ·  単純な代入値は図から省略"
+                        : currentRazor is not null ? "  ·  画面イベントと送信先" : ""), result.IsPartial);
         }
         catch (Exception exception) when (!closed) { ShowFailure(exception, "フロー図を取得できません"); }
         catch (Exception) when (closed) { }
@@ -319,6 +327,7 @@ public partial class MainWindow : Window
         annotationHistory.Clear();
         source = null;
         razorSource = null;
+        javaScriptSource = null;
         currentFile = null;
         MethodsBox.ItemsSource = null;
         MethodCount.Text = "メソッド";
@@ -380,7 +389,7 @@ public partial class MainWindow : Window
     }
 
     private void UpdateMethodCount() => MethodCount.Text =
-        $"{(currentFile?.IsRazor == true ? "画面イベント" : "メソッド")}  ·  {MethodsBox.Items.Count:N0} / {CurrentEntries.Count:N0}";
+        $"{EntryTypeLabel}  ·  {MethodsBox.Items.Count:N0} / {CurrentEntries.Count:N0}";
 
     private void NodeChanged(object sender, SelectionChangedEventArgs args)
     {
@@ -408,24 +417,26 @@ public partial class MainWindow : Window
         SourceLocation.Text = $"L{position.Line}  /  {Editor.LineCount:N0} 行";
     }
 
-    private async void Follow(object sender, RoutedEventArgs args)
+    private async void Follow(object sender, RoutedEventArgs args) => await FollowSelectedAsync();
+
+    private async Task FollowSelectedAsync()
     {
         if (busy || selectedNode is not { TargetMethod: { } target } caller || method is not { } entry
             || currentFile is not { } file || FindTargetFile(caller) is not { } targetFile) return;
-        history.Push((file, entry.Id, caller.Id));
+        history.Push((file, entry.Id, caller.Id, razorSource, javaScriptSource));
         if (targetFile == file && target == entry.Id)
         {
             NavigateSource(entry.Source with { Length = 0 });
             SetBusy(false);
             return;
         }
-        await NavigateEntryAsync(targetFile, target);
+        await NavigateEntryAsync(targetFile, target, razorContext: razorSource, jsContext: javaScriptSource);
     }
 
     private async void Back(object? sender, RoutedEventArgs args)
     {
         if (busy || !history.TryPop(out var previous)) return;
-        await NavigateEntryAsync(previous.File, previous.Method, previous.Node);
+        await NavigateEntryAsync(previous.File, previous.Method, previous.Node, previous.Razor, previous.Script);
     }
 
     private async Task SelectMethodAsync(int id, string? returnTo = null)
@@ -481,7 +492,8 @@ public partial class MainWindow : Window
 
     private void ApplyTheme()
     {
-        Theme.Apply(this, Editor, dark, currentFile?.IsRazor == true ? "HTML" : "C#");
+        Theme.Apply(this, Editor, dark, currentFile?.IsRazor == true ? "HTML"
+            : currentFile?.IsJavaScript == true ? "JavaScript" : "C#");
         var transformers = Editor.TextArea.TextView.LineTransformers;
         transformers.Remove(editorAnnotations);
         editorAnnotations.Dark = dark;
@@ -650,6 +662,7 @@ public partial class MainWindow : Window
         if (project is not null) diagnostics.AddRange(project.Notices);
         if (source is not null) diagnostics.AddRange(source.Notices);
         if (razorSource is not null) diagnostics.AddRange(razorSource.Notices);
+        if (javaScriptSource is not null) diagnostics.AddRange(javaScriptSource.Notices);
         if (diagram is not null) diagnostics.AddRange(diagram.Notices);
         if (previewIssue is not null) diagnostics.Add(previewIssue);
         if (diagram is { } graph && UseLargeLayout(graph))
@@ -721,6 +734,11 @@ public partial class MainWindow : Window
         {
             args.Handled = true;
             OpenGoToLine();
+        }
+        else if (args.Key == Key.F12 && Keyboard.Modifiers == ModifierKeys.None && FollowButton.IsEnabled)
+        {
+            args.Handled = true;
+            Follow(this, args);
         }
         else if (args.SystemKey == Key.Left && Keyboard.Modifiers == ModifierKeys.Alt)
         {

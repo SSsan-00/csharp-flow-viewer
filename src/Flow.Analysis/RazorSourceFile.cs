@@ -19,20 +19,45 @@ public sealed class RazorSourceFile
     private readonly RazorMarkupReader markup;
     private readonly RazorJavaScript javaScript;
     private readonly bool hasBaseHref;
+    private readonly List<string> scriptNotices = [];
+    private readonly List<(SourceRange Source, string Path)> scriptLinks = [];
     private readonly Dictionary<int, RazorElement> requests = [];
     private readonly Dictionary<int, string> inlineLabels = [];
     private readonly List<string> bindingNotices = [];
     private IReadOnlyList<RazorHandler> handlers = [];
 
     public RazorSourceFile(string text, string filePath, IReadOnlyList<RazorImport>? imports = null,
-        CancellationToken token = default)
+        CancellationToken token = default) : this(text, filePath, imports, token, null) { }
+
+    internal RazorSourceFile(string text, string filePath, IReadOnlyList<RazorImport>? imports,
+        CancellationToken token, LocalJavaScriptFiles? local)
     {
         Text = text;
         this.filePath = filePath;
         document = new RazorMarkupDocument(text, filePath, imports, token);
         markup = new RazorMarkupReader(document, text, token);
         hasBaseHref = markup.Elements.Any(element => element.TagName == "base" && element.Attribute("href") is not null);
-        javaScript = new RazorJavaScript(text, filePath, markup.Scripts, token);
+        var scripts = markup.Scripts.Select(script => (script.Source.Offset, script)).ToList();
+        foreach (var reference in markup.References)
+        {
+            token.ThrowIfCancellationRequested();
+            var fragment = !reference.IsDynamic
+                && local?.ResolveTag(reference.Url, filePath, RouteTemplate, hasBaseHref) is { } path
+                    ? local.Read(path, reference.IsModule, token) : null;
+            if (fragment is null)
+            {
+                scriptNotices.Add($"解析は部分的 · L{reference.Source.Line}: 外部スクリプトを読み込めません: {reference.Url}");
+                continue;
+            }
+            // Show the file, but do not infer an unconditional page global for an optional script.
+            var isolated = reference.HasDeferredExecution || document.GuardsAt(reference.Source.Offset).Count > 0;
+            scripts.Add((reference.Source.Offset, fragment with { IsolatedClassic = isolated }));
+            scriptLinks.Add((reference.Source, fragment.Source.FilePath!));
+        }
+        javaScript = new RazorJavaScript(text, filePath,
+            scripts.OrderBy(item => item.Offset).Select(item => item.script),
+            (specifier, origin) => local?.ResolveImport(specifier, origin, filePath, RouteTemplate, hasBaseHref) is { } path
+                ? local.Read(path, module: true, token) : null, token);
         var entries = new List<MethodEntry>
         {
             new(-1, "ページ全体", "ページ全体", document.Range(0, text.Length))
@@ -75,7 +100,7 @@ public sealed class RazorSourceFile
                 requests.Add(element.Start, element);
             }
         }
-        entries.AddRange(javaScript.Entries);
+        entries.AddRange(javaScript.Entries.Where(entry => LocalJavaScriptFiles.PathComparer.Equals(entry.Source.FilePath, filePath)));
         Entries = entries;
     }
 
@@ -87,9 +112,12 @@ public sealed class RazorSourceFile
     public IReadOnlyList<string> Usings => document.Usings;
     public IReadOnlyList<MethodEntry> Entries { get; }
     public IReadOnlyList<string> Notices => document.Notices.Concat(markup.Notices).Concat(javaScript.Notices)
-        .Concat(bindingNotices).Concat(hasBaseHref
+        .Concat(bindingNotices).Concat(scriptNotices).Concat(hasBaseHref
             ? ["base hrefがあるため、相対URLのJavaScript送信・リンクを現在のPageModelへ自動接続しません。"] : [])
         .Distinct(StringComparer.Ordinal).ToArray();
+
+    internal JavaScriptSourceFile? OpenScript(string path) => javaScript.OpenScript(path,
+        (id, token) => ConnectJavaScriptRequests(id, javaScript.Analyze(id, token)));
 
     /// <summary>Bind only declarations belonging to the page's resolved @model type.</summary>
     public void BindHandlers(IReadOnlyList<RazorHandler> pageHandlers, IReadOnlyList<string>? notices = null)
@@ -154,10 +182,12 @@ public sealed class RazorSourceFile
 
             foreach (var callbackId in request.CallbackEntryIds.Distinct())
             {
-                var callback = Entries.FirstOrDefault(entry => entry.Id == callbackId);
+                var callback = javaScript.Entries.FirstOrDefault(entry => entry.Id == callbackId);
                 if (callback is null) continue;
                 var id = $"responseCandidate{callbackIndex++}";
-                nodes.Add(new FlowNode(id, NodeKind.Call, $"応答イベント候補: {callback.Signature}", callback.Source, callback.Id));
+                var target = javaScript.ResolveNavigationTarget(callback.Id);
+                nodes.Add(new FlowNode(id, NodeKind.Call, $"応答イベント候補: {callback.Signature}",
+                    callback.Source, target.Method, TargetFilePath: target.Path));
                 edges.Add(new FlowEdge(requestNode.Id, id, request.IsAsync ? "非同期の応答イベント候補" : "応答イベント候補"));
             }
         }
@@ -186,6 +216,15 @@ public sealed class RazorSourceFile
             edges.Add(new FlowEdge("page", renderStart, "サーバー側の描画フロー"));
         if (rendering.IsTruncated)
             notices.Add("サーバー側の描画フローは最大100件の制御構文を表示しています。");
+        for (var index = 0; index < scriptLinks.Count; index++)
+        {
+            var (source, path) = scriptLinks[index];
+            var scriptId = $"script{index}";
+            nodes.Add(new FlowNode(scriptId, NodeKind.Call, "外部 JavaScript: " + Path.GetFileName(path),
+                source, TargetMethod: 0, TargetFilePath: path));
+            var scope = rendering.ScopeAt(source.Offset);
+            edges.Add(new FlowEdge(scope ?? "page", scriptId, scope is null ? "外部スクリプト" : "この描画経路の外部スクリプト"));
+        }
         var eventCount = 0;
         foreach (var entry in Entries.Where(entry => requests.ContainsKey(entry.Id) || inlineLabels.ContainsKey(entry.Id)).Take(200))
         {
@@ -207,7 +246,8 @@ public sealed class RazorSourceFile
             var handler = ResolveJavaScriptHandler(request);
             nodes.Add(new FlowNode(requestId, NodeKind.Transfer, $"{request.Client} · {request.HttpMethod} {request.Url}",
                 request.Source, handler?.MethodId, TargetFilePath: handler?.FilePath));
-            edges.Add(new FlowEdge(rendering.ScopeAt(request.Source.Offset) ?? "page", requestId, "JavaScript 内のHTTP候補"));
+            var scope = IsPageSource(request.Source) ? rendering.ScopeAt(request.Source.Offset) : null;
+            edges.Add(new FlowEdge(scope ?? "page", requestId, "JavaScript 内のHTTP候補"));
         }
         if (eventCount == 0)
         {
@@ -221,10 +261,12 @@ public sealed class RazorSourceFile
 
         void AddEvent(string id, string label, SourceRange source, int? target)
         {
-            var scope = rendering.ScopeAt(source.Offset);
-            nodes.Add(new FlowNode(id, NodeKind.Call, label, source, target));
+            var onPage = IsPageSource(source);
+            var scope = onPage ? rendering.ScopeAt(source.Offset) : null;
+            var navigation = target is < 0 ? javaScript.ResolveNavigationTarget(target) : (target, null);
+            nodes.Add(new FlowNode(id, NodeKind.Call, label, source, navigation.Item1, TargetFilePath: navigation.Item2));
             var qualifier = scope is not null ? "この描画経路のイベント候補"
-                : document.GuardsAt(source.Offset).Count > 0 ? "条件付きイベント候補" : "イベント候補";
+                : onPage && document.GuardsAt(source.Offset).Count > 0 ? "条件付きイベント候補" : "イベント候補";
             edges.Add(new FlowEdge(scope ?? "page", id, qualifier));
             if (target is { } targetId && requests.TryGetValue(targetId, out var element))
             {
@@ -243,6 +285,9 @@ public sealed class RazorSourceFile
             }
         }
     }
+
+    private bool IsPageSource(SourceRange source) => source.FilePath is null ||
+        LocalJavaScriptFiles.PathComparer.Equals(source.FilePath, filePath);
 
     private FlowDiagram BuildRequestFlow(RazorElement element, CancellationToken token)
     {

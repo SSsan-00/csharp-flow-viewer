@@ -75,6 +75,13 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                         source: slot);
                     Connect(boundary, next, "続行する場合");
                     return boundary;
+                case ExportNamedDeclaration { Declaration: { } declaration }:
+                    return Statement(declaration, next, breakTarget, continueTarget);
+                case ExportDefaultDeclaration { Declaration: { } declaration }:
+                    return Statement(declaration, next, breakTarget, continueTarget);
+                case ExportNamedDeclaration:
+                case ExportAllDeclaration:
+                case ImportDeclaration:
                 case FunctionDeclaration:
                 case EmptyStatement:
                     return next;
@@ -96,8 +103,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                         Statement(conditional.Consequent, next, breakTarget, continueTarget),
                         conditional.Alternate is { } alternate ? Statement(alternate, next, breakTarget, continueTarget) : next);
                 case ReturnStatement returning:
-                    var returnNode = Add(NodeKind.Transfer, returning.Argument is BooleanLiteral { Value: false }
-                        ? "return false（登録方法により既定動作を中止）" : Text(returning), returning);
+                    var returnNode = Add(NodeKind.Transfer, Text(returning), returning);
                     Connect(returnNode, end);
                     return returning.Argument is { } value ? Expression(value, returnNode) : returnNode;
                 case ThrowStatement throwing:
@@ -308,8 +314,9 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
         token.ThrowIfCancellationRequested();
         if (!ignoreLimit && nodes.Count >= 1500) throw new AnalysisLimitException();
         var id = "js" + nextId++;
+        var navigation = owner.ResolveNavigationTarget(target);
         nodes.Add(new FlowNode(id, kind, label, source ?? (node is null ? entry.Entry.Source : owner.Range(entry.Unit, node)),
-            TargetMethod: target, TargetFilePath: target is null ? null : owner.TargetPath));
+            TargetMethod: navigation.Method, TargetFilePath: navigation.Path));
         return id;
     }
 

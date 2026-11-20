@@ -19,10 +19,13 @@ public sealed class SourceFile
     private readonly CSharpSyntaxNode root;
     private readonly Dictionary<int, CSharpSyntaxNode> declarations = new();
     private readonly HashSet<int> targets = [];
+    private readonly IReadOnlySet<string>? navigableCSharpPaths;
 
-    public SourceFile(SemanticModel model, IReadOnlyList<string>? notices = null, CancellationToken token = default)
+    public SourceFile(SemanticModel model, IReadOnlyList<string>? notices = null, CancellationToken token = default,
+        IReadOnlySet<string>? navigableCSharpPaths = null)
     {
         this.model = model;
+        this.navigableCSharpPaths = navigableCSharpPaths;
         text = model.SyntaxTree.GetText(token);
         root = (CSharpSyntaxNode)model.SyntaxTree.GetRoot(token);
         Notices = notices ?? [];
@@ -41,9 +44,7 @@ public sealed class SourceFile
                 continue;
 
             declarations.Add(node.SpanStart, node);
-            if (node is BaseMethodDeclarationSyntax { Body: not null } or BaseMethodDeclarationSyntax { ExpressionBody: not null }
-                or AccessorDeclarationSyntax { Body: not null } or AccessorDeclarationSyntax { ExpressionBody: not null }
-                or LocalFunctionStatementSyntax { Body: not null } or LocalFunctionStatementSyntax { ExpressionBody: not null })
+            if (HasBody(node))
                 targets.Add(node.SpanStart);
             var signature = symbol.ToDisplayString(SignatureFormat);
             methods.Add(new MethodEntry(node.SpanStart, symbol.Name, signature, Range(node.Span)));
@@ -73,7 +74,7 @@ public sealed class SourceFile
             var graph = CreateGraph(instrument.Model, instrument.Declaration, token);
             if (graph is null)
                 return new FlowDiagram([], [], ["Roslyn CFG を取得できません。抽象メソッド、自動プロパティ、宣言のみのメソッド、または未対応の本体を確認してください。"], true);
-            return new DiagramProjector(graph, instrument, Range, targets, token, excludedCalls)
+            return new DiagramProjector(graph, instrument, Range, targets, token, excludedCalls, navigableCSharpPaths)
                 .Build(Range(node.Span), Notices.Any(notice => notice.StartsWith("解析は部分的", StringComparison.Ordinal)));
         }
         catch (InsufficientExecutionStackException)
@@ -81,6 +82,11 @@ public sealed class SourceFile
             return new FlowDiagram([], [], ["式や制御領域の入れ子が深いため、解析できませんでした。"], true);
         }
     }
+
+    internal static bool HasBody(SyntaxNode declaration) => declaration is
+        BaseMethodDeclarationSyntax { Body: not null } or BaseMethodDeclarationSyntax { ExpressionBody: not null }
+        or AccessorDeclarationSyntax { Body: not null } or AccessorDeclarationSyntax { ExpressionBody: not null }
+        or LocalFunctionStatementSyntax { Body: not null } or LocalFunctionStatementSyntax { ExpressionBody: not null };
 
     private SourceRange Range(TextSpan span) => new(span.Start, span.Length,
         text.Lines.GetLineFromPosition(span.Start).LineNumber + 1);

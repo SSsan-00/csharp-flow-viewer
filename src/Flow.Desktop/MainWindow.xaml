@@ -78,7 +78,10 @@
                   <TextBlock.Style>
                     <Style TargetType="TextBlock">
                       <Setter Property="Text" Value="C#"/>
-                      <Style.Triggers><DataTrigger Binding="{Binding IsRazor}" Value="True"><Setter Property="Text" Value="RZ"/></DataTrigger></Style.Triggers>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsRazor}" Value="True"><Setter Property="Text" Value="RZ"/></DataTrigger>
+                        <DataTrigger Binding="{Binding IsJavaScript}" Value="True"><Setter Property="Text" Value="JS"/></DataTrigger>
+                      </Style.Triggers>
                     </Style>
                   </TextBlock.Style>
                 </TextBlock>
@@ -179,7 +182,7 @@
                   </ContextMenu>
                 </Button.ContextMenu>
               </Button>
-              <Button x:Name="FollowButton" DockPanel.Dock="Right" Click="Follow" Content="呼び出し先へ ›" IsEnabled="False" Margin="8,0,0,0"/>
+              <Button x:Name="FollowButton" DockPanel.Dock="Right" Click="Follow" Content="呼び出し先へ ›" ToolTip="選択した呼び出しの定義へ移動 (F12)" IsEnabled="False" Margin="8,0,0,0"/>
               <TextBlock x:Name="NodeLabel" Text="ノードを選ぶとソース行へ移動" Style="{StaticResource Muted}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             </DockPanel>
           </Border>
