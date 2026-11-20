@@ -85,6 +85,11 @@ jobs:
             function Select-Entry([string]$box, [string]$pattern) {
               [void](Wait-Until { $list = Find-Id $win $box; if ($list -and $list.Current.IsEnabled) { Select-ByText $list $pattern } } "$box $pattern")
             }
+            function Select-File([string]$name, [string]$pattern) {
+              $filter = Wait-Until { $f = Find-Id $win 'FileFilter'; if ($f -and $f.Current.IsEnabled) { $f } } 'file filter'
+              $filter.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($name)
+              Select-Entry 'FilesBox' $pattern
+            }
             function Invoke-Button([string]$name) {
               $b = Wait-Until { $button = Find-Id $win $name; if ($button -and $button.Current.IsEnabled) { $button } } $name
               $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
@@ -101,10 +106,10 @@ jobs:
                 $bmp.Save((Join-Path $dest $name),[System.Drawing.Imaging.ImageFormat]::Png)
               } finally { $g.Dispose(); $bmp.Dispose() }
             }
-            Select-Entry 'FilesBox' 'nav-target[.]js'
+            Select-File 'nav-target.js' 'nav-target[.]js'
             Wait-Title 'nav-target[.]js'
             Select-Entry 'MethodsBox' 'externalTarget'
-            Select-Entry 'FilesBox' 'NavigationDemo[.]cshtml'
+            Select-File 'NavigationDemo.cshtml' 'NavigationDemo[.]cshtml'
             Wait-Title 'NavigationDemo[.]cshtml'
             Select-Entry 'MethodsBox' 'onchange'
             Invoke-Button 'ListButton'
@@ -116,7 +121,7 @@ jobs:
             Invoke-Button 'BackButton'
             Wait-Title 'NavigationDemo[.]cshtml'
             [void](Wait-Until { $t = Find-Id $win 'NodeLabel'; if ($t -and $t.Current.Name -match 'externalTarget') { $true } } 'return to original JavaScript call node')
-            Select-Entry 'FilesBox' 'NavigationCaller[.]cs'
+            Select-File 'NavigationCaller.cs' 'NavigationCaller[.]cs'
             Wait-Title 'NavigationCaller[.]cs'
             Select-Entry 'MethodsBox' 'InvokeCross'
             Invoke-Button 'ListButton'
@@ -127,10 +132,23 @@ jobs:
             Capture 'csharp-jump.png'
             Invoke-Button 'BackButton'
             Wait-Title 'NavigationCaller[.]cs'
+          } catch {
+            try {
+              if ($win) {
+                $list = Find-Id $win 'FilesBox'
+                if ($list) {
+                  $items = $list.FindAll($c::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
+                  foreach ($item in $items) { Write-Host "FilesBox [$($item.Current.ControlType.ProgrammaticName)] $($item.Current.Name)" }
+                }
+                Capture 'diagnostic.png'
+              }
+            } catch { Write-Host "Could not capture diagnostic: $_" }
+            throw
           } finally { if (!$p.HasExited) { Stop-Process -Id $p.Id -ErrorAction SilentlyContinue } }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: cross-file-navigation-screens
           path: artifacts/screenshot/*.png
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
