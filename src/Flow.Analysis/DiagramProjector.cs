@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text;
 using Flow.Model;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -16,7 +17,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private readonly record struct State(int Block, int Context);
     private sealed record Continuation(ControlFlowRegion Region, string Resume, int Parent);
     private readonly record struct Visible(NodeKind Kind, string Label, SourceRange? Source, int? Target = null, bool IsCaseTest = false,
-        string? TargetFilePath = null);
+        string? TargetFilePath = null, bool RequiresRuntimeDispatch = false);
     private sealed record RegionEntry(ControlFlowRegion Region, ControlFlowRegion? EnclosingFinally);
 
     private readonly Dictionary<State, string> states = new();
@@ -568,12 +569,38 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
             }
         }
 
-        var dispatched = method.MethodKind == MethodKind.DelegateInvoke || method.IsStatic && method.IsAbstract ||
-            virtualCall && !method.IsSealed && !method.ContainingType.IsSealed &&
-            !(receiver?.IsSealed == true && SymbolEqualityComparer.Default.Equals(receiver, method.ContainingType));
+        var dispatched = method.MethodKind == MethodKind.DelegateInvoke || method.IsStatic && method.IsAbstract;
+        if (!dispatched && virtualCall && !method.IsSealed && !method.ContainingType.IsSealed)
+        {
+            var implementation = ResolveSealedReceiver(method, receiver);
+            dispatched = implementation is null;
+            if (implementation is not null) definition = implementation;
+        }
         var target = dispatched ? null : ResolveTarget(definition);
         return new Visible(NodeKind.Call, label + (dispatched ? " · 実行時に決定" : ""), OperationSource(operation),
-            target?.Offset, TargetFilePath: target?.Path);
+            target?.Offset, TargetFilePath: target?.Path, RequiresRuntimeDispatch: dispatched);
+    }
+
+    private static IMethodSymbol? ResolveSealedReceiver(IMethodSymbol method, ITypeSymbol? receiver)
+    {
+        if (receiver is not INamedTypeSymbol { TypeKind: TypeKind.Class, IsSealed: true } exactType
+            || method.ContainingType.TypeKind != TypeKind.Class)
+            return null;
+
+        var slot = method.OriginalDefinition;
+        for (INamedTypeSymbol? type = exactType; type is not null; type = type.BaseType)
+        {
+            if (SymbolEqualityComparer.Default.Equals(type, method.ContainingType))
+                return method.IsAbstract ? null : method;
+
+            foreach (var candidate in type.GetMembers(method.Name).OfType<IMethodSymbol>())
+            {
+                for (var overridden = candidate.OverriddenMethod; overridden is not null; overridden = overridden.OverriddenMethod)
+                    if (SymbolEqualityComparer.Default.Equals(overridden.OriginalDefinition, slot))
+                        return candidate.IsAbstract ? null : candidate;
+            }
+        }
+        return null;
     }
 
     private (int Offset, string? Path)? ResolveTarget(IMethodSymbol method)
@@ -635,8 +662,25 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
 
     private static string ShortLabel(SyntaxNode syntax)
     {
-        var label = string.Join(" ", syntax.ToString().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        return label.Length <= 100 ? label : label[..99] + "…";
+        const int maxLength = 100;
+        var label = new StringBuilder(maxLength + 1);
+        var priorEnd = -1;
+        foreach (var token in syntax.DescendantTokens())
+        {
+            if (token.IsMissing) continue;
+            if (priorEnd >= 0 && priorEnd < token.SpanStart) label.Append(' ');
+            priorEnd = token.Span.End;
+            foreach (var ch in token.Text)
+            {
+                // Display control characters inside source tokens visibly, without
+                // folding them into ordinary spaces or omitting consecutive spaces.
+                label.Append(ch switch { '\r' => '␍', '\n' => '␊', '\t' => '␉', _ => ch });
+                if (label.Length <= maxLength) continue;
+                label.Length = char.IsHighSurrogate(label[maxLength - 2]) ? maxLength - 2 : maxLength - 1;
+                return label.Append('…').ToString();
+            }
+        }
+        return label.ToString();
     }
 
     private SourceRange? TransferSource(IOperation? operation, params SyntaxKind[] kinds) =>
@@ -650,7 +694,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private string Add(Visible visible, bool reachable)
     {
         var id = "n" + nodes.Count;
-        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest, visible.TargetFilePath));
+        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest, visible.TargetFilePath, visible.RequiresRuntimeDispatch));
         return id;
     }
 

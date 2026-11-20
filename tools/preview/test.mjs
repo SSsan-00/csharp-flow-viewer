@@ -144,6 +144,17 @@ try {
   }), { text: source, viewport: savedViewport });
   await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 5));
   assert.equal(await graph.evaluate(node => node.style.transform), savedTransform);
+  const spaces = 'value == "A  B"';
+  const whitespaceSource = 'flowchart TD\n  n0{"value #61;#61; #34;A #160;B#34;"}:::flow_condition';
+  for (const version of [6, 7]) {
+    await page.evaluate(({ version, text, label }) => window.flowPreview({
+      type: "render", theme: "dark", version, text, nodes: [{ id: "n0", kind: "condition", label, reachable: true }], edges: []
+    }), { version, text: version === 6 ? whitespaceSource : null, label: spaces });
+    await page.waitForFunction(version => window.previewMessages.some(m => m.type === "rendered" && m.version === version), version);
+    const label = graph.locator('[data-flow-id="n0"] text');
+    assert.equal((await label.textContent()).replaceAll("\u00a0", " "), spaces);
+    assert.equal(await label.evaluate(text => getComputedStyle(text).whiteSpace), "pre");
+  }
   console.log("Preview passed: Mermaid labels, zoom preservation, annotations, and 8,002-node SVG with a back edge.");
 } finally {
   await browser?.close();

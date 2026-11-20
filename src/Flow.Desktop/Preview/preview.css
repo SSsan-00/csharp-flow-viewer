@@ -29,6 +29,7 @@ body[data-theme="light"] { --link: #43516b; --node-fill: #dceeea; --condition-fi
 .large-diagram .flow_condition > polygon { fill: var(--condition-fill); stroke: var(--accent); }
 .large-diagram .flow_unreachable > :is(rect, polygon) { stroke-dasharray: 4 3; }
 .large-diagram text { fill: currentColor; }
+#graph .node text { white-space: pre; }
 .large-diagram .large-link { fill: none; stroke: var(--link); stroke-width: 1.4px; }
 .large-diagram .unreachable-link { stroke-dasharray: 5 4; }
 .large-diagram .large-arrow { fill: var(--link); }

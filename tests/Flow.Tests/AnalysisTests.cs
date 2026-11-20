@@ -51,6 +51,79 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    public void SealedReceiverLinksToInheritedVirtualImplementationAndBaseCallsRemainDirect()
+    {
+        var file = File("""
+            class Base
+            {
+                public virtual void Work() {}
+            }
+            class Middle : Base
+            {
+                public override void Work() {}
+            }
+            sealed class Child : Base {}
+            sealed class Grandchild : Middle {}
+            sealed class Own : Base
+            {
+                public override void Work() {}
+                public void RunBase() => base.Work();
+            }
+            class Demo
+            {
+                void Run(Child child, Grandchild grandchild, Own own, Base unknown)
+                {
+                    child.Work();
+                    grandchild.Work();
+                    own.Work();
+                    unknown.Work();
+                }
+            }
+            """);
+        var diagram = Diagram(file);
+        foreach (var type in new[] { "Base", "Middle", "Own" })
+        {
+            var target = Assert.ContainsSingle(file.Methods.Where(entry => entry.Signature == type + ".Work()"));
+            Assert.AreEqual(target.Id, Single(diagram, type + ".Work()").TargetMethod);
+        }
+        Assert.IsNull(Single(diagram, "Base.Work() · 実行時に決定").TargetMethod);
+        Assert.AreEqual(Single(diagram, "Base.Work()").TargetMethod,
+            Single(Diagram(file, "RunBase"), "Base.Work()").TargetMethod);
+    }
+
+    [TestMethod]
+    public void ConditionAndSwitchLabelsPreserveMeaningfulLiteralWhitespace()
+    {
+        var text = """"
+            class Demo
+            {
+                bool Run(string value, string name)
+                {
+                    if (value   == "A  B") return true;
+                    if (value == @"A  B") return true;
+                    if (value == """A  B""") return true;
+                    if (value == $"A  {name}") return true;
+                    if (value == @"A<TAB>B
+                        C") return true;
+                    return false;
+                }
+                int Choose(string value) => value switch { "A  B" => 1, "A B" => 2, _ => 3 };
+            }
+            """".Replace("<TAB>", "\t", StringComparison.Ordinal);
+        var file = File(text);
+        var diagram = Diagram(file);
+        foreach (var label in new[] { "value == \"A  B\"", "value == @\"A  B\"", "value == \"\"\"A  B\"\"\"", "value == $\"A  {name}\"" })
+            Assert.AreEqual(NodeKind.Condition, Single(diagram, label).Kind);
+        Assert.Contains(node => node.Kind == NodeKind.Condition && node.Label.Contains("A␉B", StringComparison.Ordinal)
+            && node.Label.Contains('␊'), diagram.Nodes);
+        var choose = Diagram(file, "Choose");
+        Assert.IsNotNull(Single(choose, "case \"A  B\" に一致"));
+        Assert.IsNotNull(Single(choose, "case \"A B\" に一致"));
+        var mermaid = MermaidWriter.Write(choose, includeSourceLines: false);
+        StringAssert.Contains(mermaid, "A #160;B");
+    }
+
+    [TestMethod]
     public void CrossFileCallsUseOriginalOffsetsAndOnlyNavigateToProjectFilesWithBodies()
     {
         var directory = Path.GetFullPath("FictionalProject");

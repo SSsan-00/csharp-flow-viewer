@@ -94,10 +94,10 @@ public partial class MainWindow
             JumpToPreviewNode(node, navigateSource: false);
     }
 
-    private void JumpToPreviewNode(FlowNode node, bool navigateSource)
+    private void JumpToPreviewNode(FlowNode node, bool navigateSource, bool keepList = false)
     {
         SelectNode(node, navigateSource);
-        if (previewUnavailable || !ready)
+        if (previewUnavailable || !ready || (keepList && showList))
         {
             selectingFromSource = true;
             try
@@ -139,6 +139,17 @@ public partial class MainWindow
             string.Equals(file.Path, node.TargetFilePath, StringComparison.OrdinalIgnoreCase));
 
     private bool CanFollow(FlowNode node) => node.TargetMethod is not null && FindTargetFile(node) is not null;
+
+    private string NavigationHint(FlowNode node)
+    {
+        if (node.TargetMethod is not null) return "移動先のファイルが対象ファイル一覧にありません。";
+        if (node.Kind == NodeKind.Condition) return "条件ノードです。移動するには対応する呼び出しノードを選んでください。";
+        if (node.RequiresRuntimeDispatch)
+            return "実行時に決まるため、呼び出し先を一意に特定できません。";
+        return node.Kind == NodeKind.Call || node.Kind == NodeKind.Transfer
+            ? "解析対象のソースで対応する定義を一意に特定できません。"
+            : "このノードには呼び出し先がありません。";
+    }
 
     // Navigation keeps the originating Razor event in the same history as C# calls.
     private async Task NavigateEntryAsync(ProjectFile file, int entryId, string? returnTo = null,

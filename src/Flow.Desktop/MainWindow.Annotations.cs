@@ -14,6 +14,9 @@ public partial class MainWindow
     private sealed record AnnotationFile(int Version, string Diagram, NodeAnnotations Annotations);
     private readonly Dictionary<string, NodeAnnotations> annotationHistory = new();
     private readonly SourceAnnotationColorizer editorAnnotations = new();
+    private (FlowDiagram Graph, HashSet<string> Roots, Task<HashSet<string>> Work)? grayCalculation;
+    private Task<HashSet<string>>? appliedGray;
+    private HashSet<string>? appliedMarks;
 
     private string? AnnotationKey { get; set; }
 
@@ -82,16 +85,36 @@ public partial class MainWindow
         SetStatus($"この図の{label}をクリアしました。");
     }
 
-    private void ShowAnnotations()
+    private async void ShowAnnotations()
     {
         if (diagram is not { } graph || AnnotationKey is not { } key) return;
         var annotations = annotationHistory.GetValueOrDefault(key) ?? new NodeAnnotations();
-        var gray = annotations.GrayNodes(graph);
-        editorAnnotations.SetRanges(Editor.Document,
-            graph.Nodes.Where(node => node.Source is { } range && IsCurrentSource(range)), annotations.Marked, gray);
-        Editor.TextArea.TextView.Redraw();
+        var marked = new HashSet<string>(annotations.Marked);
+        if (grayCalculation is not { } calculation || !ReferenceEquals(calculation.Graph, graph)
+            || !calculation.Roots.SetEquals(annotations.GrayRoots))
+        {
+            var snapshot = new NodeAnnotations { GrayRoots = new HashSet<string>(annotations.GrayRoots) };
+            var work = snapshot.GrayRoots.Count == 0 ? Task.FromResult(snapshot.GrayRoots)
+                : Task.Run(() => snapshot.GrayNodes(graph), lifetime.Token);
+            grayCalculation = calculation = (graph, snapshot.GrayRoots, work);
+        }
+
+        HashSet<string> gray;
+        try { gray = await calculation.Work; }
+        catch (OperationCanceledException) { return; }
+        if (closed || !ReferenceEquals(diagram, graph) || grayCalculation?.Work != calculation.Work
+            || !(annotationHistory.GetValueOrDefault(key)?.Marked ?? []).SetEquals(marked)) return;
+
+        if (!ReferenceEquals(appliedGray, calculation.Work) || appliedMarks?.SetEquals(marked) != true)
+        {
+            editorAnnotations.SetRanges(Editor.Document,
+                graph.Nodes.Where(node => node.Source is { } range && IsCurrentSource(range)), marked, gray);
+            Editor.TextArea.TextView.Redraw();
+            appliedGray = calculation.Work;
+            appliedMarks = marked;
+        }
         if (rendered)
-            preview.Send(new { type = "annotations", marked = annotations.Marked, gray });
+            preview.Send(new { type = "annotations", marked, gray });
     }
 
     private void ExportAnnotations(object sender, RoutedEventArgs args)
