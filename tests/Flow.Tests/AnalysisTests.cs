@@ -999,7 +999,17 @@ public sealed class AnalysisTests(TestContext testContext)
         Assert.DoesNotContain("<script>", fixture);
         Assert.AreEqual(fixture, MermaidWriter.Write(Diagram(file)));
         if (Environment.GetEnvironmentVariable("CFV_MERMAID_FIXTURE") is { } export)
+        {
             System.IO.File.WriteAllText(export, fixture);
+            var payload = new
+            {
+                nodes = result.Nodes.Select(node => new { id = node.Id, label = node.Label,
+                    kind = node.Kind.ToString().ToLowerInvariant(), reachable = node.IsReachable }),
+                edges = result.Edges.Select(edge => new { from = edge.From, to = edge.To,
+                    label = edge.Label, reachable = edge.IsReachable })
+            };
+            System.IO.File.WriteAllText(export + ".json", System.Text.Json.JsonSerializer.Serialize(payload));
+        }
     }
 
     [TestMethod]

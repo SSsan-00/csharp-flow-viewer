@@ -6,6 +6,7 @@ import { chromium } from "playwright-core";
 const fixture = process.env.CFV_MERMAID_FIXTURE;
 assert.ok(fixture, "Set CFV_MERMAID_FIXTURE and run the .NET tests before running this test.");
 const source = await readFile(fixture, "utf8");
+const payload = JSON.parse(await readFile(fixture + ".json", "utf8"));
 const assets = new Map();
 for (const [file, type] of [["index.html", "text/html"], ["preview.css", "text/css"],
   ["preview.js", "text/javascript"], ["large-diagram.js", "text/javascript"], ["mermaid.bundle.js", "text/javascript"]]) {
@@ -32,7 +33,9 @@ try {
   await page.route("**/*", route => route.request().url().startsWith(origin + "/") ? route.continue() : route.abort());
   await page.goto(origin + "/index.html");
   assert.ok(await page.evaluate(text => window.flowMermaid.parse(text), source));
-  await page.evaluate(text => window.flowPreview({ type: "render", theme: "dark", version: 1, text }), source);
+  await page.evaluate(({ text, nodes, edges }) => window.flowPreview({
+    type: "render", theme: "dark", version: 1, text, nodes, edges
+  }), { text: source, ...payload });
   await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered"));
   const condition = page.locator("#graph .node.flow_condition");
   assert.match(await condition.textContent(), /保存|値/);
