@@ -1,0 +1,28 @@
+name: Viewer label browser verification
+on:
+  push:
+    branches: [codex/viewer-label-render-test]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+      - name: Verify Mermaid and reduced layout in Chromium
+        shell: pwsh
+        run: |
+          $env:CFV_MERMAID_FIXTURE = Join-Path $env:RUNNER_TEMP 'cfv-mermaid.mmd'
+          dotnet test tests/Flow.Tests/Flow.Tests.csproj --configuration Release --filter 'FullyQualifiedName~Mermaid'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix tools/preview ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\tools\preview\node_modules\.bin\playwright-core.cmd install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix tools/preview test
