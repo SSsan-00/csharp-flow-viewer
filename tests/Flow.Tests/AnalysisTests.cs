@@ -698,6 +698,128 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    [DataRow("", "IEnumerable<int>", "MoveNext()", "Dispose")]
+    [DataRow("await ", "IAsyncEnumerable<int>", "MoveNextAsync()", "DisposeAsync")]
+    public void ForeachHidesOnlyGeneratedCleanup(string awaitPrefix, string collection, string moveNext, string dispose)
+    {
+        var result = Diagram(File($$"""
+            using System;
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+            class Demo
+            {
+                async Task Run({{collection}} values, bool skip, bool stop, bool quit, IDisposable explicitResource)
+                {
+                    try
+                    {
+                        {{awaitPrefix}}foreach (var value in values)
+                        {
+                            if (skip) continue;
+                            if (stop) break;
+                            if (quit) return;
+                            Work(value);
+                        }
+                        After();
+                    }
+                    finally { explicitResource.Dispose(); }
+                }
+                void Work(int value) { }
+                void After() { }
+            }
+            """));
+
+        StringAssert.Contains(Next(result, Single(result, "continue")).Label, moveNext);
+        Assert.AreEqual("Demo.After()", Next(result, Single(result, "break")).Label);
+        var returnPath = PathFrom(result, Single(result, "return")).ToArray();
+        CollectionAssert.AreEqual(new[] { "return", "finally", "IDisposable.Dispose() · 実行時に決定", "End" },
+            returnPath.Select(node => node.Label).ToArray());
+        var explicitSource = returnPath[2].Source;
+        Assert.IsNotNull(explicitSource);
+        Assert.Contains(node => node.Label == "Demo.Work()", result.Nodes);
+        Assert.DoesNotContain(node => node.Label == "null" ||
+            (node.Label.Contains(dispose + "()", StringComparison.Ordinal) && node.Source != explicitSource), result.Nodes);
+        Assert.DoesNotContain(node => node.Label.StartsWith("finally", StringComparison.Ordinal)
+            && node.Source?.Line != explicitSource.Line, result.Nodes);
+    }
+
+    [TestMethod]
+    [DataRow("object", "Monitor.Enter()", "Monitor.Exit()")]
+    [DataRow("Lock", "Lock.EnterScope()", "Scope.Dispose()")]
+    public void LockHidesGeneratedReleaseButKeepsBodyAndExplicitFinally(string gateType, string acquire, string release)
+    {
+        var result = Diagram(File($$"""
+            using System.Threading;
+            class Demo
+            {
+                void Run({{gateType}} gate, object other, bool quit)
+                {
+                    lock (gate)
+                    {
+                        try
+                        {
+                            if (quit) return;
+                            Work();
+                        }
+                        finally { Monitor.Exit(other); }
+                    }
+                    After();
+                }
+                void Work() { }
+                void After() { }
+            }
+            """));
+
+        Assert.Contains(node => node.Label == acquire, result.Nodes);
+        var returnPath = PathFrom(result, Single(result, "return")).ToArray();
+        CollectionAssert.AreEqual(new[] { "return", "finally", "Monitor.Exit()", "End" },
+            returnPath.Select(node => node.Label).ToArray());
+        var explicitSource = returnPath[2].Source;
+        Assert.IsNotNull(explicitSource);
+        Assert.DoesNotContain(node => node.Label == release && node.Source != explicitSource, result.Nodes);
+        CollectionAssert.AreEqual(new[] { "Demo.Work()", "finally", "Monitor.Exit()", "Demo.After()", "End" },
+            PathFrom(result, Single(result, "Demo.Work()")).Select(node => node.Label).ToArray());
+        Assert.DoesNotContain(node => node.Label.StartsWith("finally", StringComparison.Ordinal)
+            && node.Source?.Line != explicitSource.Line, result.Nodes);
+    }
+
+    [TestMethod]
+    public void GeneratedCleanupInsideExplicitFinallyDoesNotRemoveTheFinally()
+    {
+        var result = Diagram(File("""
+            using System;
+            using System.Collections.Generic;
+            class Demo
+            {
+                void Run(IEnumerable<int> values, object gate)
+                {
+                    try { throw new InvalidOperationException(); }
+                    finally
+                    {
+                        Before();
+                        foreach (var value in values)
+                            lock (gate) { Work(value); }
+                        After();
+                    }
+                }
+                void Before() { }
+                void Work(int value) { }
+                void After() { }
+            }
+            """));
+
+        var handler = Next(result, Single(result, "throw"));
+        Assert.AreEqual("finally", handler.Label);
+        var before = Next(result, handler);
+        Assert.AreEqual("Demo.Before()", before.Label);
+        var loopTest = PathFrom(result, before).Last();
+        Assert.AreEqual(NodeKind.Condition, loopTest.Kind);
+        Assert.AreEqual("Demo.After()", Next(result, loopTest, "False").Label);
+        Assert.Contains(node => node.Label == "Demo.Work()", result.Nodes);
+        Assert.DoesNotContain(node => node.Label.Contains("Dispose()", StringComparison.Ordinal)
+            || node.Label == "Monitor.Exit()" || node.Label == "null", result.Nodes);
+    }
+
+    [TestMethod]
     public void FinallyRunsBeforeDistinctReturnAndNormalContinuations()
     {
         var result = Diagram(File("""
