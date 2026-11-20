@@ -1,0 +1,143 @@
+name: Bottom navigation Windows verification
+on:
+  push:
+    branches: [codex/viewer-bottom-nav-smoke]
+permissions:
+  contents: read
+jobs:
+  trial:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+      - name: Publish the release EXE
+        shell: pwsh
+        run: |
+          'class NavigationIssueDemo { bool Run(int n) { if (n > 0) return Run(n - 1); return false; } }' | Set-Content 'samples/OrderProcessing/NavigationIssueDemo.cs' -Encoding utf8
+          dotnet restore samples/OrderProcessing/OrderProcessing.csproj
+          if ($LASTEXITCODE -ne 0) { throw 'Sample restore failed' }
+          dotnet publish src/Flow.Desktop -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o artifacts/win-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
+          Get-Item artifacts/win-x64/csharp-flow-viewer.exe | Select-Object Name,Length
+      - name: Open the sample and capture the published application
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing,UIAutomationClient,UIAutomationTypes
+          $ae = [System.Windows.Automation.AutomationElement]
+          $c = [System.Windows.Automation.TreeScope]
+          $dest = Join-Path $PWD 'artifacts/screenshot'
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          $p = Start-Process (Resolve-Path 'artifacts/win-x64/csharp-flow-viewer.exe') -PassThru
+          Write-Host "Runner interactive=$([Environment]::UserInteractive), runner session=$((Get-Process -Id $PID).SessionId), app session=$($p.SessionId)"
+          function Wait-Until([scriptblock]$f, [string]$why) {
+            for ($i=0; $i -lt 60; $i++) {
+              $result = & $f
+              if ($result) { return $result }
+              Start-Sleep -Milliseconds 500
+            }
+            throw "Timed out: $why"
+          }
+          function Find-Id($root, [string]$id) {
+            $condition = [System.Windows.Automation.PropertyCondition]::new($ae::AutomationIdProperty,$id)
+            return $root.FindFirst($c::Descendants,$condition)
+          }
+          function Select-ByText($root, [string]$pattern) {
+            $items = $root.FindAll($c::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
+            foreach ($item in $items) {
+              if ($item.Current.ControlType -eq [System.Windows.Automation.ControlType]::ListItem -and $item.Current.Name -match $pattern) {
+                $item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+                return $true
+              }
+            }
+            return $false
+          }
+          try {
+            [void](Wait-Until { $p.Refresh(); if (!$p.HasExited -and $p.MainWindowHandle -ne 0) { $true } } 'EXE window')
+            $win = $ae::FromHandle($p.MainWindowHandle)
+            $wp = $win.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
+            if ($wp.Current.CanMaximize) { $wp.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Maximized) }
+            $ws = New-Object -ComObject WScript.Shell
+            if (!$ws.AppActivate($p.Id)) { throw 'Could not activate the WPF app' }
+            $button = Wait-Until { Find-Id $win 'OpenButton' } 'Open project button'
+            $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            Start-Sleep -Seconds 2
+            $file = (Resolve-Path 'samples/OrderProcessing/OrderProcessing.csproj').Path
+            [System.Windows.Forms.SendKeys]::SendWait($file)
+            [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+            function Wait-Title([string]$pattern) {
+              [void](Wait-Until { $title = Find-Id $win 'SourceTitle'; if ($title -and $title.Current.Name -match $pattern) { $true } } "source title $pattern")
+              Write-Host "Verified source title $pattern"
+            }
+            function Select-Entry([string]$box, [string]$pattern) {
+              [void](Wait-Until { $list = Find-Id $win $box; if ($list -and $list.Current.IsEnabled) { Select-ByText $list $pattern } } "$box $pattern")
+            }
+            function Select-File([string]$name, [string]$pattern) {
+              $filter = Wait-Until { $f = Find-Id $win 'FileFilter'; if ($f -and $f.Current.IsEnabled) { $f } } 'file filter'
+              $filter.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($name)
+              Select-Entry 'FilesBox' $pattern
+            }
+            function Invoke-Button([string]$name) {
+              $b = Wait-Until { $button = Find-Id $win $name; if ($button -and $button.Current.IsEnabled) { $button } } $name
+              $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            }
+            function Capture([string]$name) {
+              [System.Windows.Forms.Cursor]::Position = [System.Drawing.Point]::new(4,4)
+              Start-Sleep -Milliseconds 900
+              $rect = $win.Current.BoundingRectangle
+              if ($rect.Width -lt 640 -or $rect.Height -lt 420) { throw "Desktop capture size is too small: $rect" }
+              $bmp = [System.Drawing.Bitmap]::new([int]$rect.Width,[int]$rect.Height)
+              $g = [System.Drawing.Graphics]::FromImage($bmp)
+              try {
+                $g.CopyFromScreen([int]$rect.X,[int]$rect.Y,0,0,$bmp.Size)
+                $bmp.Save((Join-Path $dest $name),[System.Drawing.Imaging.ImageFormat]::Png)
+              } finally { $g.Dispose(); $bmp.Dispose() }
+            }
+            Select-File 'NavigationIssueDemo.cs' 'NavigationIssueDemo[.]cs'
+            Wait-Title 'NavigationIssueDemo[.]cs'
+            Select-Entry 'MethodsBox' '[.]Run'
+            Invoke-Button 'FitButton'
+            $back = (Find-Id $win 'BackButton').Current.BoundingRectangle
+            $follow = (Find-Id $win 'FollowButton').Current.BoundingRectangle
+            if ([Math]::Abs($back.Y - $follow.Y) -gt 5 -or $follow.X -lt $back.Right -or $follow.X - $back.Right -gt 12) {
+              throw "Navigation buttons are not adjacent: $back $follow"
+            }
+            $toolbar = (Find-Id $win 'ListButton').Current.BoundingRectangle
+            if ($back.Y -lt $toolbar.Bottom + 180) { throw "Navigation did not move below the graph" }
+            Capture 'viewer-bottom-graph.png'
+            Invoke-Button 'ListButton'
+            Select-Entry 'NodesBox' 'n > 0'
+            [void](Wait-Until { $n = Find-Id $win 'NavigationStatus'; if ($n -and $n.Current.Name -match '条件ノード') { $true } } 'non-navigation hint for condition')
+            if ((Find-Id $win 'FollowButton').Current.IsEnabled) { throw 'Condition cannot be a navigation target' }
+            Select-Entry 'NodesBox' 'NavigationIssueDemo[.]Run'
+            Invoke-Button 'FollowButton'
+            [void](Wait-Until { $n = Find-Id $win 'NodeLabel'; if ($n -and $n.Current.Name -eq 'Start') { $true } } 'self-recursive target selects Start')
+            [void](Wait-Until { $n = Find-Id $win 'StatusText'; if ($n -and $n.Current.Name -match '自己再帰') { $true } } 'self-recursion feedback')
+            Capture 'viewer-recursion.png'
+            Invoke-Button 'BackButton'
+            [void](Wait-Until { $n = Find-Id $win 'NodeLabel'; if ($n -and $n.Current.Name -match 'NavigationIssueDemo[.]Run') { $true } } 'back restores original recursive call')
+            Write-Host 'Verified adjacent controls, condition hint, recursion and Back'
+          } catch {
+            try {
+              if ($win) {
+                $list = Find-Id $win 'FilesBox'
+                if ($list) {
+                  $items = $list.FindAll($c::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
+                  foreach ($item in $items) { Write-Host "FilesBox [$($item.Current.ControlType.ProgrammaticName)] $($item.Current.Name)" }
+                }
+                Capture 'diagnostic.png'
+              }
+            } catch { Write-Host "Could not capture diagnostic: $_" }
+            throw
+          } finally { if (!$p.HasExited) { Stop-Process -Id $p.Id -ErrorAction SilentlyContinue } }
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: viewer-bottom-navigation-screens
+          path: artifacts/screenshot/*.png
+          if-no-files-found: warn
+          retention-days: 7
