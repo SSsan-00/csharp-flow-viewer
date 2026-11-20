@@ -116,6 +116,45 @@ public sealed class RazorRequestTests
     }
 
     [TestMethod]
+    [DataRow("<a href=\"/details\" onclick=\"return openDetails()\">Details</a>", "/details")]
+    [DataRow("<a asp-page=\"./Order\" onclick=\"return openDetails()\">Details</a>", "./Order")]
+    public void AnchorWithOnclickHasOneClickNodeThatTargetsTheJavaScriptDefinition(string markup, string link)
+    {
+        var page = Page("@page\n" + markup + "\n<script>function openDetails() { return false; }</script>",
+            [new RazorImport("/Pages/_ViewImports.cshtml", "@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers")]);
+        var definition = Assert.ContainsSingle(page.Entries.Where(entry => entry.Name == "openDetails"));
+        var overview = page.Analyze(-1);
+        var click = Assert.ContainsSingle(overview.Nodes.Where(node => node.Label == "onclick → openDetails()"));
+        Assert.AreEqual(definition.Id, click.TargetMethod);
+        Assert.AreEqual(PagePath, click.TargetFilePath);
+        Assert.AreEqual("onclick=\"return openDetails()\"", page.Text.Substring(click.Source!.Offset, click.Source.Length));
+        Assert.DoesNotContain(node => node.Label.StartsWith("click · a", StringComparison.Ordinal), overview.Nodes);
+        var request = Assert.ContainsSingle(overview.Nodes.Where(node => node.Kind == NodeKind.Transfer));
+        StringAssert.Contains(request.Label, link);
+        Assert.Contains(edge => edge.From == click.Id && edge.To == request.Id && edge.Label == "既定動作の候補", overview.Edges);
+        Assert.Contains(entry => entry.Signature == "onclick → openDetails()", page.Entries);
+        Assert.DoesNotContain(entry => entry.Signature.StartsWith("click · a", StringComparison.Ordinal), page.Entries);
+    }
+
+    [TestMethod]
+    public void AnchorWithUnresolvedOnclickDoesNotJumpToLinkInstead()
+    {
+        var page = Page("""
+            @page
+            <a href="/details" onclick="missing()">Details</a>
+            <a href="/other">Plain link</a>
+            """);
+        var overview = page.Analyze(-1);
+        var click = Assert.ContainsSingle(overview.Nodes.Where(node => node.Label == "onclick → missing()"));
+        Assert.IsNull(click.TargetMethod);
+        Assert.IsNull(click.TargetFilePath);
+        var ordinaryLink = Assert.ContainsSingle(overview.Nodes.Where(node => node.Label.StartsWith("click · a", StringComparison.Ordinal)));
+        StringAssert.Contains(ordinaryLink.Label, "Plain link");
+        Assert.IsNotNull(ordinaryLink.TargetMethod);
+        Assert.AreEqual(2, overview.Nodes.Count(node => node.Kind == NodeKind.Transfer));
+    }
+
+    [TestMethod]
     public void FragmentLinksAndRelativeRequestsWithBaseHrefDoNotAcquireFalseServerTargets()
     {
         var page = Page("""

@@ -1,4 +1,4 @@
-name: Razor onchange reload definition Windows verification
+name: Razor anchor onclick definition Windows verification
 on:
   push:
     branches: [codex/cross-file-nav-screen-trial]
@@ -21,7 +21,7 @@ jobs:
           @'
           @page
           <script defer src="~/js/nav-target.js"></script>
-          <select id="orderKind" onchange="reload()"><option value="standard">Standard</option></select>
+          <a id="orderKind" href="/Order" onclick="return reload()">Order</a>
           '@ | Set-Content 'samples/OrderProcessing/Pages/NavigationDemo.cshtml' -Encoding utf8
           New-Item -ItemType Directory -Force 'samples/OrderProcessing/wwwroot/js' | Out-Null
           'window.reload = function () { const xhr = new XMLHttpRequest(); xhr.open("GET", "/Orders"); xhr.onload = responseReady; xhr.send(); }; function responseReady() { console.log("loaded"); } function noCaller() { return false; }' | Set-Content 'samples/OrderProcessing/wwwroot/js/nav-target.js' -Encoding utf8
@@ -116,7 +116,7 @@ jobs:
               Select-Entry 'MethodsBox' 'ページ全体'
               $listMode = Find-Id $win 'ListButton'
               if ($listMode.Current.Name -eq '一覧') { Invoke-Button 'ListButton' }
-              Select-Entry 'NodesBox' 'onchange.*reload'
+              Select-Entry 'NodesBox' 'onclick.*reload'
               Wait-Text 'SourceLocation' '^L3'
               Capture 'overview-event.png'
               Invoke-Button 'FollowButton'
@@ -126,7 +126,7 @@ jobs:
             Enter-OverviewCall
             Invoke-Button 'BackButton'
             Wait-Title 'NavigationDemo[.]cshtml'
-            Wait-Text 'NodeLabel' 'onchange.*reload'
+            Wait-Text 'NodeLabel' 'onclick.*reload'
             Wait-Text 'SourceLocation' '^L3'
             Enter-OverviewCall
             Select-Entry 'MethodsBox' 'noCaller'
