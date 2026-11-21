@@ -17,7 +17,7 @@ internal static class FlowCacheWeight
                 + Text(node.TargetFilePath) + Text(node.Source?.FilePath) + Text(node.TargetDeclaration?.FilePath);
             if (node.ImplementationCandidates is { } implementations)
                 foreach (var candidate in implementations)
-                    weight += 256 + Text(candidate.Label) + Text(candidate.FilePath) + Text(candidate.Declaration.FilePath);
+                    weight += 256 + Text(candidate.Label) + Text(candidate.TargetFilePath) + Text(candidate.Declaration.FilePath);
             if (node.CallTargets is { } targets)
                 foreach (var target in targets)
                     weight += 128 + Text(target.Label) + Text(target.FilePath);
