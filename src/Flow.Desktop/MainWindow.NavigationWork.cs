@@ -93,8 +93,7 @@ public partial class MainWindow
             {
                 var first = csharpSources.First();
                 csharpSources.Remove(first.Key);
-                foreach (var key in flowCache.Keys.Where(key => ReferenceEquals(key.Source, first.Value)).ToArray())
-                    flowCache.Remove(key);
+                flowCache.RemoveWhere(key => ReferenceEquals(key.Source, first.Value));
             }
             csharpSources[file] = csharp;
         }
@@ -111,15 +110,12 @@ public partial class MainWindow
         {
             var graph = loaded.CSharp?.Analyze(id, token, exclusions) ?? loaded.Razor?.Analyze(id, token)
                 ?? loaded.JavaScript!.Analyze(id, token);
-            return new PreparedFlow(graph, graph.Nodes.Count == 0 ? null : MermaidWriter.Write(graph, token: token));
+            var prepared = new PreparedFlow(graph, graph.Nodes.Count == 0 ? null : MermaidWriter.Write(graph, token: token));
+            return (Prepared: prepared, Weight: FlowCacheWeight.Estimate(graph, prepared.Mermaid));
         }, token);
         token.ThrowIfCancellationRequested();
-        if (flow.Graph.Nodes.Count <= 4_000 && flow.Graph.Edges.Count <= 8_000 && (flow.Mermaid?.Length ?? 0) <= 350_000)
-        {
-            if (flowCache.Count >= 16) flowCache.Remove(flowCache.Keys.First());
-            flowCache[key] = flow;
-        }
-        return flow;
+        flowCache.Add(key, flow.Prepared, flow.Weight);
+        return flow.Prepared;
     }
 
     private async Task<PreparedNavigation> PrepareNavigationAsync(ProjectFile file, int? entryId,
