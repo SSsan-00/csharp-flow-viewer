@@ -26,7 +26,8 @@ public partial class MainWindow : Window
     private ProjectSession? project;
     private SourceFile? source;
     private readonly Dictionary<ProjectFile, SourceFile> csharpSources = new();
-    private readonly Dictionary<(object Source, string? ScriptPath, int Entry), PreparedFlow> flowCache = new();
+    private readonly BoundedCache<(object Source, string? ScriptPath, int Entry), PreparedFlow> flowCache =
+        new(FlowCacheWeight.Capacity, FlowCacheWeight.Budget);
     private RazorSourceFile? razorSource;
     private JavaScriptSourceFile? javaScriptSource;
     private ProjectFile? currentFile;
