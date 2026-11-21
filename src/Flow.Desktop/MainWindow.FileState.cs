@@ -12,20 +12,28 @@ public partial class MainWindow
     private string? fileStatePath;
     private PreviewViewport? viewport;
 
-    private FileViewState? ReadFileState(ProjectFile file)
+    private void ApplyFileState(string statePath, FileViewState? state)
+    {
+        fileStatePath = statePath;
+        if (state is not null)
+            foreach (var (key, annotations) in state.Annotations)
+                if (annotations is { Marked: not null, GrayRoots: not null })
+                    annotationHistory[key] = annotations;
+    }
+
+    private string GetFileStatePath(ProjectFile file)
     {
         var options = project!.Options;
-        fileStatePath = Path.Combine(FileStatesDirectory,
+        return Path.Combine(FileStatesDirectory,
             FileViewState.Key(Path.GetFullPath(path!).ToUpperInvariant(), Path.GetFullPath(file.Path).ToUpperInvariant(),
                 options.Configuration, options.TargetFramework) + ".json");
+    }
+
+    private static FileViewState? ReadFileState(string statePath)
+    {
         try
         {
-            var state = FileViewState.Read(fileStatePath);
-            if (state is not null)
-                foreach (var (key, annotations) in state.Annotations)
-                    if (annotations is { Marked: not null, GrayRoots: not null })
-                        annotationHistory[key] = annotations;
-            return state;
+            return FileViewState.Read(statePath);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
         {

@@ -232,6 +232,7 @@ public static class ProjectLoader
 
     private static async Task<string> DotnetAsync(string directory, IEnumerable<string> arguments, CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
         var info = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = directory, UseShellExecute = false, CreateNoWindow = true,

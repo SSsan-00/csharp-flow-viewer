@@ -92,7 +92,9 @@ internal sealed class PreviewHost(WebView2CompositionControl web)
         await pageReady.Task.WaitAsync(TimeSpan.FromSeconds(15), token);
     }
 
-    public void Send<T>(T message) => web.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(message));
+    public void Send<T>(T message) => SendJson(JsonSerializer.Serialize(message));
+
+    public void SendJson(string json) => web.CoreWebView2?.PostWebMessageAsJson(json);
 
     public void Close()
     {

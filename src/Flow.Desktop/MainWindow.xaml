@@ -26,6 +26,8 @@
       <DockPanel>
         <Button DockPanel.Dock="Left" x:Name="OpenButton" Content="プロジェクトを開く…" Click="OpenProject" ToolTip="Ctrl+O" Margin="0,0,12,0"/>
         <Button DockPanel.Dock="Left" x:Name="ReloadButton" Content="再読み込み" Click="ReloadProject" ToolTip="プロジェクトを再読み込み" Margin="0,0,12,0" IsEnabled="False"/>
+        <Button DockPanel.Dock="Left" x:Name="CancelOperationButton" Content="中断" Click="CancelOperation"
+                Visibility="Collapsed" ToolTip="読み込み、解析、または移動を中断 (Esc)" Margin="0,0,12,0"/>
         <ComboBox DockPanel.Dock="Right" x:Name="SettingsBox" Width="180" Margin="12,0,0,0"
                   AutomationProperties.Name="構成と対象フレームワーク" SelectionChanged="ProjectOptionsChanged" IsEnabled="False"/>
         <TextBlock DockPanel.Dock="Right" x:Name="SdkLabel" Style="{StaticResource Muted}" VerticalAlignment="Center"/>
@@ -184,8 +186,6 @@
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
                   <Button x:Name="BackButton" Content="呼び出し元へ" Click="Back" ToolTip="今の処理の呼び出し元へ移動 (Alt+←)" Padding="8,3" IsEnabled="False"/>
                   <Button x:Name="FollowButton" Click="Follow" Content="呼び出し先へ ›" ToolTip="選択した呼び出しの定義へ移動 (F12)" IsEnabled="False" Margin="4,0,0,0" ToolTipService.ShowOnDisabled="True"/>
-                  <Button x:Name="CancelNavigationButton" Content="中断" Click="CancelNavigation" Visibility="Collapsed"
-                          ToolTip="移動または呼び出し元の検索を中断 (Esc)" Margin="4,0,0,0"/>
                 </StackPanel>
                 <Button x:Name="AnnotationsButton" DockPanel.Dock="Right" Click="OpenAnnotationsMenu" Content="注釈…" IsEnabled="False" Margin="8,0,0,0">
                   <Button.ContextMenu>

@@ -45,6 +45,7 @@ public partial class MainWindow : Window
     private bool closed;
     private int version;
     private int diagramRevision;
+    private (int Version, long Started)? previewTiming;
     private CallExclusions excludedCalls = new([]);
 
     private IReadOnlyList<MethodEntry> CurrentEntries => source?.Methods ?? razorSource?.Entries ?? javaScriptSource?.Entries ?? [];
@@ -126,110 +127,69 @@ public partial class MainWindow : Window
     private async void ReloadProject(object sender, RoutedEventArgs args)
     {
         if (busy || path is null) return;
-        var previousFile = (FilesBox.SelectedItem as ProjectFile)?.Path;
-        var previousOptions = SettingsBox.SelectedItem as ProjectOptions;
-        SetBusy(true);
-        try
-        {
-            var settings = await ProjectLoader.InspectAsync(path, lifetime.Token);
-            if (closed) return;
-            SdkLabel.Text = ".NET SDK " + settings.SdkVersion;
-            SettingsBox.ItemsSource = settings.Options;
-            var options = settings.Options.FirstOrDefault(item => item == previousOptions) ?? settings.Options[0];
-            SettingsBox.SelectedItem = options;
-            await LoadProject(options, previousFile);
-            if (project is not null) SaveProjectState();
-        }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "プロジェクトを再読み込みできません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed) SetBusy(false); }
+        await ChangeProjectAsync(path, project?.Options, currentFile?.Path);
     }
 
     private async void ProjectOptionsChanged(object sender, SelectionChangedEventArgs args)
     {
         if (busy || path is null || SettingsBox.SelectedItem is not ProjectOptions options) return;
-        SetBusy(true);
-        try { await LoadProject(options, (FilesBox.SelectedItem as ProjectFile)?.Path); if (project is not null) SaveProjectState(); }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "構成を読み込めません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed) SetBusy(false); }
-    }
-
-    private async Task LoadProject(ProjectOptions options, string? previousFile = null)
-    {
-        ResetProject();
-        SetState("プロジェクトを読み込み中", "MSBuild でソースと参照情報を取得しています…");
-        SetStatus(options + " の設計時ビルドを読み込み中");
-        var loaded = await ProjectLoader.OpenAsync(path!, options, lifetime.Token);
-        if (closed) { loaded.Dispose(); return; }
-        project = loaded;
-        FilesBox.ItemsSource = loaded.Files;
-        CollectionViewSource.GetDefaultView(loaded.Files).Filter =
-            item => item is ProjectFile file && file.Label.Contains(FileFilter.Text.Trim(), StringComparison.OrdinalIgnoreCase);
-        UpdateFileCount();
-        RefreshDiagnostics();
-        if (loaded.Files.Count == 0)
-        {
-            SetState("対象ファイルがありません", "構成、対象フレームワーク、Compile 項目と診断を確認してください。");
-            SetStatus("選択できる C# / Razor / JavaScript ファイルがありません。", attention: true);
-            return;
-        }
-        if (loaded.Files.FirstOrDefault(file => file.Path == previousFile) is { } previous)
-        {
-            if (!FilesBox.Items.Contains(previous)) FileFilter.Clear();
-            FilesBox.SelectedItem = previous;
-            await LoadFile(previous);
-            return;
-        }
-        SetState("対象ファイルを選択", "左の一覧から .cs、.cshtml.cs、または .cshtml を選んでください。");
-        SetStatus(loaded.Notices.Count == 0 ? "対象ファイルを選択してください。" : "MSBuild 診断があります。対象ファイルを選択できます。",
-            attention: loaded.Notices.Count != 0);
+        await ChangeProjectAsync(path, options, currentFile?.Path, inspect: false);
     }
 
     private async void FileChanged(object sender, SelectionChangedEventArgs args)
     {
-        if (busy || project is null || FilesBox.SelectedItem is not ProjectFile file) return;
-        SetBusy(true);
-        try { await LoadFile(file); if (HasSource) SaveProjectState(); }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "ソースを解析できません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed) SetBusy(false); }
+        if (busy || project is null || FilesBox.SelectedItem is not ProjectFile file || file == currentFile) return;
+        await LoadFileAsync(file);
     }
 
-    private async Task LoadFile(ProjectFile file, bool preserveHistory = false, bool restoreSelection = true,
-        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null)
+    private async Task LoadFileAsync(ProjectFile file)
     {
-        ResetFile(preserveHistory);
-        var loading = file.IsRazor ? "Razor ページを解析中"
-            : file.IsJavaScript ? "JavaScript の宣言と参照を解析中"
-            : "コンパイルとセマンティックモデルを取得中";
-        SetState("ソースを解析中", loading);
-        SetStatus(loading);
-        var loaded = await ReadNavigationSourceAsync(file, razorContext, jsContext, lifetime.Token);
-        if (closed) return;
-        var restored = ApplyLoadedFile(file, loaded);
-        if (!restoreSelection) return;
-        if (restored is not null && FindSavedMethod(CurrentEntries, restored) is { } entry)
+        var loading = file.IsRazor ? "Razor ページを解析中…"
+            : file.IsJavaScript ? "JavaScript の宣言と参照を解析中…"
+            : "コンパイルとセマンティックモデルを取得中…";
+        var statePath = GetFileStatePath(file);
+        var applied = await RunOperationAsync(loading, async token =>
         {
-            MethodsBox.SelectedItem = entry;
-            MethodsBox.ScrollIntoView(entry);
-            await AnalyzeMethodAsync(entry, restored: restored);
-        }
-        else if ((file.IsRazor || file.IsJavaScript) && CurrentEntries.FirstOrDefault() is { } overview)
+            var loaded = await ReadNavigationSourceAsync(file, null, null, token);
+            var state = await Task.Run(() => ReadFileState(statePath), token);
+            var entry = state is null ? null : FindSavedMethod(loaded.Entries, state);
+            entry ??= file.IsRazor || file.IsJavaScript ? loaded.Entries.FirstOrDefault() : null;
+            var flow = entry is null ? null : await PrepareFlowAsync(loaded, entry.Id, token);
+            return (loaded, entry, flow, state);
+        }, result =>
         {
-            MethodsBox.SelectedItem = overview;
-            await AnalyzeMethodAsync(overview, restored: restored);
-        }
-        else if (restored is not null)
-            RestoreFileState(restored);
+            ResetFile();
+            FilesBox.SelectedItem = file;
+            ApplyLoadedFile(file, result.loaded, statePath, result.state);
+            if (result.entry is { } entry && result.flow is { } flow)
+            {
+                MethodsBox.SelectedItem = entry;
+                MethodsBox.ScrollIntoView(entry);
+                ApplyFlow(entry, flow, restored: result.state);
+            }
+            else if (result.state is { } state)
+                RestoreFileState(state);
+            SaveProjectState();
+        }, "ソースを解析できません。", "file");
+        if (!applied && !closed)
+            RestoreSelection(() => FilesBox.SelectedItem = currentFile);
     }
 
-    private FileViewState? ApplyLoadedFile(ProjectFile file, LoadedSource loaded)
+    private void RestoreSelection(Action restore)
+    {
+        // WPF raises SelectionChanged synchronously when restoring the previous item.
+        var wasBusy = busy;
+        busy = true;
+        try { restore(); }
+        finally { busy = wasBusy; }
+    }
+
+    private void ApplyLoadedFile(ProjectFile file, LoadedSource loaded, string statePath, FileViewState? state)
     {
         (source, razorSource, javaScriptSource) = loaded;
         currentFile = file;
         Editor.Text = loaded.Text;
-        var restored = ReadFileState(file);
+        ApplyFileState(statePath, state);
         SourceTitle.Text = file.Label;
         SourceTitle.ToolTip = file.Label;
         UpdateSourcePresentation();
@@ -243,14 +203,12 @@ public partial class MainWindow : Window
                 : "ほかのファイルを選ぶか、構成と診断を確認してください。");
         var partial = loaded.Notices.Any(IsPartial);
         SetStatus(partial ? "部分解析 · 診断で解析範囲を確認できます。" : "ソースの読み込み完了", attention: partial);
-        return restored;
     }
 
     private async void MethodChanged(object sender, SelectionChangedEventArgs args)
     {
         if (busy || MethodsBox.SelectedItem is not MethodEntry entry) return;
-        if (method?.Id != entry.Id) history.Clear();
-        await AnalyzeMethodAsync(entry);
+        await AnalyzeMethodAsync(entry, clearHistory: true);
     }
 
     private async void EditTraceSettings(object sender, RoutedEventArgs args)
@@ -266,20 +224,21 @@ public partial class MainWindow : Window
             SetStatus("追跡設定を保存しました。");
     }
 
-    private async Task AnalyzeMethodAsync(MethodEntry entry, string? returnTo = null, FileViewState? restored = null)
+    private async Task AnalyzeMethodAsync(MethodEntry entry, string? returnTo = null, bool clearHistory = false)
     {
         if (!HasSource) return;
         var loaded = new LoadedSource(source, razorSource, javaScriptSource);
-        SetBusy(true);
-        try
-        {
-            SetStatus("フローを解析中…");
-            var flow = await PrepareFlowAsync(loaded, entry.Id, lifetime.Token);
-            if (!closed) ApplyFlow(entry, flow, returnTo, restored);
-        }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "フロー図を取得できません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed) SetBusy(false); }
+        var applied = await RunOperationAsync("フローを解析中…",
+            token => PrepareFlowAsync(loaded, entry.Id, token), flow =>
+            {
+                if (clearHistory && method?.Id != entry.Id) history.Clear();
+                if (!MethodsBox.Items.Contains(entry)) Filter.Clear();
+                MethodsBox.SelectedItem = entry;
+                MethodsBox.ScrollIntoView(entry);
+                ApplyFlow(entry, flow, returnTo);
+            }, "フロー図を取得できません。", "method");
+        if (!applied && !closed)
+            RestoreSelection(() => MethodsBox.SelectedItem = method);
     }
 
     private void ApplyFlow(MethodEntry entry, PreparedFlow flow, string? returnTo = null, FileViewState? restored = null)
@@ -495,10 +454,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetBusy(true);
-        if (!MethodsBox.Items.Contains(entry)) Filter.Clear();
-        MethodsBox.SelectedItem = entry;
-        MethodsBox.ScrollIntoView(entry);
         await AnalyzeMethodAsync(entry, returnTo);
     }
 
@@ -578,6 +533,11 @@ public partial class MainWindow : Window
                 SetStatus("Mermaid の描画に失敗しました。", true);
                 break;
             case "rendered":
+                if (previewTiming is { } timing && timing.Version == requestVersion)
+                {
+                    FlowTiming.Log.Record("preview-ready", timing.Started, requestVersion);
+                    previewTiming = null;
+                }
                 rendered = true;
                 UpdateSurface();
                 if (selectedNode is { } selected)
@@ -588,27 +548,47 @@ public partial class MainWindow : Window
         }
     }
 
-    private void RequestRender(bool preserveViewport = false)
+    private async void RequestRender(bool preserveViewport = false)
     {
         if (!ready || previewUnavailable || mermaid is null || diagram is not { } graph) return;
         var useMermaid = !UseLargeLayout(graph);
-        var text = useMermaid ? MermaidWriter.Write(graph, light: !dark, includeSourceLines: false) : null;
+        var light = !dark;
+        var revision = diagramRevision;
+        var savedViewport = viewport;
+        var requestVersion = ++version;
+        var token = lifetime.Token;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        previewTiming = (requestVersion, started);
         rendered = false;
         UpdateSurface();
-        ++version;
-        preview.Send(new
+        try
         {
-            type = "render", version, text, preserveViewport, diagramRevision, viewport,
-            theme = dark ? "dark" : "light",
-            nodes = graph.Nodes.Select(node => new
+            var json = await Task.Run(() => JsonSerializer.Serialize(new
             {
-                id = node.Id, label = node.Label, kind = node.Kind.ToString().ToLowerInvariant(), reachable = node.IsReachable
-            }),
-            edges = graph.Edges.Select(edge => new
+                type = "render", version = requestVersion,
+                text = useMermaid ? MermaidWriter.Write(graph, light: light, includeSourceLines: false, token: token) : null,
+                preserveViewport, diagramRevision = revision, viewport = savedViewport,
+                theme = light ? "light" : "dark",
+                nodes = graph.Nodes.Select(node => new
+                {
+                    id = node.Id, label = node.Label, kind = node.Kind.ToString().ToLowerInvariant(), reachable = node.IsReachable
+                }),
+                edges = graph.Edges.Select(edge => new
+                {
+                    from = edge.From, to = edge.To, label = edge.Label, reachable = edge.IsReachable
+                })
+            }), token);
+            if (!closed && !previewUnavailable && requestVersion == version)
             {
-                from = edge.From, to = edge.To, label = edge.Label, reachable = edge.IsReachable
-            })
-        });
+                FlowTiming.Log.Record("preview-payload", started, requestVersion);
+                preview.SendJson(json);
+            }
+        }
+        catch (Exception)
+        {
+            if (!closed && !previewUnavailable && requestVersion == version)
+                SetPreviewUnavailable("プレビューを準備できません。ノード一覧と Mermaid 出力は利用できます。");
+        }
     }
 
     private bool UseLargeLayout(FlowDiagram graph) => graph.Nodes.Count > MaxPreviewNodes
@@ -663,8 +643,8 @@ public partial class MainWindow : Window
         PreviewSurface.IsHitTestVisible = Web.Focusable = webVisible && rendered;
         NodesBox.Visibility = listVisible ? Visibility.Visible : Visibility.Collapsed;
         CopyButton.IsEnabled = SaveButton.IsEnabled = hasGraph && !busy;
-        CancelNavigationButton.Visibility = navigationCancellation is null ? Visibility.Collapsed : Visibility.Visible;
-        CancelNavigationButton.IsEnabled = navigationCancellation is { IsCancellationRequested: false };
+        CancelOperationButton.Visibility = operationCancellation is null ? Visibility.Collapsed : Visibility.Visible;
+        CancelOperationButton.IsEnabled = operationCancellation is { IsCancellationRequested: false };
         BackButton.IsEnabled = !busy && CanFindCaller;
         FollowButton.IsEnabled = !busy && selectedNode is { } node && CanFollow(node);
         ListButton.Content = showList ? "図" : "一覧";
@@ -685,17 +665,6 @@ public partial class MainWindow : Window
     {
         StatusText.Text = message;
         StatusDot.SetResourceReference(TextBlock.ForegroundProperty, attention ? "WarningBrush" : "GoodBrush");
-    }
-
-    private void ShowFailure(Exception exception, string title)
-    {
-        var hint = exception is ProjectLoadException ? exception.Message
-            : "SDK、復元済み依存関係、プロジェクト設定を確認してください。";
-        var message = title + " · " + hint;
-        SetState(title, hint);
-        SetStatus(message, true);
-        diagnostics.Add(message);
-        UpdateDiagnosticList();
     }
 
     private static bool IsPartial(string notice) => notice.StartsWith("解析は部分的", StringComparison.Ordinal);
@@ -764,10 +733,10 @@ public partial class MainWindow : Window
 
     protected override void OnPreviewKeyDown(KeyEventArgs args)
     {
-        if (args.Key == Key.Escape && navigationCancellation is not null)
+        if (args.Key == Key.Escape && operationCancellation is not null)
         {
             args.Handled = true;
-            CancelNavigation(this, args);
+            CancelOperation(this, args);
             return;
         }
 
