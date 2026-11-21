@@ -26,15 +26,18 @@ try {
     window.previewMessages = [];
     window.chrome.webview = {
       postMessage(data) { window.previewMessages.push(data); },
-      addEventListener() {}
+      addEventListener(name, listener) {
+        if (name !== "message") throw new Error("Unexpected WebView event: " + name);
+        window.receiveFromHost = data => listener({ data });
+      }
     };
   });
   const origin = "http://127.0.0.1:" + server.address().port;
   await page.route("**/*", route => route.request().url().startsWith(origin + "/") ? route.continue() : route.abort());
   await page.goto(origin + "/index.html");
   assert.ok(await page.evaluate(text => window.flowMermaid.parse(text), source));
-  await page.evaluate(({ text, nodes, edges }) => window.flowPreview({
-    type: "render", theme: "dark", version: 1, text, nodes, edges
+  await page.evaluate(({ text, nodes, edges }) => window.receiveFromHost({
+    type: "render", theme: "dark", version: 1, diagramRevision: 1, text, nodes, edges
   }), { text: source, ...payload });
   await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered"));
   const condition = page.locator("#graph .node.flow_condition");
@@ -53,20 +56,21 @@ try {
   await page.mouse.move(110, 105);
   await page.mouse.up();
   assert.notEqual(await page.locator("#graph").evaluate(node => node.style.transform), oldTransform);
-  await page.evaluate(() => window.flowPreview({ type: "zoom", factor: 1.2 }));
+  await page.evaluate(() => window.receiveFromHost({ type: "zoom", factor: 1.2 }));
   assert.ok(await page.evaluate(() => window.previewMessages.filter(message => message.type === "zoom").length >= 2));
   await page.setViewportSize({ width: 740, height: 510 });
   const graph = page.locator("#graph");
   const zoomedTransform = await graph.evaluate(node => node.style.transform);
   const rawLabel = "長い条件式".repeat(24) + " Check(値) <script>？";
-  await page.evaluate(({ text, id, label }) => window.flowPreview({
-    type: "render", theme: "light", version: 2, preserveViewport: true, text, nodes: [{ id, label }]
-  }), { text: source, id: picked.value, label: rawLabel });
+  await page.evaluate(({ text, id, label, nodes, edges }) => window.receiveFromHost({
+    type: "render", theme: "light", version: 2, diagramRevision: 1, preserveViewport: true, text,
+    nodes: nodes.map(node => node.id === id ? { ...node, label } : node), edges
+  }), { text: source, id: picked.value, label: rawLabel, ...payload });
   await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 2));
   assert.equal(await page.locator("body").getAttribute("data-theme"), "light");
   assert.equal(await graph.evaluate(node => node.style.transform), zoomedTransform);
   assert.equal(await condition.locator("text").textContent(), rawLabel);
-  await page.evaluate(id => window.flowPreview({ type: "select", id, center: false }), picked.value);
+  await page.evaluate(id => window.receiveFromHost({ type: "select", id, center: false }), picked.value);
   assert.equal(await condition.locator(".selection-ring").evaluate(shape => getComputedStyle(shape).stroke), "rgb(0, 82, 187)");
   assert.ok(await condition.evaluate(node => {
     const shape = node.querySelector(":scope > rect, :scope > polygon, :scope > path, :scope > circle").getBoundingClientRect();
@@ -74,18 +78,18 @@ try {
     return label.left >= shape.left && label.right <= shape.right;
   }), "Mermaid label should fit within its node");
   assert.equal(await page.locator("#graph script").count(), 0);
-  await page.evaluate(() => window.flowPreview({ type: "fit" }));
+  await page.evaluate(() => window.receiveFromHost({ type: "fit" }));
   await condition.click({ button: "right" });
   await page.getByRole("menuitem", { name: "マーク" }).click();
   const annotation = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "annotate"));
   assert.deepEqual(annotation.value, { id: picked.value, action: "mark" });
-  await page.evaluate(id => window.flowPreview({ type: "annotations", marked: [id], gray: [] }), picked.value);
+  await page.evaluate(id => window.receiveFromHost({ type: "annotations", marked: [id], gray: [] }), picked.value);
   assert.equal(await graph.locator(".marked").count(), 1);
   assert.equal(await condition.locator(".selection-ring").evaluate(shape => getComputedStyle(shape).stroke), "rgb(0, 82, 187)");
   const markedShape = condition.locator(":scope > rect, :scope > polygon, :scope > path, :scope > circle").first();
   assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
   assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).stroke), "rgb(123, 82, 0)");
-  await page.evaluate(id => window.flowPreview({ type: "annotations", marked: [], gray: [id] }), picked.value);
+  await page.evaluate(id => window.receiveFromHost({ type: "annotations", marked: [], gray: [id] }), picked.value);
   assert.notEqual(await markedShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
   assert.equal(await graph.locator(".grayed").count(), 1);
 
@@ -95,7 +99,7 @@ try {
     }));
     const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i].id, to: node.id, reachable: true }));
     edges.push({ from: "n8001", to: "n4", label: "False", reachable: true });
-    window.flowPreview({ type: "render", theme: "light", version: 3, nodes, edges });
+    window.receiveFromHost({ type: "render", theme: "light", version: 3, diagramRevision: 2, text: null, nodes, edges });
   });
   await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 3));
   assert.equal(await graph.locator(".large-diagram .node").count(), 8002);
@@ -106,7 +110,7 @@ try {
     return label.left >= shape.left && label.right <= shape.right;
   }), "Large diagram label should fit within its node");
   const last = graph.locator('[data-flow-id="n8001"]');
-  await page.evaluate(() => window.flowPreview({ type: "select", id: "n8001", center: true }));
+  await page.evaluate(() => window.receiveFromHost({ type: "select", id: "n8001", center: true }));
   assert.equal(await last.getAttribute("class"), "node flow_call selected");
   assert.ok(await last.evaluate(node => {
     const box = node.getBoundingClientRect();
@@ -130,49 +134,57 @@ try {
   await scroll.evaluate(element => element.scrollTop = 325);
   await page.waitForFunction(() => document.querySelector("#graph").style.transform.includes(", -307px)"));
 
-  await page.evaluate(() => window.flowPreview({ type: "annotations", marked: ["n0"], gray: ["n0"] }));
+  await page.evaluate(() => window.receiveFromHost({ type: "annotations", marked: ["n0"], gray: ["n0"] }));
   const stroke = await graph.locator('[data-flow-id="n0"] rect').evaluate(shape => getComputedStyle(shape).stroke);
   assert.equal(stroke, "rgb(123, 82, 0)");
   await page.evaluate(() => {
     const original = document.querySelector('[data-flow-id="n2"] > rect');
     original.style.setProperty("fill", "rgb(20, 40, 60)", "important");
-    window.flowPreview({ type: "annotations", marked: ["n2", "n2", "missing"], gray: ["n5"] });
-    window.flowPreview({ type: "annotations", marked: ["n2"], gray: ["n5"] });
+    window.receiveFromHost({ type: "annotations", marked: ["n2", "n2", "missing"], gray: ["n5"] });
+    window.receiveFromHost({ type: "annotations", marked: ["n2"], gray: ["n5"] });
   });
   assert.equal(await graph.locator(".marked").count(), 1);
   assert.equal(await graph.locator(".marked").getAttribute("data-flow-id"), "n2");
   assert.equal(await graph.locator(".grayed").getAttribute("data-flow-id"), "n5");
   assert.equal(await graph.locator('[data-flow-id="n2"] rect').evaluate(shape => getComputedStyle(shape).stroke), "rgb(123, 82, 0)");
-  await page.evaluate(() => window.flowPreview({ type: "annotations", marked: [], gray: [] }));
+  await page.evaluate(() => window.receiveFromHost({ type: "annotations", marked: [], gray: [] }));
   assert.equal(await graph.locator(".marked,.grayed").count(), 0);
   assert.deepEqual(await graph.locator('[data-flow-id="n2"] rect').evaluate(shape =>
     [shape.style.getPropertyValue("fill"), shape.style.getPropertyPriority("fill")]), ["rgb(20, 40, 60)", "important"]);
-  await page.evaluate(() => window.flowPreview({ type: "annotations", marked: ["n0"], gray: ["n0"] }));
+  await page.evaluate(() => window.receiveFromHost({ type: "annotations", marked: ["n0"], gray: ["n0"] }));
   const savedViewport = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "viewport").value);
   const savedTransform = await graph.evaluate(node => node.style.transform);
-  await page.evaluate(text => window.flowPreview({ type: "render", theme: "dark", version: 4, diagramRevision: 2, text }), source);
+  await page.evaluate(data => window.receiveFromHost({ type: "render", theme: "dark", version: 4, diagramRevision: 3, ...data }),
+    { text: source, ...payload });
   await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 4));
   assert.equal(await graph.locator(".marked").count(), 0);
   await condition.click({ button: "right" });
   await page.getByRole("menuitem", { name: "マーク" }).click();
   const newMark = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "annotate"));
   assert.equal(newMark.version, 4);
-  await page.evaluate(({ text, viewport }) => window.flowPreview({
-    type: "render", theme: "dark", version: 5, diagramRevision: 3, text, viewport
-  }), { text: source, viewport: savedViewport });
+  await page.evaluate(data => window.receiveFromHost({
+    type: "render", theme: "dark", version: 5, diagramRevision: 4, ...data
+  }), { text: source, viewport: savedViewport, ...payload });
   await page.waitForFunction(() => window.previewMessages.some(message => message.type === "rendered" && message.version === 5));
   assert.equal(await graph.evaluate(node => node.style.transform), savedTransform);
   const spaces = 'value == "A  B"';
   const whitespaceSource = 'flowchart TD\n  n0{"value #61;#61; #34;A #160;B#34;"}:::flow_condition';
   for (const version of [6, 7]) {
-    await page.evaluate(({ version, text, label }) => window.flowPreview({
-      type: "render", theme: "dark", version, text, nodes: [{ id: "n0", kind: "condition", label, reachable: true }], edges: []
+    await page.evaluate(({ version, text, label }) => window.receiveFromHost({
+      type: "render", theme: "dark", version, diagramRevision: version, text, nodes: [{ id: "n0", kind: "condition", label, reachable: true }], edges: []
     }), { version, text: version === 6 ? whitespaceSource : null, label: spaces });
     await page.waitForFunction(version => window.previewMessages.some(m => m.type === "rendered" && m.version === version), version);
     const label = graph.locator('[data-flow-id="n0"] text');
     assert.equal((await label.textContent()).replaceAll("\u00a0", " "), spaces);
     assert.equal(await label.evaluate(text => getComputedStyle(text).whiteSpace), "pre");
   }
+  await page.evaluate(text => window.receiveFromHost({ type: "render", theme: "dark", version: 8, text }), source);
+  await page.waitForFunction(() => window.previewMessages.some(m => m.type === "error" && m.version === 8));
+  assert.equal(await graph.locator("svg").count(), 0);
+  await page.evaluate(data => window.receiveFromHost({ type: "render", theme: "dark", version: 9, diagramRevision: 9,
+    text: "deliberately invalid Mermaid", ...data }), payload);
+  await page.waitForFunction(() => window.previewMessages.some(m => m.type === "rendered" && m.version === 9));
+  assert.equal(await graph.locator(".large-diagram .node").count(), payload.nodes.length);
   console.log("Preview passed: Mermaid labels, zoom preservation, annotations, and 8,002-node SVG with a back edge.");
 } finally {
   await browser?.close();

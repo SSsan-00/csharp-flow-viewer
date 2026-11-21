@@ -74,9 +74,10 @@
     clearAnnotationState();
     width = height = 0;
     syncScroll();
-    feedback.textContent = (message.text || message.nodes) ? "図を描画しています…" : "";
-    if (!message.text && !message.nodes) return;
+    feedback.textContent = "図を描画しています…";
     try {
+      const { nodes, edges } = message;
+      if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new TypeError("Invalid preview graph.");
       let fromMermaid = false;
       if (message.text) {
         try {
@@ -90,15 +91,14 @@
           if (request !== generation) return;
           graph.innerHTML = svg;
           fromMermaid = graph.querySelector(".node") !== null;
-        } catch (error) {
+        } catch {
           if (request !== generation) return;
-          if (!message.nodes) throw error;
         }
       }
-      if (!fromMermaid && message.nodes)
-        graph.replaceChildren(window.renderLargeDiagram(message.nodes, message.edges));
+      if (!fromMermaid)
+        graph.replaceChildren(window.renderLargeDiagram(nodes, edges));
       const svgNode = graph.firstElementChild;
-      const labels = new Map(fromMermaid ? (message.nodes ?? []).map(node => [node.id, node.label]) : []);
+      const labels = new Map(fromMermaid ? nodes.map(node => [node.id, node.label]) : []);
       if (fromMermaid) {
         const textNodes = document.createTreeWalker(svgNode, NodeFilter.SHOW_TEXT);
         while (textNodes.nextNode()) {
@@ -161,7 +161,7 @@
         ({ X: x, Y: y, Scale: scale } = message.viewport);
         apply();
         sendZoom();
-      } else if (!fromMermaid && message.nodes) {
+      } else if (!fromMermaid) {
         scale = .8;
         x = viewport.clientWidth / 2 - width * scale / 2;
         y = 10;
@@ -421,6 +421,5 @@
     viewport.addEventListener(type, () => { drag = undefined; graph.classList.remove("dragging"); });
   }
   host?.addEventListener("message", event => receive(event.data));
-  window.flowPreview = receive;
   send(typeof window.flowMermaid?.render === "function" ? "ready" : "startup-error", null);
 })();
