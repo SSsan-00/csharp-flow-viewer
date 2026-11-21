@@ -19,6 +19,8 @@
   let menuNode, fittedRevision;
   let queue = Promise.resolve();
   const originalStyles = new WeakMap();
+  const annotationNodes = new Map();
+  let appliedMarks = new Set(), appliedGray = new Set();
   const send = (type, value) => host?.postMessage({ type, value, version });
   const sendZoom = () => send("zoom", Number((scale * 100).toPrecision(3)));
 
@@ -69,6 +71,7 @@
     if (fittedRevision !== message.diagramRevision) closeSearch();
     document.body.dataset.theme = message.theme;
     graph.replaceChildren();
+    clearAnnotationState();
     width = height = 0;
     syncScroll();
     feedback.textContent = (message.text || message.nodes) ? "図を描画しています…" : "";
@@ -113,6 +116,7 @@
         const id = node.dataset.flowId ?? /^diagram\d+-flowchart-([a-z0-9_]+)-\d+$/.exec(node.id)?.[1];
         if (!id) continue;
         node.dataset.flowId = id;
+        annotationNodes.set(id, node);
         node.setAttribute("tabindex", "0");
         node.setAttribute("role", "button");
         if (labels.has(id)) {
@@ -179,6 +183,7 @@
     } catch {
       if (request !== generation) return;
       graph.replaceChildren();
+      clearAnnotationState();
       feedback.textContent = "Mermaid プレビューを描画できません。ノード一覧または Mermaid 出力を利用できます。";
       send("error", null);
     }
@@ -197,26 +202,46 @@
     } else if (message.type === "search") {
       openSearch();
     } else if (message.type === "annotations") {
-      const marks = new Set(message.marked);
-      const gray = new Set(message.gray);
-      for (const node of graph.querySelectorAll("[data-flow-id]")) {
-        node.classList.toggle("marked", marks.has(node.dataset.flowId));
-        node.classList.toggle("grayed", gray.has(node.dataset.flowId));
-        for (const shape of node.querySelectorAll(":scope > rect:not(.selection-ring), :scope > polygon:not(.selection-ring), :scope > path:not(.selection-ring), :scope > circle:not(.selection-ring)")) {
-          if (!originalStyles.has(shape)) {
-            const properties = ["fill", "stroke", "stroke-width"];
-            originalStyles.set(shape, properties.map(name => [name, shape.style.getPropertyValue(name), shape.style.getPropertyPriority(name)]));
-          }
-          for (const [name, value, priority] of originalStyles.get(shape)) {
-            if (value) shape.style.setProperty(name, value, priority);
-            else shape.style.removeProperty(name);
-          }
-          if (marks.has(node.dataset.flowId)) {
-            shape.style.setProperty("fill", "var(--mark-fill)", "important");
-            shape.style.setProperty("stroke", "var(--mark-stroke)", "important");
-            shape.style.setProperty("stroke-width", "4px", "important");
-          }
+      applyAnnotations(message);
+    }
+  }
+
+  function clearAnnotationState() {
+    annotationNodes.clear();
+    appliedMarks.clear();
+    appliedGray.clear();
+  }
+
+  function applyAnnotations({ marked, gray }) {
+    const marks = new Set(marked.filter(id => annotationNodes.has(id)));
+    const grayed = new Set(gray.filter(id => annotationNodes.has(id)));
+    for (const id of appliedMarks)
+      if (!marks.has(id)) updateMark(annotationNodes.get(id), false);
+    for (const id of marks)
+      if (!appliedMarks.has(id)) updateMark(annotationNodes.get(id), true);
+    for (const id of appliedGray)
+      if (!grayed.has(id)) annotationNodes.get(id).classList.remove("grayed");
+    for (const id of grayed)
+      if (!appliedGray.has(id)) annotationNodes.get(id).classList.add("grayed");
+    appliedMarks = marks;
+    appliedGray = grayed;
+  }
+
+  function updateMark(node, marked) {
+    node.classList.toggle("marked", marked);
+    for (const shape of node.querySelectorAll(":scope > rect:not(.selection-ring), :scope > polygon:not(.selection-ring), :scope > path:not(.selection-ring), :scope > circle:not(.selection-ring)")) {
+      if (marked) {
+        const properties = ["fill", "stroke", "stroke-width"];
+        originalStyles.set(shape, properties.map(name => [name, shape.style.getPropertyValue(name), shape.style.getPropertyPriority(name)]));
+        shape.style.setProperty("fill", "var(--mark-fill)", "important");
+        shape.style.setProperty("stroke", "var(--mark-stroke)", "important");
+        shape.style.setProperty("stroke-width", "4px", "important");
+      } else {
+        for (const [name, value, priority] of originalStyles.get(shape) ?? []) {
+          if (value) shape.style.setProperty(name, value, priority);
+          else shape.style.removeProperty(name);
         }
+        originalStyles.delete(shape);
       }
     }
   }

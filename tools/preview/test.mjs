@@ -133,6 +133,21 @@ try {
   await page.evaluate(() => window.flowPreview({ type: "annotations", marked: ["n0"], gray: ["n0"] }));
   const stroke = await graph.locator('[data-flow-id="n0"] rect').evaluate(shape => getComputedStyle(shape).stroke);
   assert.equal(stroke, "rgb(123, 82, 0)");
+  await page.evaluate(() => {
+    const original = document.querySelector('[data-flow-id="n2"] > rect');
+    original.style.setProperty("fill", "rgb(20, 40, 60)", "important");
+    window.flowPreview({ type: "annotations", marked: ["n2", "n2", "missing"], gray: ["n5"] });
+    window.flowPreview({ type: "annotations", marked: ["n2"], gray: ["n5"] });
+  });
+  assert.equal(await graph.locator(".marked").count(), 1);
+  assert.equal(await graph.locator(".marked").getAttribute("data-flow-id"), "n2");
+  assert.equal(await graph.locator(".grayed").getAttribute("data-flow-id"), "n5");
+  assert.equal(await graph.locator('[data-flow-id="n2"] rect').evaluate(shape => getComputedStyle(shape).stroke), "rgb(123, 82, 0)");
+  await page.evaluate(() => window.flowPreview({ type: "annotations", marked: [], gray: [] }));
+  assert.equal(await graph.locator(".marked,.grayed").count(), 0);
+  assert.deepEqual(await graph.locator('[data-flow-id="n2"] rect').evaluate(shape =>
+    [shape.style.getPropertyValue("fill"), shape.style.getPropertyPriority("fill")]), ["rgb(20, 40, 60)", "important"]);
+  await page.evaluate(() => window.flowPreview({ type: "annotations", marked: ["n0"], gray: ["n0"] }));
   const savedViewport = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "viewport").value);
   const savedTransform = await graph.evaluate(node => node.style.transform);
   await page.evaluate(text => window.flowPreview({ type: "render", theme: "dark", version: 4, diagramRevision: 2, text }), source);
