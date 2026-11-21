@@ -40,7 +40,10 @@ try {
     await page.addInitScript(() => {
       window.chrome.webview = {
         postMessage(data) { if (data.type === "rendered") window.finishRender(performance.now()); },
-        addEventListener() {}
+        addEventListener(name, listener) {
+          if (name !== "message") throw new Error("Unexpected WebView event: " + name);
+          window.receiveFromHost = data => listener({ data });
+        }
       };
     });
     await page.goto(origin + "/" + tag + "/index.html");
@@ -57,7 +60,7 @@ try {
           const start = performance.now();
           const end = await new Promise(resolve => {
             window.finishRender = resolve;
-            window.flowPreview({ type: "render", theme: "light", version, diagramRevision: version, nodes, edges });
+            window.receiveFromHost({ type: "render", theme: "light", version, diagramRevision: version, text: null, nodes, edges });
           });
           if (version > 1) times.push(end - start);
         }
