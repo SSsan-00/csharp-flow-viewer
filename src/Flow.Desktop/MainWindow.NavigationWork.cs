@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Diagnostics;
 using Flow.Analysis;
 using Flow.Mermaid;
 using Flow.Model;
@@ -7,7 +8,7 @@ namespace Flow.Desktop;
 
 public partial class MainWindow
 {
-    private CancellationTokenSource? navigationCancellation;
+    private CancellationTokenSource? operationCancellation;
 
     private sealed record LoadedSource(SourceFile? CSharp, RazorSourceFile? Razor, JavaScriptSourceFile? JavaScript)
     {
@@ -20,20 +21,21 @@ public partial class MainWindow
     private sealed record PreparedFlow(FlowDiagram Graph, string? Mermaid);
     private sealed record PreparedNavigation(LoadedSource Source, MethodEntry? Entry, PreparedFlow? Flow);
 
-    private void CancelNavigation(object sender, RoutedEventArgs args)
+    private void CancelOperation(object sender, RoutedEventArgs args)
     {
-        if (navigationCancellation is not { IsCancellationRequested: false } cancellation) return;
+        if (operationCancellation is not { IsCancellationRequested: false } cancellation) return;
         cancellation.Cancel();
-        SetStatus("移動を中断しています…");
+        SetStatus("処理を中断しています…");
         UpdateSurface();
     }
 
-    // No editor, diagram or history change is allowed until preparation has completed.
-    private async Task<bool> RunNavigationAsync<T>(string status, Func<CancellationToken, Task<T>> prepare, Action<T> apply)
+    // Commit changes to the displayed view only after preparation succeeds.
+    private async Task<bool> RunOperationAsync<T>(string status, Func<CancellationToken, Task<T>> prepare, Action<T> apply, string failure = "ナビゲーションを完了できませんでした。", string timing = "navigation")
     {
         if (busy || closed) return false;
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-        navigationCancellation = cancellation;
+        operationCancellation = cancellation;
+        var started = Stopwatch.GetTimestamp();
         SetBusy(true);
         SetStatus(status);
         try
@@ -41,25 +43,26 @@ public partial class MainWindow
             var result = await prepare(cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             if (closed) return false;
-            navigationCancellation = null;
+            operationCancellation = null;
             apply(result);
+            FlowTiming.Log.Record(timing, started, version);
             return true;
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
-            if (!closed) SetStatus("中断しました。移動前の表示を保持しています。");
+            if (!closed) SetStatus("中断しました。処理前の表示を保持しています。");
             return false;
         }
         catch (Exception exception) when (!closed)
         {
-            var message = exception is ProjectLoadException ? exception.Message : "ナビゲーションを完了できませんでした。";
+            var message = exception is ProjectLoadException ? exception.Message : failure;
             SetStatus(message, attention: true);
             return false;
         }
         catch (Exception) when (closed) { return false; }
         finally
         {
-            navigationCancellation = null;
+            operationCancellation = null;
             if (!closed) SetBusy(false);
         }
     }
@@ -139,7 +142,8 @@ public partial class MainWindow
         if (!FilesBox.Items.Contains(file)) FileFilter.Clear();
         FilesBox.SelectedItem = file;
         FilesBox.ScrollIntoView(file);
-        ApplyLoadedFile(file, loaded);
+        var statePath = GetFileStatePath(file);
+        ApplyLoadedFile(file, loaded, statePath, ReadFileState(statePath));
     }
 
     private void ApplyPreparedEntry(ProjectFile file, PreparedNavigation prepared, string? returnTo = null,

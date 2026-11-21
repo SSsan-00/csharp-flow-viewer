@@ -222,7 +222,7 @@ public partial class MainWindow
             return;
         }
         if (project is not { } currentProject || currentFile is not { } targetFile || method is not { } target) return;
-        if (callerSearch is null && !await RunNavigationAsync("呼び出し元を検索中…",
+        if (callerSearch is null && !await RunOperationAsync("呼び出し元を検索中…",
             token => Task.Run(() => currentProject.FindCallersAsync(targetFile, target.Id, token), token),
             result => callerSearch = result)) return;
 
@@ -247,7 +247,7 @@ public partial class MainWindow
     private async Task OpenCallerAsync(CallerLocation caller)
     {
         if (project is not { } currentProject) return;
-        await RunNavigationAsync("呼び出し元の表示を準備中…", async token =>
+        await RunOperationAsync("呼び出し元の表示を準備中…", async token =>
         {
             var context = caller.RazorContext is { } page
                 ? await Task.Run(() => currentProject.ReadRazorAsync(page, token), token) : null;
@@ -294,7 +294,7 @@ public partial class MainWindow
                 TargetFilePath = candidate.TargetFilePath ?? currentFile?.Path
             })
             .Where(candidate => FindDefinitionFile(candidate.TargetFilePath) is not null).ToArray() ?? [];
-        await RunNavigationAsync("宣言の表示を準備中…",
+        await RunOperationAsync("宣言の表示を準備中…",
             token => ReadNavigationSourceAsync(file, null, null, token), loaded =>
         {
             commitHistory();
@@ -332,7 +332,7 @@ public partial class MainWindow
             return;
         }
 
-        await RunNavigationAsync(returnTo is null ? "呼び出し先の表示を準備中…" : "呼び出し元の表示を準備中…",
+        await RunOperationAsync(returnTo is null ? "呼び出し先の表示を準備中…" : "呼び出し元の表示を準備中…",
             token => PrepareNavigationAsync(file, entryId, razorContext, jsContext, token),
             prepared =>
             {

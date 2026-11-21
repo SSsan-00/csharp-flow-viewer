@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Data;
 using Flow.Analysis;
 
 namespace Flow.Desktop;
@@ -15,7 +16,7 @@ public partial class MainWindow
     {
         if (project is null || path is null) return;
         var state = new ProjectViewState(path, project.Options.Configuration, project.Options.TargetFramework,
-            (FilesBox.SelectedItem as ProjectFile)?.Path);
+            currentFile?.Path);
         var temporary = ProjectStatePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
@@ -52,33 +53,64 @@ public partial class MainWindow
         await OpenProjectAsync(state.Project, state);
     }
 
-    private async Task OpenProjectAsync(string projectPath, ProjectViewState? state = null)
+    private Task OpenProjectAsync(string projectPath, ProjectViewState? state = null) =>
+        ChangeProjectAsync(projectPath,
+            state is { Configuration: { } configuration } ? new(configuration, state.TargetFramework) : null,
+            state?.File);
+
+    private async Task ChangeProjectAsync(string projectPath, ProjectOptions? requested, string? previousFile, bool inspect = true)
     {
-        SetBusy(true);
+        ProjectSession? pending = null;
         try
         {
-            ResetProject();
-            path = projectPath;
-            FileFilter.Clear();
-            ProjectLabel.Text = Path.GetFileName(path);
-            ProjectLabel.ToolTip = path;
-            SdkLabel.Text = "";
-            SettingsBox.ItemsSource = null;
-            SetState("プロジェクトを評価中", "SDK と構成を確認しています…");
-            SetStatus("SDK とプロジェクト設定を確認中");
-            var settings = await ProjectLoader.InspectAsync(path, lifetime.Token);
+            var applied = await RunOperationAsync("SDK とプロジェクト設定を確認中…", async token =>
+            {
+                var settings = inspect ? await ProjectLoader.InspectAsync(projectPath, token) : null;
+                var options = settings is null ? requested! : settings.Options.FirstOrDefault(item => item == requested) ?? settings.Options[0];
+                SetStatus(options + " の設計時ビルドを読み込み中…");
+                pending = await ProjectLoader.OpenAsync(projectPath, options, token);
+                return (settings, options, session: pending);
+            }, result =>
+            {
+                ResetProject();
+                if (path != projectPath) FileFilter.Clear();
+                path = projectPath;
+                ProjectLabel.Text = Path.GetFileName(projectPath);
+                ProjectLabel.ToolTip = projectPath;
+                if (result.settings is { } settings)
+                {
+                    SdkLabel.Text = ".NET SDK " + settings.SdkVersion;
+                    SettingsBox.ItemsSource = settings.Options;
+                }
+                SettingsBox.SelectedItem = result.options;
+                project = result.session;
+                pending = null;
+                FilesBox.ItemsSource = project.Files;
+                CollectionViewSource.GetDefaultView(project.Files).Filter =
+                    item => item is ProjectFile file && file.Label.Contains(FileFilter.Text.Trim(), StringComparison.OrdinalIgnoreCase);
+                UpdateFileCount();
+                RefreshDiagnostics();
+                SetState(project.Files.Count == 0 ? "対象ファイルがありません" : "対象ファイルを選択",
+                    project.Files.Count == 0 ? "構成、対象フレームワーク、Compile 項目と診断を確認してください。"
+                        : "左の一覧から C# / Razor / JavaScript ファイルを選んでください。");
+                SetStatus(project.Files.Count == 0 ? "選択できるソースファイルがありません。"
+                    : project.Notices.Count == 0 ? "対象ファイルを選択してください。" : "MSBuild 診断があります。対象ファイルを選択できます。",
+                    attention: project.Files.Count == 0 || project.Notices.Count != 0);
+            }, "プロジェクトを読み込めません。", "project");
             if (closed) return;
-            SdkLabel.Text = ".NET SDK " + settings.SdkVersion;
-            SettingsBox.ItemsSource = settings.Options;
-            var options = settings.Options.FirstOrDefault(item =>
-                item.Configuration == state?.Configuration && item.TargetFramework == state?.TargetFramework)
-                ?? settings.Options[0];
-            SettingsBox.SelectedItem = options;
-            await LoadProject(options, state?.File);
-            if (project is not null) SaveProjectState();
+            if (!applied)
+            {
+                RestoreSelection(() => SettingsBox.SelectedItem = project?.Options);
+                return;
+            }
+            SaveProjectState();
+            if (previousFile is not null && project?.Files.FirstOrDefault(file =>
+                string.Equals(file.Path, previousFile, StringComparison.OrdinalIgnoreCase)) is { } previous)
+            {
+                if (!FilesBox.Items.Contains(previous)) FileFilter.Clear();
+                await LoadFileAsync(previous);
+            }
         }
-        catch (Exception exception) when (!closed) { ShowFailure(exception, "プロジェクトを開けません"); }
-        catch (Exception) when (closed) { }
-        finally { if (!closed) SetBusy(false); }
+        finally { pending?.Dispose(); }
     }
 }
