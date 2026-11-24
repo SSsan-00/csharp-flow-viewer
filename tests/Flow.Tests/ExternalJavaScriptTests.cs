@@ -11,6 +11,35 @@ namespace Flow.Tests;
 public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
+    public async Task InlineChangeFollowsTheOriginalExternalOffsetAfterRecoveringAnUnrelatedAssignment()
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Index.cshtml", """
+            <script src="~/js/legacy.js"></script>
+            <select onchange="reload();"></select>
+            """);
+        const string source = "const broken=;\r\nfunction reload() { return 7; }";
+        var script = tree.Add("wwwroot/js/legacy.js", source);
+        using var session = tree.Open(pagePath, script);
+        var page = await ReadPage(session);
+        var link = FindCall(page.Analyze(-1), "onchange → reload()");
+        Assert.AreEqual(script, link.TargetFilePath);
+        var file = session.Files.Single(item => item.Path == script);
+        foreach (var context in new RazorSourceFile?[] { null, page })
+        {
+            var opened = await session.ReadJavaScriptAsync(file, CancellationToken.None, context);
+            Assert.AreEqual(source, opened.Text);
+            var definition = opened.Entries.Single(item => item.Name == "reload");
+            Assert.AreEqual(link.TargetMethod, definition.Id);
+            Assert.AreEqual(2, definition.Source.Line);
+            var body = opened.Analyze(definition.Id);
+            Assert.IsTrue(body.IsPartial);
+            var result = FindCall(body, "return 7;");
+            Assert.AreEqual(source.IndexOf("return 7;", StringComparison.Ordinal), result.Source!.Offset);
+        }
+    }
+
+    [TestMethod]
     [DataRow(false)]
     [DataRow(true)]
     public async Task EditorClickOnEncodedRazorEventOpensTheExactDefinition(bool external)

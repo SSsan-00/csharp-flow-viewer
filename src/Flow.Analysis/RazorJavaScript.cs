@@ -102,12 +102,12 @@ public sealed class RazorJavaScript
             var external = path is not null && (standalone || !LocalJavaScriptFiles.PathComparer.Equals(path, pagePath));
             if (external && externalUnits.ContainsKey(path!)) return;
             var diagnosticsBeforeParse = notices.Count;
-            var unit = Parse(fragment, inline: false);
+            var unit = Parse(fragment, inline: false, token: token);
             if (unit is null && standalone && LocalJavaScriptFiles.PathComparer.Equals(path, pagePath) && !fragment.IsModule)
             {
                 var classicFailure = notices.Skip(diagnosticsBeforeParse).ToArray();
                 notices.RemoveRange(diagnosticsBeforeParse, notices.Count - diagnosticsBeforeParse);
-                var module = Parse(fragment with { IsModule = true }, inline: false);
+                var module = Parse(fragment with { IsModule = true }, inline: false, token: token);
                 if (module is null)
                 {
                     notices.RemoveRange(diagnosticsBeforeParse, notices.Count - diagnosticsBeforeParse);
@@ -251,7 +251,7 @@ public sealed class RazorJavaScript
         token.ThrowIfCancellationRequested();
         var decoded = InlineScriptText.Decode(code, token);
         var fragment = new RazorJavaScriptFragment(decoded.Text, source, containsRazorCode);
-        var unit = Parse(fragment, inline: true, decoded);
+        var unit = Parse(fragment, inline: true, token, decoded);
         if (unit is null)
         {
             var failed = AddEntry(name, null, new ScriptUnit(decoded.Text, code, source, null!, containsRazorCode),
@@ -287,7 +287,8 @@ public sealed class RazorJavaScript
         return (range, nested);
     }
 
-    private ScriptUnit? Parse(RazorJavaScriptFragment fragment, bool inline, InlineScriptText? inlineText = null)
+    private ScriptUnit? Parse(RazorJavaScriptFragment fragment, bool inline, CancellationToken token,
+        InlineScriptText? inlineText = null)
     {
         if (fragment.ContainsRazorCode)
         {
@@ -296,7 +297,21 @@ public sealed class RazorJavaScript
         try
         {
             var parser = new Parser(new ParserOptions { AllowReturnOutsideFunction = inline });
-            JsProgram root = fragment.IsModule ? parser.ParseModule(fragment.Text) : parser.ParseScript(fragment.Text);
+            JsProgram root;
+            JavaScriptRecovery? recovery = null;
+            try
+            {
+                root = fragment.IsModule ? parser.ParseModule(fragment.Text) : parser.ParseScript(fragment.Text);
+            }
+            catch (ParseErrorException error)
+            {
+                Notice($"L{fragment.Source.Line + Math.Max(0, error.LineNumber - 1)}: JavaScript構文エラー ({error.Error.Code})。");
+                if (inline || fragment.IsModule || fragment.RenderingSlots is { Count: > 0 }) return null;
+                recovery = JavaScriptRecovery.TryParse(fragment.Text, error.Error, token);
+                if (recovery is null) return null;
+                root = recovery.Program;
+                Notice($"L{fragment.Source.Line}: 構文エラー箇所を補って静的な定義と呼び出しのみを解析しました。");
+            }
             if (fragment.RenderingSlots is { Count: > 0 } slots)
             {
                 var statementSlots = Descendants(root).OfType<EmptyStatement>().Select(node => node.Start).ToHashSet();
@@ -311,12 +326,7 @@ public sealed class RazorJavaScript
                 && (fragment.Source.FilePath is null || fragment.Source.FilePath == pagePath)
                 ? pageText.Substring(fragment.Source.Offset, projected.Length) : projected;
             return new ScriptUnit(fragment.Text, original, fragment.Source, root, fragment.ContainsRazorCode,
-                fragment.RenderingSlots, inlineText);
-        }
-        catch (ParseErrorException error)
-        {
-            Notice($"L{fragment.Source.Line + Math.Max(0, error.LineNumber - 1)}: JavaScript構文エラー ({error.Error.Code})。");
-            return null;
+                fragment.RenderingSlots, inlineText, recovery);
         }
         catch (InsufficientExecutionStackException)
         {
@@ -462,7 +472,8 @@ public sealed class RazorJavaScript
                 && property.Length > 2)
             {
                 AddBinding(Selector(member.Object, scope) ?? "動的な要素", property[2..], assignment.Right,
-                    assignment, unit, scope, conditional: conditionalNodes.Contains(node) || scope.Parent is not null || unit.ContainsRazor,
+                    assignment, unit, scope, conditional: conditionalNodes.Contains(node) || scope.Parent is not null
+                        || unit.ContainsRazor || unit.Recovery is not null,
                     xhr: member.Object is Identifier client ? scope.FindXhr(client.Name) : null);
             }
         }
@@ -489,7 +500,8 @@ public sealed class RazorJavaScript
         if (call.Callee is not MemberExpression member || PropertyName(member) is not { } method) return;
         var args = call.Arguments;
         var selector = Selector(member.Object, scope) ?? "動的な要素";
-        var nested = scope.Parent is not null || conditionalNodes.Contains(call) || unit.ContainsRazor;
+        var nested = scope.Parent is not null || conditionalNodes.Contains(call) || unit.ContainsRazor
+            || unit.Recovery is not null;
         if (method is "addEventListener" or "attachEvent" && args.Count >= 2)
         {
             var eventName = StringValue(args[0]);
@@ -559,7 +571,8 @@ public sealed class RazorJavaScript
         else if (method == "send")
         {
             var resolved = usage.Method is not null && usage.Url is not null && ReferenceEquals(usage.OpenScope, scope)
-                && !usage.OpenConditional && usage.OpenCount == 1 && usage.AsyncKnown && !unit.ContainsRazor && !xhr.ConditionalConstruction;
+                && !usage.OpenConditional && usage.OpenCount == 1 && usage.AsyncKnown && !unit.ContainsRazor
+                && unit.Recovery is null && !xhr.ConditionalConstruction;
             var client = "XMLHttpRequest: " + variable.Name;
             var request = new RazorJavaScriptRequest(owners.GetValueOrDefault(call, scope.OwnerEntryId), client, usage.Method?.ToUpperInvariant() ?? "動的なHTTPメソッド",
                 usage.Url ?? usage.UrlExpression ?? "送信先未解決", call.Arguments.Count > 0 ? Slice(unit, call.Arguments[0]) : null,
@@ -735,13 +748,14 @@ public sealed class RazorJavaScript
     // 通常のJSの末尾から、別のRazor制御ブロックへ範囲を伸ばすことはしない。
     private static int MappedEnd(ScriptUnit unit, Node node)
     {
-        var end = Math.Clamp(node.End, 0, unit.Text.Length);
-        var encodedEnd = EncodedOffset(unit, end);
+        var end = ParsedToProjectedOffset(unit, node.End);
+        var encodedEnd = unit.InlineText?.EncodedOffset(end) ?? end;
         if (!unit.ContainsRazor || end == 0) return encodedEnd;
         var tokenStart = end;
-        while (tokenStart > node.Start && (char.IsLetterOrDigit(unit.Text[tokenStart - 1])
+        var start = ParsedToProjectedOffset(unit, node.Start);
+        while (tokenStart > start && (char.IsLetterOrDigit(unit.Text[tokenStart - 1])
             || unit.Text[tokenStart - 1] is '_' or '$')) --tokenStart;
-        var encodedStart = EncodedOffset(unit, tokenStart);
+        var encodedStart = unit.InlineText?.EncodedOffset(tokenStart) ?? tokenStart;
         var projected = unit.InlineText?.Encoded ?? unit.Text;
         var length = encodedEnd - encodedStart;
         if (length == 0 || projected.AsSpan(encodedStart, length)
@@ -754,8 +768,15 @@ public sealed class RazorJavaScript
 
     private static int EncodedOffset(ScriptUnit unit, int offset)
     {
-        offset = Math.Clamp(offset, 0, unit.Text.Length);
+        offset = ParsedToProjectedOffset(unit, offset);
         return unit.InlineText?.EncodedOffset(offset) ?? offset;
+    }
+
+    private static int ParsedToProjectedOffset(ScriptUnit unit, int offset)
+    {
+        var recovery = unit.Recovery;
+        offset = Math.Clamp(offset, 0, unit.Text.Length + (recovery?.ParsedLengthDelta ?? 0));
+        return recovery?.SourceOffset(offset) ?? offset;
     }
 
     internal static string? PropertyName(MemberExpression member) => member.Computed
@@ -776,7 +797,7 @@ public sealed class RazorJavaScript
 
     internal sealed record ScriptUnit(string Text, string OriginalText, SourceRange Source, JsProgram Root,
         bool ContainsRazor, IReadOnlyDictionary<int, SourceRange>? RenderingSlots = null,
-        InlineScriptText? InlineText = null);
+        InlineScriptText? InlineText = null, JavaScriptRecovery? Recovery = null);
     internal sealed class EntryData(MethodEntry entry, Node? body, ScriptUnit unit, Scope scope)
     {
         public MethodEntry Entry { get; set; } = entry;

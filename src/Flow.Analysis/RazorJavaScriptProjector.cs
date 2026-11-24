@@ -25,6 +25,8 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
         end = Add(NodeKind.End, "JavaScript 終了", entry.Body);
         if (entry.Unit.ContainsRazor)
             MarkPartial("Razorが生成するJavaScriptの値と実行経路は確定できません。この図は静的に抽出できた処理の候補を表示します。");
+        if (entry.Unit.Recovery is not null)
+            MarkPartial("元のJavaScriptに構文エラーがあります。読み取れた定義や呼び出しは確認できますが、実行結果は確定できません。");
         if (entry.Body is null)
         {
             var unavailable = Add(NodeKind.Exception, entry.Failure ?? "JavaScript解析未解決", null);
