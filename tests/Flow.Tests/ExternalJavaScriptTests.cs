@@ -10,6 +10,71 @@ namespace Flow.Tests;
 public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
+    [DataRow("""<select onchange="reload();"></select>""", """<script>function reload() { return 0; }</script>""", true)]
+    [DataRow("""<select onchange='reload();'></select>""", """<script>function reload() { return 0; }</script>""", true)]
+    [DataRow("""<select onchange=reload();></select>""", """<script>function reload() { return 0; }</script>""", true)]
+    [DataRow("""<select onchange="reload();"></select>""", """@section Scripts { <script>function reload() { return 0; }</script> }""", true)]
+    [DataRow("""<select onchange="reload();"></select>""", """<script>function reload() { return @Model.Current; }</script>""", true)]
+    [DataRow("""<select onchange="reload();"></select>""", """<script type="text/jscript">function reload() { return 0; }</script>""", true)]
+    [DataRow("""<select onchange="reload();"></select>""", """<script language="JavaScript1.2">function reload() { return 0; }</script>""", true)]
+    [DataRow("""<select onchange="reload();"></select>""", """<script type="" language="VBScript">function reload() { return 0; }</script>""", true)]
+    [DataRow("""<select onchange="reload();"></select>""", """<script type="module">function reload() { return 0; }</script>""", false)]
+    [DataRow("""<select onchange="reload();"></select>""", """<script type="application/json" language="javascript">function reload() { return 0; }</script>""", false)]
+    [DataRow("""<select onchange="reload();"></select>""", """<script type="text/javascript; charset=UTF-8">function reload() { return 0; }</script>""", false)]
+    [DataRow("""<select onchange=“reload();”></select>""", """<script>function reload() { return 0; }</script>""", false)]
+    public void InlineChangeWithTerminatingSemicolonCanFollowSameFileDefinition(string element, string script, bool available)
+    {
+        var page = new RazorSourceFile(element + "\n" + script, Path.GetFullPath("Index.cshtml"));
+        var overview = page.Analyze(-1);
+        var change = Assert.ContainsSingle(overview.Nodes.Where(node => node.Label.StartsWith("onchange → ", StringComparison.Ordinal)));
+        if (!available)
+        {
+            Assert.IsNull(change.TargetMethod);
+            return;
+        }
+        var reload = Assert.ContainsSingle(page.Entries.Where(entry => entry.Name == "reload"), string.Join("\n", page.Notices));
+        Assert.AreEqual(reload.Id, change.TargetMethod, change.Label);
+        Assert.AreEqual(page.FilePath, change.TargetFilePath);
+        Assert.AreEqual(2, reload.Source.Line);
+        var inlineEvent = page.Entries.Single(entry => entry.Name.StartsWith("change · ", StringComparison.Ordinal));
+        var call = FindCall(page.Analyze(inlineEvent.Id), "reload()");
+        Assert.AreEqual(reload.Id, call.TargetMethod);
+    }
+
+    [TestMethod]
+    [DataRow("text/javascript", true)]
+    [DataRow("APPLICATION/X-JAVASCRIPT", true)]
+    [DataRow("application/json", false)]
+    public async Task InlineChangeWithTerminatingSemicolonFollowsOnlyTheReferencedClassicScript(string type, bool available)
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Index.cshtml", $$"""
+            @page
+            <select onchange="reload();"></select>
+            <script type="{{type}}" src="~/js/orders.js"></script>
+            <script>function normal() { reload(); }</script>
+            """);
+        var script = tree.Add("wwwroot/js/orders.js", "// existing page script\nfunction reload() { return 0; }");
+        var unrelated = tree.Add("wwwroot/js/unrelated.js", "function reload() {}");
+        using var session = tree.Open(pagePath, script, unrelated);
+        var page = await ReadPage(session);
+        var change = FindCall(page.Analyze(-1), "onchange → reload()");
+        var normal = FindCall(page.Analyze(page.Entries.Single(entry => entry.Name == "normal").Id), "reload()");
+        var targetFile = session.Files.Single(file => file.Path == script);
+        var targetSource = await session.ReadJavaScriptAsync(targetFile, CancellationToken.None, page);
+        var definition = targetSource.Entries.Single(entry => entry.Name == "reload");
+        Assert.AreEqual(2, definition.Source.Line);
+        foreach (var call in new[] { change, normal })
+        {
+            Assert.AreEqual(available ? script : null, call.TargetFilePath);
+            Assert.AreEqual(available ? definition.Id : (int?)null, call.TargetMethod);
+        }
+        var callers = (await session.FindCallersAsync(targetFile, definition.Id, CancellationToken.None)).Locations;
+        if (available) CollectionAssert.AreEqual(new[] { 2, 4 }, callers.Select(caller => caller.Source.Line).ToArray());
+        else Assert.IsEmpty(callers);
+    }
+
+    [TestMethod]
     public async Task ClassicScriptAndInlineEventJumpToExternalDefinitionWithStableId()
     {
         using var tree = new Files();
@@ -248,6 +313,39 @@ public sealed class ExternalJavaScriptTests
         Assert.AreEqual(definition.Id, node.TargetMethod);
         Assert.AreEqual(1, definition.Source.Line);
         Assert.AreEqual(node.Source, Assert.ContainsSingle((await session.FindCallersAsync(file, definition.Id, CancellationToken.None)).Locations).Source);
+    }
+
+    [TestMethod]
+    public void EventRegistrationsAndOrdinaryCallsFollowTheSameExplicitWindowHandler()
+    {
+        var page = new RazorSourceFile("""
+            <script>
+              window.save = function () { return true; };
+              document.getElementById("submit").onclick = window.save;
+              document.getElementById("choice").addEventListener("change", window["save"]);
+              $("#edit").on("focus", window.save);
+              document.getElementById("dynamic").oninput = window[handlerName];
+              function normal() { window.save(); }
+              function shadowed(window) {
+                  document.getElementById("shadowed").onblur = window.save;
+              }
+              document.getElementById("result").onmouseup = window.save();
+            </script>
+            <button onclick="window.save()"></button>
+            """, Path.GetFullPath("Index.cshtml"));
+
+        var save = page.Entries.Single(entry => entry.Name == "save");
+        var normal = page.Analyze(page.Entries.Single(entry => entry.Name == "normal").Id);
+        Assert.AreEqual(save.Id, FindCall(normal, "window.save()").TargetMethod);
+        var overview = page.Analyze(-1);
+        Assert.AreEqual(save.Id, FindCall(overview, "onclick → window.save()").TargetMethod);
+        foreach (var selector in new[] { "#submit", "#choice", "#edit" })
+        {
+            var registration = Assert.ContainsSingle(overview.Nodes.Where(node => node.Label.EndsWith($" · {selector}")));
+            Assert.AreEqual(save.Id, registration.TargetMethod, selector);
+        }
+        foreach (var label in new[] { "input · #dynamic", "blur · #shadowed", "mouseup · #result" })
+            Assert.IsNull(FindCall(overview, label).TargetMethod, label);
     }
 
     [TestMethod]

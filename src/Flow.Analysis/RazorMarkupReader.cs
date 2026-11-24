@@ -18,6 +18,15 @@ internal sealed class RazorMarkupReader
     private static readonly HashSet<string> RawTextElements = new(StringComparer.OrdinalIgnoreCase)
         { "script", "style", "textarea", "title" };
 
+    // https://mimesniff.spec.whatwg.org/#javascript-mime-type
+    private static readonly HashSet<string> ClassicScriptTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "application/ecmascript", "application/javascript", "application/x-ecmascript", "application/x-javascript",
+        "text/ecmascript", "text/javascript", "text/javascript1.0", "text/javascript1.1", "text/javascript1.2",
+        "text/javascript1.3", "text/javascript1.4", "text/javascript1.5", "text/jscript", "text/livescript",
+        "text/x-ecmascript", "text/x-javascript"
+    };
+
     public RazorMarkupReader(RazorMarkupDocument document, string original, CancellationToken token)
     {
         var html = document.Html;
@@ -99,9 +108,9 @@ internal sealed class RazorMarkupReader
                 element.End = contentEnd;
                 if (tag == "script")
                 {
-                    if (IsJavaScript(element))
+                    if (GetScriptKind(element) is { } kind)
                     {
-                        var module = element.Attribute("type")?.Value.Trim().Equals("module", StringComparison.OrdinalIgnoreCase) == true;
+                        var module = kind == ScriptKind.Module;
                         if (element.Attribute("src") is { } scriptSource)
                         {
                             var literalPath = LiteralContentPath(scriptSource.RawValue);
@@ -171,15 +180,18 @@ internal sealed class RazorMarkupReader
         return html.Length;
     }
 
-    private static bool IsJavaScript(RazorElement element)
+    private enum ScriptKind { Classic, Module }
+
+    private static ScriptKind? GetScriptKind(RazorElement element)
     {
-        if (element.Attribute("type") is { } type && !string.IsNullOrWhiteSpace(type.Value))
-            return type.Value.Trim().ToLowerInvariant() is "text/javascript" or "application/javascript"
-                or "text/ecmascript" or "application/ecmascript" or "module";
-        return element.Attribute("language") is not { } language || string.IsNullOrWhiteSpace(language.Value)
-            || language.Value.StartsWith("javascript", StringComparison.OrdinalIgnoreCase)
-            || language.Value.Equals("jscript", StringComparison.OrdinalIgnoreCase)
-            || language.Value.Equals("ecmascript", StringComparison.OrdinalIgnoreCase);
+        if (element.Attribute("type") is { } type)
+        {
+            if (type.Value.Equals("module", StringComparison.OrdinalIgnoreCase)) return ScriptKind.Module;
+            return type.Value.Length == 0 || ClassicScriptTypes.Contains(type.Value.Trim(' ', '\t', '\n', '\r', '\f'))
+                ? ScriptKind.Classic : null;
+        }
+        var language = element.Attribute("language")?.Value;
+        return string.IsNullOrEmpty(language) || ClassicScriptTypes.Contains("text/" + language) ? ScriptKind.Classic : null;
     }
 }
 

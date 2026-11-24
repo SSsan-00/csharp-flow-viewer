@@ -505,7 +505,7 @@ public sealed class RazorJavaScript
         ScriptUnit unit, Scope scope, bool delegated = false, bool conditional = false, bool legacy = false, XhrState? xhr = null)
     {
         var target = functions.TryGetValue(handler, out var function) ? function.Entry.Id
-            : handler is Identifier identifier ? scope.Resolve(identifier.Name) : null;
+            : ResolveFunctionReference(handler, scope);
         var name = target is { } id ? data[id].Entry.Name : Slice(unit, handler);
         var binding = new RazorJavaScriptBinding(selector, eventName, target, Range(unit, registration), name, delegated, conditional, legacy);
         bindings.Add(binding);
@@ -598,8 +598,13 @@ public sealed class RazorJavaScript
     internal int? ResolveCall(CallExpression call, EntryData entry)
     {
         var scope = scopes.TryGetValue(call, out var indexed) ? indexed : entry.Scope;
-        if (call.Callee is Identifier id) return ResolveCallName(scope, id.Name);
-        if (call.Callee is not MemberExpression { Object: Identifier owner } member || PropertyName(member) is not { } name)
+        return ResolveFunctionReference(call.Callee, scope);
+    }
+
+    private int? ResolveFunctionReference(Expression reference, Scope scope)
+    {
+        if (reference is Identifier id) return ResolveCallName(scope, id.Name);
+        if (reference is not MemberExpression { Object: Identifier owner } member || PropertyName(member) is not { } name)
             return null;
         if (scope.FindNamespace(owner.Name) is { } module) return module.GetValueOrDefault(name);
         if (owner.Name != "window" || scope.IsDeclared("window"))
