@@ -50,6 +50,7 @@ public sealed class RazorJavaScript
     private readonly HashSet<int> explicitWindowFunctions = [];
     private readonly HashSet<int> classicFunctionDeclarations = [];
     private readonly List<(Scope Scope, ScriptUnit Unit, string Name, string Reference)> windowAliases = [];
+    private readonly Dictionary<(Scope Scope, string Name), List<(ScriptUnit Unit, bool RequiresWindow)>> unchangedClassicBindings = [];
     private readonly Dictionary<string, SourceRange?> sourceOnlyDefinitions = new(StringComparer.Ordinal);
     private readonly Dictionary<Scope, bool> isolatedClassicScopes = new();
     private readonly Dictionary<string, ScriptUnit> externalUnits = new(LocalJavaScriptFiles.PathComparer);
@@ -79,6 +80,17 @@ public sealed class RazorJavaScript
         this.pagePath = pagePath;
         var parsed = new List<(ScriptUnit Unit, Scope Scope)>();
         foreach (var fragment in fragments) IndexFragment(fragment);
+        // Drop only known no-ops on an otherwise unique, hoisted function in the same classic script.
+        foreach (var ((scope, name), bindings) in unchangedClassicBindings)
+        {
+            token.ThrowIfCancellationRequested();
+            var hasGlobalWindow = !scope.IsDeclared("window");
+            scope.KeepUniqueDeclaration(name, id => data[id] is { IsTopLevelClassicFunction: true } definition
+                ? bindings.Count(binding => ReferenceEquals(binding.Unit, definition.Unit)
+                    && (!binding.RequiresWindow || hasGlobalWindow))
+                : 0);
+        }
+        unchangedClassicBindings.Clear();
         foreach (var (scope, unit, name, reference) in windowAliases)
         {
             token.ThrowIfCancellationRequested();
@@ -155,8 +167,13 @@ public sealed class RazorJavaScript
                 foreach (var declaration in unit.Root.Body.OfType<VariableDeclaration>())
                     if (declaration.Kind == VariableDeclarationKind.Var)
                         foreach (var variable in declaration.Declarations)
-                            if (variable.Id is Identifier && variable.Init is { } init && functions.TryGetValue(init, out var function))
-                                windowFunctions.Add(function.Entry.Id);
+                            if (variable.Id is Identifier identifier)
+                            {
+                                if (variable.Init is { } init && functions.TryGetValue(init, out var function))
+                                    windowFunctions.Add(function.Entry.Id);
+                                else if (variable.Init is null && !unit.ContainsRazor && unit.Recovery is null)
+                                    NoteUnchangedClassicBinding(scope, identifier.Name, unit, requiresWindow: false);
+                            }
             }
             parsed.Add((unit, scope));
 
@@ -382,6 +399,13 @@ public sealed class RazorJavaScript
         return detail;
     }
 
+    private void NoteUnchangedClassicBinding(Scope scope, string name, ScriptUnit unit, bool requiresWindow)
+    {
+        var key = (scope, name);
+        if (!unchangedClassicBindings.TryGetValue(key, out var bindings)) unchangedClassicBindings[key] = bindings = [];
+        bindings.Add((unit, requiresWindow));
+    }
+
     private void Index(Node node, ScriptUnit unit, Scope scope, CancellationToken token, int depth, bool conditional)
     {
         token.ThrowIfCancellationRequested();
@@ -403,6 +427,7 @@ public sealed class RazorJavaScript
                 {
                     windowFunctions.Add(entry.Entry.Id);
                     classicFunctionDeclarations.Add(entry.Entry.Id);
+                    entry.IsTopLevelClassicFunction = depth == 1;
                 }
             }
             if (function.Id is { } ownName)
@@ -482,7 +507,12 @@ public sealed class RazorJavaScript
                 scriptScope.Block(name);
                 // A named function declaration in this script is hoisted; other values may not exist yet.
                 if (publishes && windowAssignment.Right is Identifier reference)
-                    windowAliases.Add((scope, unit, name, reference.Name));
+                {
+                    if (name == reference.Name && unit.Recovery is null)
+                        NoteUnchangedClassicBinding(scope, name, unit, requiresWindow: true);
+                    else
+                        windowAliases.Add((scope, unit, name, reference.Name));
+                }
             }
         }
         if (node is CallExpression { Callee: Identifier { Name: "eval" } })
@@ -850,6 +880,7 @@ public sealed class RazorJavaScript
         public ScriptUnit Unit { get; } = unit;
         public Scope Scope { get; } = scope;
         public string? Failure { get; set; }
+        public bool IsTopLevelClassicFunction { get; set; }
     }
     internal sealed class Scope(Scope? parent)
     {
@@ -886,6 +917,18 @@ public sealed class RazorJavaScript
             if (!names.TryGetValue(name, out var declared) || declared is not [null]) return;
             declared[0] = target;
             WindowAliases.Add(name);
+        }
+        public void KeepUniqueDeclaration(string name, Func<int, int> unchangedCount)
+        {
+            if (Dynamic || !names.TryGetValue(name, out var declared) || declared.Count < 2) return;
+            int? target = null;
+            foreach (var candidate in declared)
+            {
+                if (candidate is null) continue;
+                if (target is not null) return;
+                target = candidate;
+            }
+            if (target is { } id && unchangedCount(id) == declared.Count - 1) names[name] = [id];
         }
         public Scope? DeclarationScope(string name) => names.ContainsKey(name) ? this : Parent?.DeclarationScope(name);
         public bool IsDeclared(string name) => names.ContainsKey(name) || Parent?.IsDeclared(name) == true;
