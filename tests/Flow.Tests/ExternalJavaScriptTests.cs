@@ -176,6 +176,54 @@ public sealed class ExternalJavaScriptTests
     }
 
     [TestMethod]
+    [DataRow("function reload() { return 42; }", true)]
+    [DataRow("function reload() { return 42; } var reload;", true)]
+    [DataRow("var reload; function reload() { return 42; }", true)]
+    [DataRow("window.reload = reload; function reload() { return 42; }", true)]
+    [DataRow("function reload() { return 42; } window['reload'] = reload;", true)]
+    [DataRow("var reload; window.reload = reload; function reload() { return 42; }", true)]
+    [DataRow("function reload() { return 42; } var reload = other;", false)]
+    [DataRow("function reload() { return 42; } function reload() { return 0; } var reload;", false)]
+    [DataRow("function reload() { return 42; } var reload; if (flag) window.reload = reload;", false)]
+    [DataRow("function reload() { return 42; } window.reload = factory(); window.reload = reload;", false)]
+    [DataRow("function reload() { return 42; } window.reload = reload; let window;", false)]
+    [DataRow("function reload() { return 42; } var reload; function modify() { eval(code); }", false)]
+    public async Task InlineChangeNavigatesOnlyToAnUnchangedClassicFunction(string script, bool links)
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Index.cshtml", $$"""
+            <select onchange='reload();'></select>
+            <script language='javascript'>
+            {{script}}
+            </script>
+            """);
+        using var session = tree.Open(pagePath);
+        var page = await ReadPage(session);
+        var overview = FindCall(page.Analyze(-1), "onchange → reload()");
+        var handler = Assert.ContainsSingle(page.Entries.Where(entry => entry.Name.StartsWith("change · ", StringComparison.Ordinal)));
+        var callOffset = page.Text.IndexOf("reload()", StringComparison.Ordinal);
+        var picked = SourceNodePicker.Find(page.Analyze(handler.Id).Nodes, pagePath, callOffset, line: 1);
+        Assert.IsNotNull(picked);
+        Assert.AreEqual(NodeKind.Call, picked.Kind);
+        Assert.AreEqual(callOffset, picked.Source!.Offset);
+        if (!links)
+        {
+            Assert.IsNull(overview.TargetMethod);
+            Assert.IsNull(picked.TargetMethod);
+            Assert.IsNull(picked.TargetDeclaration);
+            return;
+        }
+        var method = Assert.ContainsSingle(page.Entries.Where(entry => entry.Name == "reload"));
+        Assert.AreEqual(pagePath, picked.TargetFilePath);
+        Assert.AreEqual(method.Id, overview.TargetMethod);
+        Assert.AreEqual(method.Id, picked.TargetMethod);
+        var destination = session.Files.Single(file => file.Path == picked.TargetFilePath);
+        var reopened = await session.ReadRazorAsync(destination, CancellationToken.None);
+        var body = reopened.Analyze(method.Id).Nodes.Single(node => node.Label == "return 42;");
+        Assert.AreEqual(page.Text.IndexOf("return 42;", StringComparison.Ordinal), body.Source!.Offset);
+    }
+
+    [TestMethod]
     [DataRow("""<select onchange="reload();"></select>""", """<script>function reload() { return 0; }</script>""", true)]
     [DataRow("""<select onchange='reload();'></select>""", """<script>function reload() { return 0; }</script>""", true)]
     [DataRow("""<select onchange=reload();></select>""", """<script>function reload() { return 0; }</script>""", true)]
