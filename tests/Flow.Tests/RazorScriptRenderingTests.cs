@@ -8,6 +8,99 @@ namespace Flow.Tests;
 public sealed class RazorScriptRenderingTests
 {
     [TestMethod]
+    [DataRow("\n", "")]
+    [DataRow("\r\n", "")]
+    [DataRow("\n", ";")]
+    public void RazorBoundaryAfterTopLevelVariableStatementPreservesTheFollowingDefinition(string newline, string separator)
+    {
+        var source = $$"""
+            <select onchange="reload();"></select>
+            <script language="javascript">
+            const value = 1{{separator}}
+            @if (Model.Enabled)
+            {
+                <text>console.log(value);</text>
+            }
+            function reload() { return value; }
+            </script>
+            """.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", newline, StringComparison.Ordinal);
+        var page = new RazorSourceFile(source, Path.GetFullPath("ScriptAsi.cshtml"));
+        var target = Assert.ContainsSingle(page.Entries.Where(entry => entry.Name == "reload"));
+        Assert.AreEqual(target.Id, page.Analyze(-1).Nodes.Single(node => node.Label == "onchange → reload()").TargetMethod);
+        var inline = page.Entries.Single(entry => page.IsInlineEvent(entry.Id));
+        Assert.AreEqual(target.Id, page.Analyze(inline.Id).Nodes.Single(node => node.Label == "reload()").TargetMethod);
+        var init = Analyze(page, "JavaScript 初期化");
+        var declaration = Assert.ContainsSingle(init.Nodes.Where(node => node.Label == "value = 1"));
+        Assert.AreEqual(source.IndexOf("value = 1", StringComparison.Ordinal), declaration.Source!.Offset);
+        var boundary = Next(init, declaration);
+        Assert.IsNotNull(boundary.Source);
+        Assert.AreEqual(source.IndexOf("if (Model.Enabled)", StringComparison.Ordinal), boundary.Source.Offset);
+        Assert.AreEqual(4, boundary.Source.Line);
+        Assert.AreEqual("Model.Enabled", Slice(source, Condition(init, "Model.Enabled").Source!));
+        Assert.DoesNotContain(node => node.Label == "console.log(value)", init.Nodes);
+        Assert.IsTrue(init.IsPartial);
+        Assert.DoesNotContain(notice => notice.Contains("独立したJavaScript文として確定できません", StringComparison.Ordinal), page.Notices);
+        var returned = Assert.ContainsSingle(page.Analyze(target.Id).Nodes.Where(node => node.Label == "return value;"));
+        Assert.AreEqual(source.IndexOf("return value;", StringComparison.Ordinal), returned.Source!.Offset);
+        Assert.AreEqual(8, returned.Source.Line);
+    }
+
+    [TestMethod]
+    public void ReturnSlotFailureOffersOnlyTheIntactDefinitionSource()
+    {
+        var page = FailedReturnPage("function reload() { return 3; }");
+        var expected = page.Text.IndexOf("function reload()", StringComparison.Ordinal);
+        foreach (var node in new[] { page.Analyze(-1).Nodes.Single(node => node.Label == "onchange → reload()"),
+            page.Analyze(page.Entries.Single(entry => page.IsInlineEvent(entry.Id)).Id).Nodes.Single(node => node.Label == "reload()") })
+        {
+            Assert.IsNull(node.TargetMethod);
+            Assert.IsNotNull(node.TargetDeclaration);
+            Assert.IsTrue(node.IsDefinitionCandidate);
+            Assert.AreEqual(page.FilePath, node.TargetDeclaration.FilePath);
+            Assert.AreEqual(expected, node.TargetDeclaration.Offset);
+            Assert.AreEqual("function reload() { return 3; }", Slice(page.Text, node.TargetDeclaration));
+        }
+        var init = Analyze(page, "JavaScript 初期化");
+        Assert.IsTrue(init.IsPartial);
+        Condition(init, "Model.Enabled");
+        Assert.DoesNotContain(node => node.Kind == NodeKind.Transfer && !IsRender(node.Id), init.Nodes);
+        Assert.Contains(notice => notice.Contains("独立したJavaScript文として確定できません", StringComparison.Ordinal), init.Notices);
+    }
+
+    [TestMethod]
+    [DataRow("function reload() {} function reload() {}")]
+    [DataRow("function outer() { function reload() {} }")]
+    [DataRow("""const value = "function reload() {}";""")]
+    [DataRow("function reload() {} window.reload = unknown;")]
+    [DataRow("function reload() {} function modify() { eval(code); }")]
+    [DataRow("function reload() {}</script><script>function reload() {}")]
+    [DataRow("function reload() {} function modify() { eval(code); }</script><script>function reload() {}")]
+    public void ReturnSlotFailureDoesNotGuessACompetingOrNonVisibleDefinition(string after)
+    {
+        var page = FailedReturnPage(after);
+        var node = page.Analyze(-1).Nodes.Single(node => node.Label == "onchange → reload()");
+        Assert.IsNull(node.TargetMethod);
+        Assert.IsNull(node.TargetDeclaration);
+    }
+
+    private static RazorSourceFile FailedReturnPage(string after) => new($$"""
+        <select onchange="reload();"></select>
+        <script language="javascript">
+          function other() {
+              return @if (Model.Enabled)
+              {
+                  <text>1;</text>
+              }
+              else
+              {
+                  <text>2;</text>
+              }
+          }
+          {{after}}
+        </script>
+        """, Path.GetFullPath("FailedReturnSlot.cshtml"));
+
+    [TestMethod]
     [DataRow("\n")]
     [DataRow("\r\n")]
     public void JavaScriptFunctionShowsOnlyItsRazorFlowWithoutExecutingEmittedAlternatives(string newline)

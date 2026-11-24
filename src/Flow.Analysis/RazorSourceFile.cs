@@ -158,6 +158,17 @@ public sealed class RazorSourceFile
         if (requests.TryGetValue(entryId, out var element)) return BuildRequestFlow(element, token);
         if (!Entries.Any(entry => entry.Id == entryId)) throw new ArgumentOutOfRangeException(nameof(entryId));
         var flow = ConnectJavaScriptRequests(entryId, javaScript.Analyze(entryId, token));
+        if (javaScript.HasSourceOnlyDefinitions && IsInlineEvent(entryId))
+        {
+            var candidates = javaScript.CallSites(entryId, token).GroupBy(call => call.Source)
+                .Where(group => group.Count() == 1 && group.First().SourceOnlyDefinition is not null)
+                .ToDictionary(group => group.Key, group => group.First().SourceOnlyDefinition);
+            if (candidates.Count > 0)
+                flow = flow with { IsPartial = true, Nodes = flow.Nodes.Select(node =>
+                    node.Kind == NodeKind.Call && node.TargetMethod is null && node.Source is { } range
+                        && candidates.TryGetValue(range, out var definition)
+                        ? node with { TargetDeclaration = definition, IsDefinitionCandidate = true } : node).ToArray() };
+        }
         flow = IncludeScriptRendering(entryId, flow, token);
         return flow with { Notices = flow.Notices.Concat(Notices).Distinct(StringComparer.Ordinal).ToArray() };
     }
@@ -265,8 +276,9 @@ public sealed class RazorSourceFile
             {
                 var calls = javaScript.CallSites(entry.Id, token).ToArray();
                 var destinations = calls.Select(call => call.Target).OfType<FlowTarget>().Distinct().ToArray();
+                var candidate = calls.Length == 1 ? calls[0].SourceOnlyDefinition : null;
                 int? link = anchorRequestByOnclick.TryGetValue(entry.Id, out var anchor) ? anchor : null;
-                AddEvent($"event{eventCount++}", InlineLabel(entry.Id, calls), inline.Source, null, destinations, link);
+                AddEvent($"event{eventCount++}", InlineLabel(entry.Id, calls), inline.Source, null, destinations, link, candidate);
             }
             else AddEvent($"event{eventCount++}", entry.Signature, entry.Source, entry.Id);
         }
@@ -300,7 +312,7 @@ public sealed class RazorSourceFile
         return new FlowDiagram(nodes, edges, notices, true);
 
         void AddEvent(string id, string label, SourceRange source, int? target,
-            FlowTarget[]? destinations = null, int? link = null)
+            FlowTarget[]? destinations = null, int? link = null, SourceRange? candidate = null)
         {
             var onPage = IsPageSource(source);
             var scope = onPage ? rendering.ScopeAt(source.Offset) : null;
@@ -308,7 +320,8 @@ public sealed class RazorSourceFile
             nodes.Add(new FlowNode(id, NodeKind.Call, label, source,
                 destinations is { Length: 1 } ? destinations[0].Method : navigation.Item1,
                 TargetFilePath: destinations is { Length: 1 } ? destinations[0].FilePath : navigation.Item2,
-                CallTargets: destinations is { Length: > 1 } ? destinations : null));
+                CallTargets: destinations is { Length: > 1 } ? destinations : null,
+                TargetDeclaration: candidate, IsDefinitionCandidate: candidate is not null));
             var qualifier = scope is not null ? "この描画経路のイベント候補"
                 : "イベント候補";
             edges.Add(new FlowEdge(scope ?? "page", id, qualifier));

@@ -11,6 +11,40 @@ namespace Flow.Tests;
 public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
+    [DataRow("", false)]
+    [DataRow("defer", false)]
+    [DataRow("async", false)]
+    [DataRow("type='module'", true)]
+    public async Task ReturnSlotCandidateDoesNotHideAnotherVisibleClassicDefinition(string scriptMode, bool opensLocalSource)
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Index.cshtml", $$"""
+            <select onchange="reload();"></select>
+            <script {{scriptMode}} src="~/js/other.js"></script>
+            <script language="javascript">
+              function compute() {
+                  return @if (Model.Enabled)
+                  {
+                      <text>1;</text>
+                  }
+                  else
+                  {
+                      <text>2;</text>
+                  }
+              }
+              function reload() {}
+            </script>
+            """);
+        var script = tree.Add("wwwroot/js/other.js", "function reload() {}");
+        using var session = tree.Open(pagePath, script);
+        var page = await ReadPage(session);
+        var link = FindCall(page.Analyze(-1), "onchange → reload()");
+        Assert.IsNull(link.TargetMethod);
+        Assert.AreEqual(opensLocalSource, link.IsDefinitionCandidate);
+        Assert.AreEqual(opensLocalSource ? pagePath : null, link.TargetDeclaration?.FilePath);
+    }
+
+    [TestMethod]
     public async Task InlineChangeFollowsTheOriginalExternalOffsetAfterRecoveringAnUnrelatedAssignment()
     {
         using var tree = new Files();

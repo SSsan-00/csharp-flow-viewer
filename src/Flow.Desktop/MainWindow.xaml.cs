@@ -379,7 +379,8 @@ public partial class MainWindow : Window
         NodeLabel.ToolTip = $"{NodeLabel.Text}\n{navigation}";
         FollowButton.ToolTip = navigation;
         NavigationStatus.Text = CanFollow(node) && DefinitionPath(node) is { } targetPath
-            ? $"{(node.TargetMethod is null ? "宣言のみ" : "定義")}: {Path.GetFileName(targetPath)}" : navigation;
+            ? $"{(node.IsDefinitionCandidate ? "部分解析の定義候補" : node.TargetMethod is null ? "宣言のみ" : "定義")}: {Path.GetFileName(targetPath)}"
+            : navigation;
         NavigationStatus.ToolTip = navigation;
         NavigationStatus.Visibility = Visibility.Visible;
         if (navigateSource && node.Source is { } range) NavigateSource(range);

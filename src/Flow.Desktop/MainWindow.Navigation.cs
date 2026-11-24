@@ -262,6 +262,8 @@ public partial class MainWindow
     private string NavigationHint(FlowNode node)
     {
         if (AvailableTargets(node).Any()) return "移動する関数の定義を選択 (F12)";
+        if (node.IsDefinitionCandidate && CanFollow(node))
+            return "部分解析の定義候補へ移動 (F12)。この呼び出しの実行先は確定していません。";
         if (CanFollow(node))
             return node.TargetMethod is not null
                 ? "選択した呼び出しの定義へ移動 (F12)"
@@ -303,7 +305,9 @@ public partial class MainWindow
             }
             NavigateSource(declaration);
             Editor.Focus();
-            SetStatus("宣言へ移動しました。呼び出し元へ (Alt+←) で戻れます。");
+            SetStatus(caller.IsDefinitionCandidate
+                ? "定義候補のソースへ移動しました。呼び出し元へ (Alt+←) で戻れます。"
+                : "宣言へ移動しました。呼び出し元へ (Alt+←) で戻れます。");
             SaveProjectState();
         });
     }

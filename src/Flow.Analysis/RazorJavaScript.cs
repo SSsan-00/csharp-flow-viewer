@@ -50,6 +50,7 @@ public sealed class RazorJavaScript
     private readonly HashSet<int> explicitWindowFunctions = [];
     private readonly HashSet<int> classicFunctionDeclarations = [];
     private readonly List<(Scope Scope, ScriptUnit Unit, string Name, string Reference)> windowAliases = [];
+    private readonly Dictionary<string, SourceRange?> sourceOnlyDefinitions = new(StringComparer.Ordinal);
     private readonly Dictionary<Scope, bool> isolatedClassicScopes = new();
     private readonly Dictionary<string, ScriptUnit> externalUnits = new(LocalJavaScriptFiles.PathComparer);
     private readonly Dictionary<string, (ScriptUnit Unit, Scope Scope)> modules = new(LocalJavaScriptFiles.PathComparer);
@@ -86,6 +87,12 @@ public sealed class RazorJavaScript
                 scope.PublishWindowAlias(name, target);
         }
         windowAliases.Clear();
+        foreach (var name in sourceOnlyDefinitions.Keys.ToArray())
+            if (globals.DeclaresHere(name) || isolatedClassicScopes.Keys.Any(scope => scope.DeclaresHere(name)))
+            {
+                globals.Block(name);
+                sourceOnlyDefinitions[name] = null;
+            }
         // Modules bind exports only after declarations from all scripts are indexed.
         var moduleExports = modules.ToDictionary(pair => pair.Key, pair => BuildExports(pair.Value),
             LocalJavaScriptFiles.PathComparer);
@@ -297,6 +304,8 @@ public sealed class RazorJavaScript
         try
         {
             var parser = new Parser(new ParserOptions { AllowReturnOutsideFunction = inline });
+            var text = fragment.Text;
+            var renderingSlots = fragment.RenderingSlots;
             JsProgram root;
             JavaScriptRecovery? recovery = null;
             try
@@ -312,21 +321,49 @@ public sealed class RazorJavaScript
                 root = recovery.Program;
                 Notice($"L{fragment.Source.Line}: 構文エラー箇所を補って静的な定義と呼び出しのみを解析しました。");
             }
-            if (fragment.RenderingSlots is { Count: > 0 } slots)
+            if (renderingSlots is { Count: > 0 } slots)
             {
-                var statementSlots = Descendants(root).OfType<EmptyStatement>().Select(node => node.Start).ToHashSet();
+                var statementSlots = RazorScriptBoundaries.IndependentSlots(root);
                 if (slots.Keys.Any(offset => !statementSlots.Contains(offset)))
                 {
-                    Notice($"L{fragment.Source.Line}: Razor生成部分の境界を独立したJavaScript文として確定できません。");
-                    return null;
+                    if (!fragment.IsModule
+                        && RazorScriptBoundaries.RestoreTopLevelAsi(text, root, slots, statementSlots, token) is { } restored
+                        && ParseWithIndependentSlots(restored.Text, restored.Slots) is { } reparsed)
+                    {
+                        root = reparsed;
+                        text = restored.Text;
+                        renderingSlots = restored.Slots;
+                    }
+                    else
+                    {
+                        Notice($"L{fragment.Source.Line}: Razor生成部分の境界を独立したJavaScript文として確定できません。");
+                        if (!fragment.IsModule && !fragment.IsolatedClassic
+                            && LocalJavaScriptFiles.PathComparer.Equals(fragment.Source.FilePath, pagePath))
+                            foreach (var (name, source) in RazorScriptBoundaries.SourcesOutsideUnresolvedReturns(
+                                fragment, root, slots, statementSlots, token))
+                                if (!sourceOnlyDefinitions.TryAdd(name, source)) sourceOnlyDefinitions[name] = null;
+                        return null;
+                    }
                 }
             }
             var projected = inlineText?.Encoded ?? fragment.Text;
             var original = fragment.Source.Offset >= 0 && fragment.Source.Offset + projected.Length <= pageText.Length
                 && (fragment.Source.FilePath is null || fragment.Source.FilePath == pagePath)
                 ? pageText.Substring(fragment.Source.Offset, projected.Length) : projected;
-            return new ScriptUnit(fragment.Text, original, fragment.Source, root, fragment.ContainsRazorCode,
-                fragment.RenderingSlots, inlineText, recovery);
+            return new ScriptUnit(text, original, fragment.Source, root, fragment.ContainsRazorCode,
+                renderingSlots, inlineText, recovery);
+
+            JsProgram? ParseWithIndependentSlots(string candidate, IReadOnlyDictionary<int, SourceRange> candidateSlots)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    var parsed = parser.ParseScript(candidate);
+                    var independent = RazorScriptBoundaries.IndependentSlots(parsed);
+                    return candidateSlots.Keys.All(independent.Contains) ? parsed : null;
+                }
+                catch (ParseErrorException) { return null; }
+            }
         }
         catch (InsufficientExecutionStackException)
         {
@@ -674,8 +711,10 @@ public sealed class RazorJavaScript
     }
 
     internal MethodEntry? GetEntry(int id) => data.GetValueOrDefault(id)?.Entry;
+    internal bool HasSourceOnlyDefinitions => sourceOnlyDefinitions.Count > 0;
 
-    internal record CallSite(string? Name, SourceRange Source, MethodEntry Owner, FlowTarget? Target);
+    internal record CallSite(string? Name, SourceRange Source, MethodEntry Owner, FlowTarget? Target,
+        SourceRange? SourceOnlyDefinition = null);
 
     internal IEnumerable<CallSite> CallSites(int? ownerId, CancellationToken token)
     {
@@ -710,9 +749,15 @@ public sealed class RazorJavaScript
         };
         var id = ResolveCall(call, entry);
         var target = ResolveNavigationTarget(id);
+        SourceRange? candidate = null;
+        if (id is null && call.Callee is Identifier bare && sourceOnlyDefinitions.TryGetValue(bare.Name, out var found)
+            && found is not null && scopes.TryGetValue(call, out var scope) && scope.IsInInlineEvent
+            && !scope.HasDynamicBinding && !scope.IsDeclared(bare.Name)
+            && isolatedClassicScopes.Keys.All(isolated => !isolated.DeclaresHere(bare.Name) && !isolated.Dynamic))
+            candidate = found;
         return new CallSite(name, Range(entry.Unit, call), entry.Entry,
             target is (int method, string path) && id is int key
-                ? new FlowTarget(data[key].Entry.Signature, method, path) : null);
+                ? new FlowTarget(data[key].Entry.Signature, method, path) : null, candidate);
     }
 
     internal RazorJavaScriptRequest? Request(Node node)
@@ -815,6 +860,7 @@ public sealed class RazorJavaScript
         public bool DeclaresHere(string name) => names.ContainsKey(name);
         public int OwnerEntryId { get; set; }
         public bool Dynamic { get; set; }
+        public bool HasDynamicBinding => Dynamic || Parent?.HasDynamicBinding == true;
         public Dictionary<string, Dictionary<string, int?>> Namespaces { get; } = new(StringComparer.Ordinal);
         public HashSet<string> WindowAliases { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, string> Selectors { get; } = new(StringComparer.Ordinal);
