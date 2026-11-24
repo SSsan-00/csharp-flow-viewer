@@ -217,6 +217,40 @@ public sealed class ExternalJavaScriptTests
     }
 
     [TestMethod]
+    [DataRow("~/js/orders.js?v=@Model.Version", true)]
+    [DataRow("/js/orders.js#@Model.Version", true)]
+    [DataRow("~/js/@Model.Script?v=fixed", false)]
+    [DataRow("@Model.ScriptUrl?file=/js/orders.js", false)]
+    public async Task RazorEventUsesOnlyTheLiteralScriptPathBeforeTheDynamicSuffix(string url, bool expectJump)
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Index.cshtml", $$"""
+            @page
+            <script defer src="{{url}}"></script>
+            <select onchange="reload()"></select>
+            """);
+        var script = tree.Add("wwwroot/js/orders.js", "function reload() { return 42; }");
+        var decoy = tree.Add("wwwroot/js/decoy.js", "function reload() { return -1; }");
+        using var session = tree.Open(pagePath, script, decoy);
+        var page = await ReadPage(session);
+        var node = Assert.ContainsSingle(page.Analyze(-1).Nodes.Where(node => node.Source?.Line == 3 && node.Kind == NodeKind.Call));
+        if (!expectJump)
+        {
+            Assert.IsNull(node.TargetMethod);
+            Assert.IsNull(node.TargetFilePath);
+            return;
+        }
+
+        Assert.AreEqual(script, node.TargetFilePath);
+        var file = session.Files.Single(file => file.Path == script);
+        var definitionSource = await session.ReadJavaScriptAsync(file, CancellationToken.None, page);
+        var definition = Assert.ContainsSingle(definitionSource.Entries.Where(entry => entry.Name == "reload"));
+        Assert.AreEqual(definition.Id, node.TargetMethod);
+        Assert.AreEqual(1, definition.Source.Line);
+        Assert.AreEqual(node.Source, Assert.ContainsSingle((await session.FindCallersAsync(file, definition.Id, CancellationToken.None)).Locations).Source);
+    }
+
+    [TestMethod]
     public async Task InlineChangeFollowsDeferredClassicScriptWithoutTreatingItAsAvailableDuringParsing()
     {
         using var tree = new Files();

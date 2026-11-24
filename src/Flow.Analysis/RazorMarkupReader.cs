@@ -101,7 +101,7 @@ internal sealed class RazorMarkupReader
                         var module = element.Attribute("type")?.Value.Trim().Equals("module", StringComparison.OrdinalIgnoreCase) == true;
                         if (element.Attribute("src") is { } scriptSource)
                             references.Add(new RazorScriptReference(scriptSource.Value,
-                                document.Range(scriptSource.ValueStart, scriptSource.ValueLength), module, scriptSource.IsDynamic,
+                                document.Range(scriptSource.ValueStart, scriptSource.ValueLength), module, HasDynamicScriptPath(document, scriptSource),
                                 element.Attributes.Keys.Any(name => name is "async" or "defer" or "nomodule"),
                                 element.Attribute("defer") is { IsDynamic: false }
                                     && element.Attribute("async") is null && element.Attribute("nomodule") is null));
@@ -126,6 +126,16 @@ internal sealed class RazorMarkupReader
     public IReadOnlyList<RazorJavaScriptFragment> Scripts { get; }
     public IReadOnlyList<RazorScriptReference> References { get; }
     public IReadOnlyList<string> Notices { get; }
+
+    private static bool HasDynamicScriptPath(RazorMarkupDocument document, RazorAttribute source)
+    {
+        if (!source.IsDynamic) return false;
+        var delimiter = source.RawValue.IndexOfAny(['?', '#']);
+        if (delimiter < 0 || document.IsDynamic(source.ValueStart, delimiter + 1)) return true;
+        var prefix = WebUtility.HtmlDecode(source.RawValue[..(delimiter + 1)]);
+        return !source.Value.StartsWith(prefix, StringComparison.Ordinal)
+            || source.Value.IndexOfAny(['?', '#']) != prefix.Length - 1;
+    }
 
     private static bool IsName(char value) => char.IsLetterOrDigit(value) || value is '-' or '_' or ':' or '.';
 
