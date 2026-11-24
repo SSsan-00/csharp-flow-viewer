@@ -133,7 +133,9 @@ public partial class MainWindow
             Editor.Select(offset, 0);
             Editor.ScrollTo(position.Line, position.Column);
         }
-        if (NodesForClick(offset, position.Line) is { } node)
+        var inlineEvent = razorSource?.IsInlineEvent(target.Id) == true;
+        var atTerminator = inlineEvent && offset < Editor.Document.TextLength && Editor.Document.GetCharAt(offset) == ';';
+        if (SourceNodePicker.Find(nodes.Values, currentFile?.Path, offset, position.Line, atTerminator) is { } node)
             JumpToPreviewNode(node, navigateSource: false);
     }
 
@@ -162,16 +164,6 @@ public partial class MainWindow
         else
             pendingNodeCenter = true;
     }
-
-    private FlowNode? NodesForClick(int offset, int line) =>
-        nodes.Values.Where(node => node.Source is { } range && IsCurrentSource(range)
-                && (range.Line == line || (offset >= range.Offset && offset - range.Offset < range.Length)))
-            .MinBy(node =>
-            {
-                var range = node.Source!;
-                var distance = Math.Max(0, Math.Max(range.Offset - offset, offset - range.Offset - range.Length + 1));
-                return (distance, range.Length == 0 ? int.MaxValue : range.Length);
-            });
 
     private bool IsCurrentSource(SourceRange range) => range.FilePath is null
         || string.Equals(range.FilePath, currentFile?.Path, StringComparison.OrdinalIgnoreCase);

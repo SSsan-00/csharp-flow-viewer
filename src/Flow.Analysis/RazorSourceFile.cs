@@ -122,6 +122,7 @@ public sealed class RazorSourceFile
     }
 
     public string Text { get; }
+    public bool IsInlineEvent(int entryId) => inlineLabels.ContainsKey(entryId);
     public string FilePath => filePath;
     public string? ModelName => document.ModelName;
     public bool IsPage => document.IsPage;

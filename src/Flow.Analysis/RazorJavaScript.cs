@@ -1,4 +1,3 @@
-using System.Net;
 using Acornima;
 using Acornima.Ast;
 using Flow.Model;
@@ -49,6 +48,8 @@ public sealed class RazorJavaScript
     private readonly Scope globals = new(null);
     private readonly HashSet<int> windowFunctions = [];
     private readonly HashSet<int> explicitWindowFunctions = [];
+    private readonly HashSet<int> classicFunctionDeclarations = [];
+    private readonly List<(Scope Scope, ScriptUnit Unit, string Name, string Reference)> windowAliases = [];
     private readonly Dictionary<Scope, bool> isolatedClassicScopes = new();
     private readonly Dictionary<string, ScriptUnit> externalUnits = new(LocalJavaScriptFiles.PathComparer);
     private readonly Dictionary<string, (ScriptUnit Unit, Scope Scope)> modules = new(LocalJavaScriptFiles.PathComparer);
@@ -77,6 +78,14 @@ public sealed class RazorJavaScript
         this.pagePath = pagePath;
         var parsed = new List<(ScriptUnit Unit, Scope Scope)>();
         foreach (var fragment in fragments) IndexFragment(fragment);
+        foreach (var (scope, unit, name, reference) in windowAliases)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!scope.IsDeclared("window") && scope.ResolveLocal(reference) is { } target
+                && classicFunctionDeclarations.Contains(target) && ReferenceEquals(data[target].Unit, unit))
+                scope.PublishWindowAlias(name, target);
+        }
+        windowAliases.Clear();
         // Modules bind exports only after declarations from all scripts are indexed.
         var moduleExports = modules.ToDictionary(pair => pair.Key, pair => BuildExports(pair.Value),
             LocalJavaScriptFiles.PathComparer);
@@ -116,7 +125,7 @@ public sealed class RazorJavaScript
             {
                 if (external || fragment.RenderingSlots is { Count: > 0 })
                 {
-                    var failedUnit = new ScriptUnit(fragment.Text, fragment.Text, fragment.Source, null!, false,
+                    var failedUnit = new ScriptUnit(fragment.Text, fragment.Text, fragment.Source, null!,
                         fragment.ContainsRazorCode, fragment.RenderingSlots);
                     var failed = AddEntry(name, null, failedUnit, scope);
                     failed.Failure = external ? "JavaScriptの構文を確定できません。"
@@ -240,12 +249,13 @@ public sealed class RazorJavaScript
         CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
-        var decoded = WebUtility.HtmlDecode(code);
-        var fragment = new RazorJavaScriptFragment(decoded, source, containsRazorCode);
-        var unit = Parse(fragment, inline: true, approximate: decoded.Length != code.Length);
+        var decoded = InlineScriptText.Decode(code, token);
+        var fragment = new RazorJavaScriptFragment(decoded.Text, source, containsRazorCode);
+        var unit = Parse(fragment, inline: true, decoded);
         if (unit is null)
         {
-            var failed = AddEntry(name, null, new ScriptUnit(decoded, decoded, source, null!, true, containsRazorCode), new Scope(globals));
+            var failed = AddEntry(name, null, new ScriptUnit(decoded.Text, code, source, null!, containsRazorCode),
+                new Scope(globals));
             failed.Failure = "JavaScriptを静的に解析できません。診断を確認してください。";
             return failed.Entry.Id;
         }
@@ -277,7 +287,7 @@ public sealed class RazorJavaScript
         return (range, nested);
     }
 
-    private ScriptUnit? Parse(RazorJavaScriptFragment fragment, bool inline, bool approximate = false)
+    private ScriptUnit? Parse(RazorJavaScriptFragment fragment, bool inline, InlineScriptText? inlineText = null)
     {
         if (fragment.ContainsRazorCode)
         {
@@ -296,11 +306,12 @@ public sealed class RazorJavaScript
                     return null;
                 }
             }
-            var original = !approximate && fragment.Source.Offset >= 0 && fragment.Source.Offset + fragment.Text.Length <= pageText.Length
+            var projected = inlineText?.Encoded ?? fragment.Text;
+            var original = fragment.Source.Offset >= 0 && fragment.Source.Offset + projected.Length <= pageText.Length
                 && (fragment.Source.FilePath is null || fragment.Source.FilePath == pagePath)
-                ? pageText.Substring(fragment.Source.Offset, fragment.Text.Length) : fragment.Text;
-            return new ScriptUnit(fragment.Text, original, fragment.Source, root, approximate, fragment.ContainsRazorCode,
-                fragment.RenderingSlots);
+                ? pageText.Substring(fragment.Source.Offset, projected.Length) : projected;
+            return new ScriptUnit(fragment.Text, original, fragment.Source, root, fragment.ContainsRazorCode,
+                fragment.RenderingSlots, inlineText);
         }
         catch (ParseErrorException error)
         {
@@ -342,7 +353,10 @@ public sealed class RazorJavaScript
             {
                 scope.Declare(id.Name, conditional ? null : entry.Entry.Id);
                 if (!conditional && (scope == globals || isolatedClassicScopes.ContainsKey(scope)))
+                {
                     windowFunctions.Add(entry.Entry.Id);
+                    classicFunctionDeclarations.Add(entry.Entry.Id);
+                }
             }
             if (function.Id is { } ownName)
                 functionScope.Declare(ownName.Name, entry.Entry.Id);
@@ -402,10 +416,9 @@ public sealed class RazorJavaScript
             && !scope.IsDeclared("window") && PropertyName(property) is { } name)
         {
             var scriptScope = isolatedClassicScopes.ContainsKey(scope) ? scope : globals;
-            // Only publish a function from a direct assignment in a classic script.
-            if (depth == 2 && !conditional && !unit.ContainsRazor && (scope == globals || isolatedClassicScopes.ContainsKey(scope))
-                && windowAssignment.Operator == Operator.Assignment
-                && functions.TryGetValue(windowAssignment.Right, out var assignedFunction))
+            var publishes = depth == 2 && !conditional && !unit.ContainsRazor && ReferenceEquals(scope, scriptScope)
+                && windowAssignment.Operator == Operator.Assignment;
+            if (publishes && functions.TryGetValue(windowAssignment.Right, out var assignedFunction))
             {
                 scriptScope.Declare(name, assignedFunction.Entry.Id);
                 windowFunctions.Add(assignedFunction.Entry.Id);
@@ -417,7 +430,13 @@ public sealed class RazorJavaScript
                     assignedFunction.Entry = renamed;
                 }
             }
-            else scriptScope.Block(name);
+            else
+            {
+                scriptScope.Block(name);
+                // A named function declaration in this script is hoisted; other values may not exist yet.
+                if (publishes && windowAssignment.Right is Identifier reference)
+                    windowAliases.Add((scope, unit, name, reference.Name));
+            }
         }
         if (node is CallExpression { Callee: Identifier { Name: "eval" } })
         {
@@ -617,8 +636,9 @@ public sealed class RazorJavaScript
     private int? ResolveCallName(Scope scope, string name)
     {
         var direct = scope.Resolve(name);
-        if (direct is int directId && explicitWindowFunctions.Contains(directId)
-            && scope.DeclarationScope(name)?.IsDeclared("window") == true) return null;
+        if (direct is int directId && scope.DeclarationScope(name) is { } declaring
+            && declaring.IsDeclared("window")
+            && (explicitWindowFunctions.Contains(directId) || declaring.WindowAliases.Contains(name))) return null;
         if (!scope.IsInInlineEvent || isolatedClassicScopes.Count == 0) return direct;
         for (var lexical = scope; lexical != globals; lexical = lexical.Parent!)
         {
@@ -696,15 +716,15 @@ public sealed class RazorJavaScript
 
     internal SourceRange Range(ScriptUnit unit, Node node)
     {
-        if (unit.Approximate) return unit.Source;
-        var start = unit.Source.Offset + node.Start;
-        var line = unit.Source.Line + unit.Text.AsSpan(0, Math.Clamp(node.Start, 0, unit.Text.Length)).Count('\n');
-        return new SourceRange(start, Math.Max(0, MappedEnd(unit, node) - node.Start), line, unit.Source.FilePath ?? pagePath);
+        var start = EncodedOffset(unit, node.Start);
+        var line = unit.Source.Line + unit.OriginalText.AsSpan(0, start).Count('\n');
+        return new SourceRange(unit.Source.Offset + start, Math.Max(0, MappedEnd(unit, node) - start), line,
+            unit.Source.FilePath ?? pagePath);
     }
 
     internal static string Slice(ScriptUnit unit, Node node)
     {
-        var start = Math.Clamp(node.Start, 0, unit.OriginalText.Length);
+        var start = EncodedOffset(unit, node.Start);
         var end = Math.Clamp(MappedEnd(unit, node), start, unit.OriginalText.Length);
         var value = unit.OriginalText[start..end].Trim();
         return value.Length > 140 ? value[..139] + "…" : value;
@@ -716,16 +736,26 @@ public sealed class RazorJavaScript
     private static int MappedEnd(ScriptUnit unit, Node node)
     {
         var end = Math.Clamp(node.End, 0, unit.Text.Length);
-        if (!unit.ContainsRazor || unit.Approximate || end == 0) return end;
+        var encodedEnd = EncodedOffset(unit, end);
+        if (!unit.ContainsRazor || end == 0) return encodedEnd;
         var tokenStart = end;
         while (tokenStart > node.Start && (char.IsLetterOrDigit(unit.Text[tokenStart - 1])
             || unit.Text[tokenStart - 1] is '_' or '$')) --tokenStart;
-        if (tokenStart == end || unit.Text.AsSpan(tokenStart, end - tokenStart)
-            .SequenceEqual(unit.OriginalText.AsSpan(tokenStart, end - tokenStart))) return end;
-        var mappedEnd = end;
-        for (var cursor = end; cursor < unit.Text.Length && char.IsWhiteSpace(unit.Text[cursor]); ++cursor)
-            if (unit.Text[cursor] != unit.OriginalText[cursor]) mappedEnd = cursor + 1;
+        var encodedStart = EncodedOffset(unit, tokenStart);
+        var projected = unit.InlineText?.Encoded ?? unit.Text;
+        var length = encodedEnd - encodedStart;
+        if (length == 0 || projected.AsSpan(encodedStart, length)
+            .SequenceEqual(unit.OriginalText.AsSpan(encodedStart, length))) return encodedEnd;
+        var mappedEnd = encodedEnd;
+        for (var cursor = encodedEnd; cursor < projected.Length && char.IsWhiteSpace(projected[cursor]); ++cursor)
+            if (projected[cursor] != unit.OriginalText[cursor]) mappedEnd = cursor + 1;
         return mappedEnd;
+    }
+
+    private static int EncodedOffset(ScriptUnit unit, int offset)
+    {
+        offset = Math.Clamp(offset, 0, unit.Text.Length);
+        return unit.InlineText?.EncodedOffset(offset) ?? offset;
     }
 
     internal static string? PropertyName(MemberExpression member) => member.Computed
@@ -745,7 +775,8 @@ public sealed class RazorJavaScript
     }
 
     internal sealed record ScriptUnit(string Text, string OriginalText, SourceRange Source, JsProgram Root,
-        bool Approximate, bool ContainsRazor, IReadOnlyDictionary<int, SourceRange>? RenderingSlots = null);
+        bool ContainsRazor, IReadOnlyDictionary<int, SourceRange>? RenderingSlots = null,
+        InlineScriptText? InlineText = null);
     internal sealed class EntryData(MethodEntry entry, Node? body, ScriptUnit unit, Scope scope)
     {
         public MethodEntry Entry { get; set; } = entry;
@@ -764,6 +795,7 @@ public sealed class RazorJavaScript
         public int OwnerEntryId { get; set; }
         public bool Dynamic { get; set; }
         public Dictionary<string, Dictionary<string, int?>> Namespaces { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> WindowAliases { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, string> Selectors { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, XhrState> Xhrs { get; } = new(StringComparer.Ordinal);
         public HashSet<string> JQueryVariables { get; } = new(StringComparer.Ordinal);
@@ -781,6 +813,12 @@ public sealed class RazorJavaScript
             JQueryVariables.Remove(name);
             // 宣言収集前のvarもあるため、見えている外側の同名変数は保守的に無効化する。
             if (Parent?.IsDeclared(name) == true) Parent.Block(name);
+        }
+        public void PublishWindowAlias(string name, int target)
+        {
+            if (!names.TryGetValue(name, out var declared) || declared is not [null]) return;
+            declared[0] = target;
+            WindowAliases.Add(name);
         }
         public Scope? DeclarationScope(string name) => names.ContainsKey(name) ? this : Parent?.DeclarationScope(name);
         public bool IsDeclared(string name) => names.ContainsKey(name) || Parent?.IsDeclared(name) == true;

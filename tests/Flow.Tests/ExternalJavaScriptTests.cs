@@ -1,4 +1,5 @@
 using Flow.Analysis;
+using Flow.Desktop;
 using Flow.Model;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
@@ -9,6 +10,108 @@ namespace Flow.Tests;
 [TestClass]
 public sealed class ExternalJavaScriptTests
 {
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task EditorClickOnEncodedRazorEventOpensTheExactDefinition(bool external)
+    {
+        using var tree = new Files();
+        var script = tree.Add("wwwroot/js/orders.js", "// external definition\nfunction reload(value) { return value; }");
+        var pagePath = tree.Add("Pages/Index.cshtml", """
+            <select onchange="return reload(&quot;orders&quot;);"></select>
+            """ + "\n" + (external ? """<script src="~/js/orders.js"></script>"""
+                                   : "<script>\nfunction reload(value) { return value; }\n</script>"));
+        using var session = tree.Open(pagePath, script);
+        var page = await ReadPage(session);
+        var handler = page.Entries.Single(entry => page.Text.AsSpan(entry.Source.Offset, entry.Source.Length)
+            .StartsWith("return reload(&quot;", StringComparison.Ordinal));
+        var graph = page.Analyze(handler.Id);
+        var calleeOffset = page.Text.IndexOf("reload", StringComparison.Ordinal);
+        var selected = SourceNodePicker.Find(graph.Nodes, pagePath, calleeOffset, line: 1);
+        Assert.IsNotNull(selected);
+        Assert.AreEqual(NodeKind.Call, selected.Kind, selected.Label);
+        Assert.AreEqual(calleeOffset, selected.Source!.Offset);
+        Assert.AreEqual("reload(&quot;orders&quot;)", page.Text.Substring(selected.Source.Offset, selected.Source.Length));
+        var targetFile = Assert.ContainsSingle(session.Files.Where(file => file.Path == selected.TargetFilePath));
+        var entries = external
+            ? (await session.ReadJavaScriptAsync(targetFile, CancellationToken.None, page)).Entries
+            : (await session.ReadRazorAsync(targetFile, CancellationToken.None)).Entries;
+        var definition = Assert.ContainsSingle(entries.Where(entry => entry.Id == selected.TargetMethod));
+        Assert.AreEqual("reload", definition.Name);
+        Assert.AreEqual(external ? 2 : 3, definition.Source.Line);
+        var definitionFlow = external
+            ? (await session.ReadJavaScriptAsync(targetFile, CancellationToken.None, page)).Analyze(definition.Id)
+            : page.Analyze(definition.Id);
+        Assert.Contains(node => node.Label == "return value;", definitionFlow.Nodes);
+    }
+
+    [TestMethod]
+    public void ClickingInlineEventTerminatorChoosesTheAdjacentCallButDoesNotInventAnUnresolvedTarget()
+    {
+        var page = new RazorSourceFile("""
+            <select onchange="reload();missing();"></select>
+            <script language="javascript">function reload() { return 0; }</script>
+            """, Path.GetFullPath("Index.cshtml"));
+        var graph = page.Analyze(page.Entries.Single(entry => entry.Name.StartsWith("change · ", StringComparison.Ordinal)).Id);
+        var semicolon = page.Text.IndexOf(';');
+        var call = SourceNodePicker.Find(graph.Nodes, page.FilePath, semicolon, line: 1, inlineTerminator: true);
+        Assert.IsNotNull(call);
+        Assert.AreEqual("reload()", call.Label);
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "reload").Id, call.TargetMethod);
+        var missing = SourceNodePicker.Find(graph.Nodes, page.FilePath, page.Text.IndexOf(';', semicolon + 1),
+            line: 1, inlineTerminator: true);
+        Assert.IsNotNull(missing);
+        Assert.AreEqual("missing()", missing.Label);
+        Assert.IsNull(missing.TargetMethod);
+    }
+
+    [TestMethod]
+    public void EncodedNewlineAndAstralCharacterDoNotMoveTheRazorCallOutOfItsSourceLine()
+    {
+        var page = new RazorSourceFile("""
+            <select onchange="noop(&quot;&#x1F680;&quot;);&#10;return reload(@Model.Id);"></select>
+            <script language="javascript">function reload(id) { return id; }</script>
+            """, Path.GetFullPath("Index.cshtml"));
+        var handler = page.Entries.Single(entry => page.IsInlineEvent(entry.Id));
+        var graph = page.Analyze(handler.Id);
+        var callOffset = page.Text.IndexOf("reload(", StringComparison.Ordinal);
+        var selected = SourceNodePicker.Find(graph.Nodes, page.FilePath, callOffset, line: 1);
+        Assert.IsNotNull(selected);
+        Assert.AreEqual("reload(@Model.Id)", selected.Label);
+        Assert.AreEqual(1, selected.Source!.Line);
+        Assert.AreEqual(callOffset, selected.Source.Offset);
+        Assert.AreEqual(selected.Label, page.Text.Substring(callOffset, selected.Source.Length));
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "reload").Id, selected.TargetMethod);
+    }
+
+    [TestMethod]
+    public void InlineChangeFindsAStaticWindowAliasButNotCompetingOrDynamicAssignments()
+    {
+        var page = new RazorSourceFile("""
+            <select onchange="reload();"></select>
+            <select onblur="ambiguous();"></select>
+            <select onfocus="dynamic();"></select>
+            <select oninput="conditional();"></select>
+            <script language="javascript">
+                window.reload = implementation;
+                function implementation() { return 1; }
+                function fallback() { return 2; }
+                window.ambiguous = implementation;
+                window.ambiguous = fallback;
+                window.dynamic = makeHandler();
+                if (flag) window.conditional = implementation;
+                function normal() { window.reload(); }
+            </script>
+            """, Path.GetFullPath("Index.cshtml"));
+        var definition = page.Entries.Single(entry => entry.Name == "implementation");
+        var overview = page.Analyze(-1);
+        Assert.AreEqual(definition.Id, FindCall(overview, "onchange → reload()").TargetMethod);
+        var normal = page.Analyze(page.Entries.Single(entry => entry.Name == "normal").Id);
+        Assert.AreEqual(definition.Id, FindCall(normal, "window.reload()").TargetMethod);
+        foreach (var label in new[] { "onblur → ambiguous()", "onfocus → dynamic()", "oninput → conditional()" })
+            Assert.IsNull(FindCall(overview, label).TargetMethod);
+    }
+
     [TestMethod]
     [DataRow("""<select onchange="reload();"></select>""", """<script>function reload() { return 0; }</script>""", true)]
     [DataRow("""<select onchange='reload();'></select>""", """<script>function reload() { return 0; }</script>""", true)]
