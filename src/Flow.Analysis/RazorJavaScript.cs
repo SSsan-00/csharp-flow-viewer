@@ -133,6 +133,15 @@ public sealed class RazorJavaScript
             var entry = AddEntry(name, unit.Root, unit, scope);
             scope.OwnerEntryId = entry.Entry.Id;
             Index(unit.Root, unit, scope, token, 0, conditional: false);
+            if (!fragment.IsModule)
+            {
+                // Only a classic script's top-level var (not let/const) creates a window property.
+                foreach (var declaration in unit.Root.Body.OfType<VariableDeclaration>())
+                    if (declaration.Kind == VariableDeclarationKind.Var)
+                        foreach (var variable in declaration.Declarations)
+                            if (variable.Id is Identifier && variable.Init is { } init && functions.TryGetValue(init, out var function))
+                                windowFunctions.Add(function.Entry.Id);
+            }
             parsed.Add((unit, scope));
 
             foreach (var import in unit.Root.Body.OfType<ImportDeclaration>())

@@ -251,6 +251,61 @@ public sealed class ExternalJavaScriptTests
     }
 
     [TestMethod]
+    public void InlineEventCanCallTheWindowPropertyOfAClassicVarButNotALexicalBinding()
+    {
+        var page = new RazorSourceFile("""
+            <script>
+              var save = function () { return true; };
+              const preview = () => true;
+              function normal() { save(); window.save(); }
+            </script>
+            <button onclick="return window.save()"></button>
+            <select onchange="window['save']()"></select>
+            <button onblur="window.preview()"></button>
+            <button onfocus="preview()"></button>
+            """, Path.GetFullPath("Index.cshtml"));
+        var save = page.Entries.Single(entry => entry.Name == "save");
+        var graph = page.Analyze(-1);
+        foreach (var label in new[] { "onclick → window.save()", "onchange → window.save()" })
+            Assert.AreEqual(save.Id, FindCall(graph, label).TargetMethod, label);
+        var normal = page.Analyze(page.Entries.Single(entry => entry.Name == "normal").Id);
+        Assert.AreEqual(save.Id, FindCall(normal, "save()").TargetMethod);
+        Assert.AreEqual(save.Id, FindCall(normal, "window.save()").TargetMethod);
+        Assert.IsNull(FindCall(graph, "onblur → window.preview()").TargetMethod);
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "preview").Id,
+            FindCall(graph, "onfocus → preview()").TargetMethod);
+    }
+
+    [TestMethod]
+    [DataRow("@Url.Content(\"~/js/orders.js\")", true)]
+    [DataRow("@Url.Content(Model.Script)", false)]
+    [DataRow("@Url.Content(\"~/js/\" + Model.Script)", false)]
+    [DataRow("@Url.Content(\"~/js/orders.js\")//not-the-same-path()", false)]
+    public async Task InlineAndScriptCallsShareOnlyTheLiteralUrlContentTarget(string url, bool available)
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Index.cshtml", $$"""
+            @page
+            <script src="{{url}}"></script>
+            <script>function normal() { save(); }</script>
+            <button onclick="return save()"></button>
+            <select onchange="save()"></select>
+            """);
+        var script = tree.Add("wwwroot/js/orders.js", "// header\nfunction save() {}");
+        using var session = tree.Open(pagePath, script);
+        var page = await ReadPage(session);
+        var opened = await session.ReadJavaScriptAsync(session.Files.Single(file => file.Path == script), CancellationToken.None);
+        var definition = opened.Entries.Single(entry => entry.Name == "save");
+        var overview = page.Analyze(-1);
+        foreach (var call in new[] { FindCall(overview, "onclick → save()"), FindCall(overview, "onchange → save()"),
+            FindCall(page.Analyze(page.Entries.Single(entry => entry.Name == "normal").Id), "save()") })
+        {
+            Assert.AreEqual(available ? script : null, call.TargetFilePath);
+            Assert.AreEqual(available ? definition.Id : (int?)null, call.TargetMethod);
+        }
+    }
+
+    [TestMethod]
     public async Task InlineChangeFollowsDeferredClassicScriptWithoutTreatingItAsAvailableDuringParsing()
     {
         using var tree = new Files();

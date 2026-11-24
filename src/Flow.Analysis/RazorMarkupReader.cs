@@ -1,4 +1,7 @@
 using System.Net;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Flow.Analysis;
 
@@ -100,11 +103,15 @@ internal sealed class RazorMarkupReader
                     {
                         var module = element.Attribute("type")?.Value.Trim().Equals("module", StringComparison.OrdinalIgnoreCase) == true;
                         if (element.Attribute("src") is { } scriptSource)
-                            references.Add(new RazorScriptReference(scriptSource.Value,
-                                document.Range(scriptSource.ValueStart, scriptSource.ValueLength), module, HasDynamicScriptPath(document, scriptSource),
+                        {
+                            var literalPath = LiteralContentPath(scriptSource.RawValue);
+                            references.Add(new RazorScriptReference(literalPath ?? scriptSource.Value,
+                                document.Range(scriptSource.ValueStart, scriptSource.ValueLength), module,
+                                literalPath is null && HasDynamicScriptPath(document, scriptSource),
                                 element.Attributes.Keys.Any(name => name is "async" or "defer" or "nomodule"),
                                 element.Attribute("defer") is { IsDynamic: false }
                                     && element.Attribute("async") is null && element.Attribute("nomodule") is null));
+                        }
                         else scripts.Add(document.ProjectScript(position, contentEnd - position, module));
                     }
                     else if (element.Attribute("language") is { } language && !language.Value.Equals("javascript", StringComparison.OrdinalIgnoreCase))
@@ -126,6 +133,20 @@ internal sealed class RazorMarkupReader
     public IReadOnlyList<RazorJavaScriptFragment> Scripts { get; }
     public IReadOnlyList<RazorScriptReference> References { get; }
     public IReadOnlyList<string> Notices { get; }
+
+    private static string? LiteralContentPath(string value)
+    {
+        if (!value.StartsWith("@Url.Content(", StringComparison.Ordinal) || value[^1] != ')') return null;
+        var expression = SyntaxFactory.ParseExpression(value[1..], consumeFullText: true);
+        if (expression.ContainsDiagnostics || expression.Span.End != value.Length - 1 || expression is not InvocationExpressionSyntax
+            {
+                Expression: MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax { Identifier.ValueText: "Url" },
+                    Name: IdentifierNameSyntax { Identifier.ValueText: "Content" } },
+                ArgumentList.Arguments: [{ Expression: LiteralExpressionSyntax literal, NameColon: null }]
+            } || !literal.IsKind(SyntaxKind.StringLiteralExpression)) return null;
+        var path = literal.Token.ValueText;
+        return path.StartsWith("~/", StringComparison.Ordinal) ? path : null;
+    }
 
     private static bool HasDynamicScriptPath(RazorMarkupDocument document, RazorAttribute source)
     {
