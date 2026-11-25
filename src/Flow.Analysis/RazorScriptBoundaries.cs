@@ -126,7 +126,14 @@ internal static class RazorScriptBoundaries
             token.ThrowIfCancellationRequested();
             if (declaration.Id is not { } id) continue;
             while (nextSlot < positions.Length && positions[nextSlot] < declaration.Start) nextSlot++;
-            var affected = nextSlot < positions.Length && positions[nextSlot] < declaration.End;
+            var affected = false;
+            for (var index = nextSlot; index < positions.Length && positions[index] < declaration.End; index++)
+            {
+                var position = positions[index];
+                if (position > declaration.Body.Start && generatedValues?.Contains(position) == true) continue;
+                affected = true;
+                break;
+            }
             line += fragment.Text.AsSpan(previous, declaration.Start - previous).Count('\n');
             previous = declaration.Start;
             yield return (id.Name, affected || dynamicBindings || blocked.Contains(id.Name) ? null

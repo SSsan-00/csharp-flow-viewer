@@ -11,6 +11,152 @@ namespace Flow.Tests;
 public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
+    [DataRow("body-value", true)]
+    [DataRow("duplicate", false)]
+    [DataRow("other-generated-body", false)]
+    [DataRow("generated-signature", false)]
+    public async Task InlineEventCanFollowOnlyTheSourceOfAnIntactDeclarationWithGeneratedBodyValues(string shape, bool candidate)
+    {
+        const string items = """
+            @foreach (var item in Model.Items)
+            {
+                @: @item,
+            }
+            """;
+        const string other = """
+            @if (Model.Enabled)
+            {
+                @:doSomething();
+            }
+            """;
+        var definition = shape == "generated-signature" ? $$"""
+            function reload(options = [
+                {{items}}
+            ]) { return options; }
+            """ : $$"""
+            function reload() {
+                const options = [
+                    {{items}}
+                ];
+                {{(shape == "other-generated-body" ? other : "")}}
+                return options;
+            }
+            """;
+        var text = $$"""
+            <select onchange="reload();"></select>
+            <script language="javascript">
+            {{definition}}
+            {{(shape == "duplicate" ? "function reload() {}" : "")}}
+            </script>
+            """;
+        using var tree = new Files();
+        var path = tree.Add("Pages/GeneratedInsideFunction.cshtml", text);
+        using var session = tree.Open(path);
+        var page = await ReadPage(session);
+        Assert.DoesNotContain(entry => entry.Name == "reload", page.Entries);
+        var handler = Assert.ContainsSingle(page.Entries.Where(entry => page.IsInlineEvent(entry.Id)));
+        var eventOffset = text.IndexOf("reload()", StringComparison.Ordinal);
+        var clicked = SourceNodePicker.Find(page.Analyze(handler.Id).Nodes, path, eventOffset, line: 1);
+        Assert.IsNotNull(clicked);
+        Assert.AreEqual(NodeKind.Call, clicked.Kind);
+        var overview = FindCall(page.Analyze(-1), "onchange \u2192 reload()");
+        foreach (var node in new[] { overview, clicked })
+        {
+            Assert.IsNull(node.TargetMethod, "The generated JavaScript must not become an executable-flow target.");
+            Assert.AreEqual(candidate, node.IsDefinitionCandidate);
+            var offset = text.IndexOf(definition, StringComparison.Ordinal);
+            Assert.AreEqual(candidate ? path : null, node.TargetDeclaration?.FilePath);
+            Assert.AreEqual(candidate ? offset : (int?)null, node.TargetDeclaration?.Offset);
+            Assert.AreEqual(candidate ? definition.Length : (int?)null, node.TargetDeclaration?.Length);
+            Assert.AreEqual(candidate ? 3 : (int?)null, node.TargetDeclaration?.Line);
+        }
+    }
+
+    [TestMethod]
+    [DataRow("same-file", true, true)]
+    [DataRow("external", false, true)]
+    [DataRow("multiple-blocks", true, true)]
+    [DataRow("section", true, true)]
+    [DataRow("legacy-comments", true, true)]
+    [DataRow("literal-type", true, true)]
+    [DataRow("literal-language", true, true)]
+    [DataRow("literal-module", true, false)]
+    [DataRow("literal-data", false, false)]
+    [DataRow("runtime-type", false, false)]
+    [DataRow("runtime-language", false, false)]
+    public async Task EventJumpComparesInlineScriptDiscoveryToExternalScript(string shape, bool listedInPage, bool follows)
+    {
+        const string definition = "function reload() { return 42; }";
+        const string tag = "<select onchange=\"reload();\"></select>";
+        var block = shape switch
+        {
+            "external" => """<script language="javascript" src="~/js/event.js"></script>""",
+            "multiple-blocks" => $$"""<script>function other() { }</script><script language="javascript">{{definition}}</script>""",
+            "section" => $$"""
+                @section Scripts
+                {
+                    <script language="javascript">{{definition}}</script>
+                }
+                """,
+            "legacy-comments" => $$"""
+                <script language="javascript">
+                <!--
+                {{definition}}
+                //-->
+                </script>
+                """,
+            "literal-type" => $$"""<script type="@("text/javascript")" language="javascript">{{definition}}</script>""",
+            "literal-language" => $$"""<script language='@(@"javascript")'>{{definition}}</script>""",
+            "literal-module" => $$"""<script type="@("module")" language="javascript">{{definition}}</script>""",
+            "literal-data" => $$"""<script type="@("application/json")" language="javascript">{{definition}}</script>""",
+            "runtime-type" => $$"""<script type="@(Model.ScriptType)" language="javascript">{{definition}}</script>""",
+            "runtime-language" => $$"""<script language="@(Model.ScriptLanguage)">{{definition}}</script>""",
+            _ => $$"""<script language="javascript">{{definition}}</script>"""
+        };
+        var text = tag + "\n" + block;
+        using var tree = new Files();
+        var path = tree.Add("Pages/InlineOrExternal.cshtml", text);
+        var external = shape == "external" ? tree.Add("wwwroot/js/event.js", definition) : null;
+        using var session = external is null ? tree.Open(path) : tree.Open(path, external);
+        var page = await ReadPage(session);
+        var selected = Assert.ContainsSingle(page.Entries.Where(entry => page.IsInlineEvent(entry.Id)));
+        var eventOffset = text.IndexOf("reload()", StringComparison.Ordinal);
+        var clicked = SourceNodePicker.Find(page.Analyze(selected.Id).Nodes, path, eventOffset, line: 1);
+        Assert.IsNotNull(clicked);
+        Assert.AreEqual(NodeKind.Call, clicked.Kind);
+        Assert.AreEqual(eventOffset, clicked.Source?.Offset);
+        var eventNode = FindCall(page.Analyze(-1), "onchange \u2192 reload()");
+        var definitions = page.Entries.Where(entry => entry.Name == "reload").ToArray();
+        Assert.AreEqual(listedInPage ? 1 : 0, definitions.Length, "The page definitions shown in the left list differ.");
+        if (!follows)
+        {
+            Assert.IsNull(eventNode.TargetMethod);
+            Assert.IsNull(clicked.TargetMethod);
+            Assert.IsNull(clicked.TargetDeclaration);
+            return;
+        }
+        var destination = session.Files.Single(file => file.Path == (external ?? path));
+        Assert.AreEqual(destination.Path, clicked.TargetFilePath);
+        Assert.AreEqual(eventNode.TargetMethod, clicked.TargetMethod);
+        Assert.IsNotNull(clicked.TargetMethod);
+        if (external is null)
+        {
+            Assert.AreEqual(definitions[0].Id, clicked.TargetMethod);
+            var reopened = await session.ReadRazorAsync(destination, CancellationToken.None);
+            var body = Assert.ContainsSingle(reopened.Analyze(definitions[0].Id).Nodes.Where(node => node.Label == "return 42;"));
+            Assert.AreEqual(text.IndexOf("return 42;", StringComparison.Ordinal), body.Source?.Offset);
+        }
+        else
+        {
+            var opened = await session.ReadJavaScriptAsync(destination, CancellationToken.None, page);
+            var target = Assert.ContainsSingle(opened.Entries.Where(entry => entry.Name == "reload"));
+            Assert.AreEqual(target.Id, clicked.TargetMethod);
+            var body = Assert.ContainsSingle(opened.Analyze(target.Id).Nodes.Where(node => node.Label == "return 42;"));
+            Assert.AreEqual(definition.IndexOf("return 42;", StringComparison.Ordinal), body.Source?.Offset);
+        }
+    }
+
+    [TestMethod]
     [DataRow("literal", true)]
     [DataRow("literal-quoted", true)]
     [DataRow("literal-verbatim", true)]
