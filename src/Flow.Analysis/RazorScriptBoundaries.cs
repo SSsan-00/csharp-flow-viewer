@@ -1,3 +1,4 @@
+using Acornima;
 using Acornima.Ast;
 using Flow.Model;
 using JsProgram = Acornima.Ast.Program;
@@ -40,9 +41,44 @@ internal static class RazorScriptBoundaries
         return (new string(text), newSlots);
     }
 
-    public static IEnumerable<(string Name, SourceRange? Source)> SourcesOutsideUnresolvedReturns(
+    public static (JsProgram Root, IReadOnlySet<int> Offsets)? TryParseGeneratedValues(
+        Parser parser, string text, IReadOnlyDictionary<int, SourceRange> slots, ParseError error, CancellationToken token)
+    {
+        if (text.Length > 2 * 1024 * 1024) return null;
+        var projection = text.ToCharArray();
+        var offsets = new HashSet<int>();
+        // Replace only a rejected Razor marker, retaining original source offsets.
+        while (offsets.Count < 4 && error.Code == "UnexpectedToken" && error.IsIndexDefined
+            && slots.ContainsKey(error.Index) && projection[error.Index] == ';' && offsets.Add(error.Index))
+        {
+            token.ThrowIfCancellationRequested();
+            projection[error.Index] = '0';
+            try
+            {
+                var root = parser.ParseScript(new string(projection));
+                var pending = new HashSet<int>(offsets);
+                foreach (var node in RazorJavaScript.Descendants(root))
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (node is VariableDeclarator { Init: { } value }) CheckValue(value);
+                    else if (node is ArrayExpression array)
+                        foreach (var element in array.Elements) CheckValue(element);
+                }
+                return pending.Count == 0 ? (root, offsets) : null;
+
+                void CheckValue(Node? value)
+                {
+                    if (value is not null && value.End == value.Start + 1) pending.Remove(value.Start);
+                }
+            }
+            catch (ParseErrorException retry) { error = retry.Error; }
+        }
+        return null;
+    }
+
+    public static IEnumerable<(string Name, SourceRange? Source)> SourcesOutsideUnresolvedSlots(
         RazorJavaScriptFragment fragment, JsProgram root, IReadOnlyDictionary<int, SourceRange> slots,
-        IReadOnlySet<int> independent, CancellationToken token)
+        IReadOnlySet<int> independent, CancellationToken token, IReadOnlySet<int>? generatedValues = null)
     {
         var declarations = root.Body.OfType<FunctionDeclaration>().ToArray();
         if (declarations.Length == 0) yield break;
@@ -77,6 +113,7 @@ internal static class RazorScriptBoundaries
         var nextDeclaration = 0;
         foreach (var position in positions.Where(position => !independent.Contains(position)))
         {
+            if (generatedValues?.Contains(position) == true) continue;
             while (nextDeclaration < declarations.Length && declarations[nextDeclaration].End <= position)
                 nextDeclaration++;
             if (!returnEnds.Contains(position) || nextDeclaration == declarations.Length

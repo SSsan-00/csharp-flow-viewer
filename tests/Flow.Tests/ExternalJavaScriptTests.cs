@@ -12,15 +12,17 @@ public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
     [DataRow("if", "function reload() { return 42; }", true)]
+    [DataRow("if-crlf", "function reload() { return 42; }", true)]
     [DataRow("foreach", "function reload() { return 42; }", true)]
     [DataRow("if", "function reload() {} function reload() { return 42; }", false)]
     [DataRow("foreach", "function other() { function reload() { return 42; } }", false)]
     [DataRow("foreach", "function reload() { return 42; } window['reload'] = replacement;", false)]
     [DataRow("if", "function reload() { return 42; } function configure() { eval(code); }", false)]
+    [DataRow("if", "const invalid = ; function reload() { return 42; }", false)]
     public async Task GeneratedJavascriptExpressionOffersOnlyAnIntactDefinitionSource(string kind, string definitions, bool links)
     {
         using var tree = new Files();
-        var variable = kind == "if" ? """
+        var variable = kind.StartsWith("if", StringComparison.Ordinal) ? """
             const label =
                 @if (Model.ShortLabel)
                 {
@@ -46,6 +48,9 @@ public sealed class ExternalJavaScriptTests
             {{definitions}}
             </script>
             """;
+        text = text.Replace("\r\n", "\n", StringComparison.Ordinal);
+        if (kind.EndsWith("crlf", StringComparison.Ordinal))
+            text = text.Replace("\n", "\r\n", StringComparison.Ordinal);
         var path = tree.Add("Pages/Generated.cshtml", text);
         using var session = tree.Open(path);
         var page = await ReadPage(session);
@@ -55,6 +60,8 @@ public sealed class ExternalJavaScriptTests
         var clicked = SourceNodePicker.Find(page.Analyze(handler.Id).Nodes, path, eventOffset, line: 1);
         Assert.IsNotNull(clicked);
         Assert.AreEqual(NodeKind.Call, clicked.Kind);
+        Assert.AreEqual(eventOffset, clicked.Source!.Offset);
+        Assert.DoesNotContain(entry => entry.Name == "reload", page.Entries);
         foreach (var node in new[] { overview, clicked })
         {
             Assert.IsNull(node.TargetMethod, "Generated expressions must not certify a runtime call target.");

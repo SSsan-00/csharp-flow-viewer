@@ -323,6 +323,8 @@ public sealed class RazorJavaScript
             var parser = new Parser(new ParserOptions { AllowReturnOutsideFunction = inline });
             var text = fragment.Text;
             var renderingSlots = fragment.RenderingSlots;
+            var canOfferLocalDefinition = !fragment.IsModule && !fragment.IsolatedClassic
+                && LocalJavaScriptFiles.PathComparer.Equals(fragment.Source.FilePath, pagePath);
             JsProgram root;
             JavaScriptRecovery? recovery = null;
             try
@@ -332,7 +334,15 @@ public sealed class RazorJavaScript
             catch (ParseErrorException error)
             {
                 Notice($"L{fragment.Source.Line + Math.Max(0, error.LineNumber - 1)}: JavaScript構文エラー ({error.Error.Code})。");
-                if (inline || fragment.IsModule || fragment.RenderingSlots is { Count: > 0 }) return null;
+                if (inline || fragment.IsModule) return null;
+                if (renderingSlots is { Count: > 0 } generatedSlots)
+                {
+                    if (canOfferLocalDefinition && RazorScriptBoundaries.TryParseGeneratedValues(
+                        parser, text, generatedSlots, error.Error, token) is { } projectedValues)
+                        IndexDefinitionCandidates(projectedValues.Root, generatedSlots,
+                            RazorScriptBoundaries.IndependentSlots(projectedValues.Root), projectedValues.Offsets);
+                    return null;
+                }
                 recovery = JavaScriptRecovery.TryParse(fragment.Text, error.Error, token);
                 if (recovery is null) return null;
                 root = recovery.Program;
@@ -354,11 +364,7 @@ public sealed class RazorJavaScript
                     else
                     {
                         Notice($"L{fragment.Source.Line}: Razor生成部分の境界を独立したJavaScript文として確定できません。");
-                        if (!fragment.IsModule && !fragment.IsolatedClassic
-                            && LocalJavaScriptFiles.PathComparer.Equals(fragment.Source.FilePath, pagePath))
-                            foreach (var (name, source) in RazorScriptBoundaries.SourcesOutsideUnresolvedReturns(
-                                fragment, root, slots, statementSlots, token))
-                                if (!sourceOnlyDefinitions.TryAdd(name, source)) sourceOnlyDefinitions[name] = null;
+                        if (canOfferLocalDefinition) IndexDefinitionCandidates(root, slots, statementSlots);
                         return null;
                     }
                 }
@@ -369,6 +375,14 @@ public sealed class RazorJavaScript
                 ? pageText.Substring(fragment.Source.Offset, projected.Length) : projected;
             return new ScriptUnit(text, original, fragment.Source, root, fragment.ContainsRazorCode,
                 renderingSlots, inlineText, recovery);
+
+            void IndexDefinitionCandidates(JsProgram candidate, IReadOnlyDictionary<int, SourceRange> candidateSlots,
+                IReadOnlySet<int> independent, IReadOnlySet<int>? generatedValues = null)
+            {
+                foreach (var (name, source) in RazorScriptBoundaries.SourcesOutsideUnresolvedSlots(
+                    fragment, candidate, candidateSlots, independent, token, generatedValues))
+                    if (!sourceOnlyDefinitions.TryAdd(name, source)) sourceOnlyDefinitions[name] = null;
+            }
 
             JsProgram? ParseWithIndependentSlots(string candidate, IReadOnlyDictionary<int, SourceRange> candidateSlots)
             {
