@@ -10,11 +10,22 @@ internal static class RazorScriptBoundaries
     public static HashSet<int> IndependentSlots(JsProgram root) =>
         RazorJavaScript.Descendants(root).OfType<EmptyStatement>().Select(node => node.Start).ToHashSet();
 
-    public static (string Text, IReadOnlyDictionary<int, SourceRange> Slots)? RestoreTopLevelAsi(
+    public static (string Text, IReadOnlyDictionary<int, SourceRange> Slots)? RestoreStatementAsi(
         string projected, JsProgram root, IReadOnlyDictionary<int, SourceRange> slots, IReadOnlySet<int> independent,
         CancellationToken token)
     {
-        var declarations = root.Body.OfType<VariableDeclaration>().ToDictionary(declaration => declaration.End - 1);
+        var ends = new Dictionary<int, int>();
+        // A direct statement-list member can end here without changing the association of an if, loop or label.
+        foreach (var node in RazorJavaScript.Descendants(root))
+        {
+            token.ThrowIfCancellationRequested();
+            if (node is JsProgram program)
+                foreach (var statement in program.Body) RememberEnd(statement);
+            else if (node is BlockStatement block)
+                foreach (var statement in block.Body) RememberEnd(statement);
+            else if (node is SwitchCase branch)
+                foreach (var statement in branch.Consequent) RememberEnd(statement);
+        }
         var newSlots = new Dictionary<int, SourceRange>(slots.Count);
         var text = projected.ToCharArray();
         foreach (var (offset, source) in slots)
@@ -25,55 +36,89 @@ internal static class RazorScriptBoundaries
                 newSlots.Add(offset, source);
                 continue;
             }
-            if (!declarations.TryGetValue(offset, out var declaration) || declaration.Declarations.Count == 0
-                || declaration.Declarations[^1].Init is null || source.Length < 2 || offset + 1 >= text.Length
+            if (!ends.TryGetValue(offset, out var end) || end > offset || source.Length < 2 || offset + 1 >= text.Length
                 || text[offset] != ';' || text[offset + 1] != ' ' || slots.ContainsKey(offset + 1))
                 return null;
-            var end = declaration.Declarations[^1].End;
-            if (end > offset) return null;
             var gap = projected.AsSpan(end, offset - end);
             if (gap.IndexOfAny('\r', '\n') < 0 || !gap.IsWhiteSpace()) return null;
 
-            // The first semicolon closes the variable statement; the second remains a Razor boundary.
+            // The first semicolon closes the JavaScript statement; the second remains a Razor boundary.
             text[offset + 1] = ';';
             newSlots.Add(offset + 1, source);
         }
         return (new string(text), newSlots);
+
+        void RememberEnd(Node statement)
+        {
+            var terminator = statement.End - 1;
+            if (!slots.ContainsKey(terminator)) return;
+            var end = statement switch
+            {
+                ExpressionStatement expression => expression.Expression.End,
+                VariableDeclaration { Declarations.Count: > 0 } declaration when declaration.Declarations[^1].Init is not null
+                    => declaration.Declarations[^1].End,
+                _ => -1
+            };
+            if (end >= 0) ends.TryAdd(terminator, end);
+        }
     }
 
     public static (JsProgram Root, IReadOnlySet<int> Offsets)? TryParseGeneratedValues(
         Parser parser, string text, IReadOnlyDictionary<int, SourceRange> slots, ParseError error, CancellationToken token)
     {
+        const int SequentialRepairs = 4;
         if (text.Length > 2 * 1024 * 1024) return null;
         var projection = text.ToCharArray();
         var offsets = new HashSet<int>();
-        // Replace only a rejected Razor marker, retaining original source offsets.
-        while (offsets.Count < 4 && error.Code == "UnexpectedToken" && error.IsIndexDefined
-            && slots.ContainsKey(error.Index) && projection[error.Index] == ';' && offsets.Add(error.Index))
+        while (offsets.Count < SequentialRepairs && CanReplace(error))
         {
             token.ThrowIfCancellationRequested();
-            projection[error.Index] = '0';
-            try
-            {
-                var root = parser.ParseScript(new string(projection));
-                var pending = new HashSet<int>(offsets);
-                foreach (var node in RazorJavaScript.Descendants(root))
-                {
-                    token.ThrowIfCancellationRequested();
-                    if (node is VariableDeclarator { Init: { } value }) CheckValue(value);
-                    else if (node is ArrayExpression array)
-                        foreach (var element in array.Elements) CheckValue(element);
-                }
-                return pending.Count == 0 ? (root, offsets) : null;
-
-                void CheckValue(Node? value)
-                {
-                    if (value is not null && value.End == value.Start + 1) pending.Remove(value.Start);
-                }
-            }
+            Replace(error.Index);
+            try { return ParseProjection(); }
             catch (ParseErrorException retry) { error = retry.Error; }
         }
-        return null;
+
+        if (offsets.Count != SequentialRepairs || !CanReplace(error)) return null;
+        // Shortlist the remaining value markers for one more parse; their AST roles, not the punctuation, decide validity.
+        Replace(error.Index);
+        foreach (var position in slots.Keys)
+        {
+            token.ThrowIfCancellationRequested();
+            if (projection[position] != ';') continue;
+            var previous = position - 1;
+            while (previous >= 0 && char.IsWhiteSpace(projection[previous])) previous--;
+            if (previous >= 0 && projection[previous] is '=' or '[' or ',') Replace(position);
+        }
+        try { return ParseProjection(); }
+        catch (ParseErrorException) { return null; }
+
+        bool CanReplace(ParseError failure) => failure.Code == "UnexpectedToken" && failure.IsIndexDefined
+            && slots.ContainsKey(failure.Index) && projection[failure.Index] == ';';
+
+        void Replace(int position)
+        {
+            projection[position] = '0';
+            offsets.Add(position);
+        }
+
+        (JsProgram Root, IReadOnlySet<int> Offsets)? ParseProjection()
+        {
+            var root = parser.ParseScript(new string(projection));
+            var pending = new HashSet<int>(offsets);
+            foreach (var node in RazorJavaScript.Descendants(root))
+            {
+                token.ThrowIfCancellationRequested();
+                if (node is VariableDeclarator { Init: { } value }) CheckValue(value);
+                else if (node is ArrayExpression array)
+                    foreach (var element in array.Elements) CheckValue(element);
+            }
+            return pending.Count == 0 ? (root, offsets) : null;
+
+            void CheckValue(Node? value)
+            {
+                if (value is not null && value.End == value.Start + 1) pending.Remove(value.Start);
+            }
+        }
     }
 
     public static IEnumerable<(string Name, SourceRange? Source)> SourcesOutsideUnresolvedSlots(

@@ -357,7 +357,7 @@ public sealed class RazorJavaScript
                 if (slots.Keys.Any(offset => !statementSlots.Contains(offset)))
                 {
                     if (!fragment.IsModule
-                        && RazorScriptBoundaries.RestoreTopLevelAsi(text, root, slots, statementSlots, token) is { } restored
+                        && RazorScriptBoundaries.RestoreStatementAsi(text, root, slots, statementSlots, token) is { } restored
                         && ParseWithIndependentSlots(restored.Text, restored.Slots) is { } reparsed)
                     {
                         root = reparsed;

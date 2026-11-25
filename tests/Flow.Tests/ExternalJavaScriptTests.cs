@@ -11,6 +11,139 @@ namespace Flow.Tests;
 public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
+    [DataRow("top-call", "\n", true)]
+    [DataRow("nested-var", "\r\n", true)]
+    [DataRow("chain", "\n", true)]
+    [DataRow("conditional-block", "\r\n", true)]
+    [DataRow("switch-case", "\n", true)]
+    [DataRow("explicit", "\n", true)]
+    [DataRow("same-line", "\n", false)]
+    [DataRow("unbraced-body", "\n", false)]
+    [DataRow("labeled-body", "\n", false)]
+    [DataRow("dynamic-eval", "\n", false)]
+    [DataRow("actual-syntax-error", "\n", false)]
+    [DataRow("duplicate", "\n", false)]
+    public async Task RazorStatementBoundaryDoesNotLoseAnIndependentInlineDefinition(
+        string shape, string newline, bool follows)
+    {
+        const string boundary = """
+            @if (Model.Show)
+            {
+                @:renderFromRazor();
+            }
+            """;
+        var unrelated = shape switch
+        {
+            "top-call" => "initialize()\n" + boundary,
+            "nested-var" => "function configure() {\n  const value = transform()\n" + boundary + "\n  finish(value);\n}",
+            "chain" => "function configure() {\n  $('#x')\n    .find('.child')\n    .on('click', callback)\n" + boundary + "\n  finish();\n}",
+            "conditional-block" => "function configure() {\n  if (ready) {\n    connect()\n" + boundary + "\n  }\n}",
+            "switch-case" => "function configure() {\n  switch (mode) { case 1:\n    connect()\n" + boundary + "\n    break;\n  }\n}",
+            "explicit" => "initialize();\n" + boundary,
+            "same-line" => "initialize() @if (Model.Show) { <text>renderFromRazor();</text> }",
+            "unbraced-body" => "if (ready)\n  initialize()\n" + boundary,
+            "labeled-body" => "launch:\n  initialize()\n" + boundary,
+            "actual-syntax-error" => "const broken = ;\n" + boundary,
+            "dynamic-eval" => "initialize()\n" + boundary + "\neval(sourceText);",
+            _ => "initialize()\n" + boundary + "\nfunction reload() { return 0; }"
+        };
+        var text = $$"""
+            <select onchange="reload();"></select>
+            <script language="javascript">
+              $(selector).on("click", handler);
+              document.getElementById("menu").addEventListener(eventName, handler);
+            </script>
+            <script language="javascript">
+            {{unrelated}}
+            function reload() { return 42; }
+            </script>
+            """.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", newline, StringComparison.Ordinal);
+        using var tree = new Files();
+        var path = tree.Add("Pages/RazorStatementBoundary.cshtml", text);
+        using var session = tree.Open(path);
+        var page = await ReadPage(session);
+        Assert.Contains(notice => notice.Contains("\u30a4\u30d9\u30f3\u30c8\u5bfe\u8c61\u306e\u8981\u7d20\u3092\u9759\u7684\u306b", StringComparison.Ordinal), page.Notices);
+        Assert.Contains(notice => notice.Contains("\u52d5\u7684\u306a\u30a4\u30d9\u30f3\u30c8\u540d\u306f", StringComparison.Ordinal), page.Notices);
+        var handler = Assert.ContainsSingle(page.Entries.Where(entry => page.IsInlineEvent(entry.Id)));
+        var offset = text.IndexOf("reload()", StringComparison.Ordinal);
+        var clicked = SourceNodePicker.Find(page.Analyze(handler.Id).Nodes, path, offset, line: 1);
+        Assert.IsNotNull(clicked);
+        Assert.AreEqual(NodeKind.Call, clicked.Kind);
+        var overview = FindCall(page.Analyze(-1), "onchange \u2192 reload()");
+        Assert.AreEqual(shape == "actual-syntax-error",
+            page.Notices.Any(notice => notice.Contains("JavaScript\u69cb\u6587\u30a8\u30e9\u30fc", StringComparison.Ordinal)));
+        if (!follows)
+        {
+            Assert.IsNull(clicked.TargetMethod);
+            Assert.IsNull(clicked.TargetDeclaration);
+            Assert.IsNull(overview.TargetMethod);
+            Assert.IsNull(overview.TargetDeclaration);
+            return;
+        }
+
+        Assert.DoesNotContain(notice => notice.Contains("Razor\u751f\u6210\u90e8\u5206\u306e\u5883\u754c\u3092\u72ec\u7acb", StringComparison.Ordinal), page.Notices);
+        var target = Assert.ContainsSingle(page.Entries.Where(entry => entry.Name == "reload"));
+        Assert.AreEqual(path, clicked.TargetFilePath);
+        Assert.AreEqual(target.Id, clicked.TargetMethod);
+        Assert.AreEqual(target.Id, overview.TargetMethod);
+        var body = Assert.ContainsSingle(page.Analyze(target.Id).Nodes.Where(node => node.Label == "return 42;"));
+        Assert.AreEqual(text.IndexOf("return 42;", StringComparison.Ordinal), body.Source?.Offset);
+        Assert.AreEqual(1 + text.AsSpan(0, body.Source!.Offset).Count('\n'), body.Source.Line);
+    }
+
+    [TestMethod]
+    [DataRow(4, 120, "ordinary", true)]
+    [DataRow(5, 5000, "ordinary", true)]
+    [DataRow(12, 120, "ordinary", true)]
+    [DataRow(5, 120, "mixed", true)]
+    [DataRow(5, 120, "duplicate", false)]
+    [DataRow(5, 120, "syntax-error", false)]
+    [DataRow(5, 120, "runtime-role", false)]
+    public async Task InlineRazorJumpRetainsOnlyCertifiedDefinitionAcrossManyGeneratedValues(
+        int valueCount, int lineCount, string variant, bool follows)
+    {
+        const string definition = "function reload() { return 42; }";
+        var lines = new List<string> { "<select onchange=\"reload();\"></select>", "<script language=\"javascript\">" };
+        for (var i = 0; i < valueCount; i++)
+            lines.AddRange([$"const options{i} = [", "    @foreach (var item in Model.Items)",
+                "    {", "        @: @item,", "    }", "];"]);
+        if (variant == "mixed")
+            lines.AddRange(["@if (Model.Enabled)", "{", "    @:init();", "}"]);
+        if (variant == "duplicate")
+            lines.Add("function reload() { return 0; }");
+        if (variant == "syntax-error")
+            lines.Add("const broken = ;");
+        if (variant == "runtime-role")
+            lines.AddRange(["consume('prefix',", "    @if (Model.Enabled)", "    {", "        @:1", "    }", ");"]);
+        while (lines.Count < lineCount - 2) lines.Add("// synthetic");
+        lines.Add(definition);
+        lines.Add("</script>");
+        var text = string.Join("\r\n", lines);
+
+        using var tree = new Files();
+        var path = tree.Add("Pages/ManyGeneratedValues.cshtml", text);
+        using var session = tree.Open(path);
+        var page = await ReadPage(session);
+        Assert.DoesNotContain(entry => entry.Name == "reload", page.Entries, "Do not invent a browser-flow entry.");
+        var handler = Assert.ContainsSingle(page.Entries.Where(entry => page.IsInlineEvent(entry.Id)));
+        var eventOffset = text.IndexOf("reload()", StringComparison.Ordinal);
+        var call = SourceNodePicker.Find(page.Analyze(handler.Id).Nodes, path, eventOffset, line: 1);
+        Assert.IsNotNull(call);
+        Assert.AreEqual(NodeKind.Call, call.Kind);
+        Assert.AreEqual(eventOffset, call.Source?.Offset);
+        var summary = FindCall(page.Analyze(-1), "onchange \u2192 reload()");
+        foreach (var node in new[] { summary, call })
+        {
+            Assert.IsNull(node.TargetMethod, "A candidate is not a confirmed runtime call target.");
+            Assert.AreEqual(follows, node.IsDefinitionCandidate);
+            Assert.AreEqual(follows ? path : null, node.TargetDeclaration?.FilePath);
+            Assert.AreEqual(follows ? text.IndexOf(definition, StringComparison.Ordinal) : (int?)null, node.TargetDeclaration?.Offset);
+            Assert.AreEqual(follows ? definition.Length : (int?)null, node.TargetDeclaration?.Length);
+            Assert.AreEqual(follows ? lineCount - 1 : (int?)null, node.TargetDeclaration?.Line);
+        }
+    }
+
+    [TestMethod]
     [DataRow("body-value", true)]
     [DataRow("duplicate", false)]
     [DataRow("other-generated-body", false)]
