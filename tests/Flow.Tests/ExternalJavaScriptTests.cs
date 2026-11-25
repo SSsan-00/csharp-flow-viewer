@@ -11,6 +11,58 @@ namespace Flow.Tests;
 public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
+    [DataRow(4, 120, "ordinary", true)]
+    [DataRow(5, 5000, "ordinary", true)]
+    [DataRow(12, 120, "ordinary", true)]
+    [DataRow(5, 120, "mixed", true)]
+    [DataRow(5, 120, "duplicate", false)]
+    [DataRow(5, 120, "syntax-error", false)]
+    [DataRow(5, 120, "runtime-role", false)]
+    public async Task InlineRazorJumpRetainsOnlyCertifiedDefinitionAcrossManyGeneratedValues(
+        int valueCount, int lineCount, string variant, bool follows)
+    {
+        const string definition = "function reload() { return 42; }";
+        var lines = new List<string> { "<select onchange=\"reload();\"></select>", "<script language=\"javascript\">" };
+        for (var i = 0; i < valueCount; i++)
+            lines.AddRange([$"const options{i} = [", "    @foreach (var item in Model.Items)",
+                "    {", "        @: @item,", "    }", "];"]);
+        if (variant == "mixed")
+            lines.AddRange(["@if (Model.Enabled)", "{", "    @:init();", "}"]);
+        if (variant == "duplicate")
+            lines.Add("function reload() { return 0; }");
+        if (variant == "syntax-error")
+            lines.Add("const broken = ;");
+        if (variant == "runtime-role")
+            lines.AddRange(["consume('prefix',", "    @if (Model.Enabled)", "    {", "        @:1", "    }", ");"]);
+        while (lines.Count < lineCount - 2) lines.Add("// synthetic");
+        lines.Add(definition);
+        lines.Add("</script>");
+        var text = string.Join("\r\n", lines);
+
+        using var tree = new Files();
+        var path = tree.Add("Pages/ManyGeneratedValues.cshtml", text);
+        using var session = tree.Open(path);
+        var page = await ReadPage(session);
+        Assert.DoesNotContain(entry => entry.Name == "reload", page.Entries, "Do not invent a browser-flow entry.");
+        var handler = Assert.ContainsSingle(page.Entries.Where(entry => page.IsInlineEvent(entry.Id)));
+        var eventOffset = text.IndexOf("reload()", StringComparison.Ordinal);
+        var call = SourceNodePicker.Find(page.Analyze(handler.Id).Nodes, path, eventOffset, line: 1);
+        Assert.IsNotNull(call);
+        Assert.AreEqual(NodeKind.Call, call.Kind);
+        Assert.AreEqual(eventOffset, call.Source?.Offset);
+        var summary = FindCall(page.Analyze(-1), "onchange \u2192 reload()");
+        foreach (var node in new[] { summary, call })
+        {
+            Assert.IsNull(node.TargetMethod, "A candidate is not a confirmed runtime call target.");
+            Assert.AreEqual(follows, node.IsDefinitionCandidate);
+            Assert.AreEqual(follows ? path : null, node.TargetDeclaration?.FilePath);
+            Assert.AreEqual(follows ? text.IndexOf(definition, StringComparison.Ordinal) : (int?)null, node.TargetDeclaration?.Offset);
+            Assert.AreEqual(follows ? definition.Length : (int?)null, node.TargetDeclaration?.Length);
+            Assert.AreEqual(follows ? lineCount - 1 : (int?)null, node.TargetDeclaration?.Line);
+        }
+    }
+
+    [TestMethod]
     [DataRow("body-value", true)]
     [DataRow("duplicate", false)]
     [DataRow("other-generated-body", false)]
