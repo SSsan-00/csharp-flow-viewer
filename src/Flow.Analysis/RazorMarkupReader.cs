@@ -108,7 +108,7 @@ internal sealed class RazorMarkupReader
                 element.End = contentEnd;
                 if (tag == "script")
                 {
-                    if (GetScriptKind(element) is { } kind)
+                    if (GetScriptKind(element, token) is { } kind)
                     {
                         var module = kind == ScriptKind.Module;
                         if (element.Attribute("src") is { } scriptSource)
@@ -182,16 +182,21 @@ internal sealed class RazorMarkupReader
 
     private enum ScriptKind { Classic, Module }
 
-    private static ScriptKind? GetScriptKind(RazorElement element)
+    private static ScriptKind? GetScriptKind(RazorElement element, CancellationToken token)
     {
         if (element.Attribute("type") is { } type)
         {
-            if (type.Value.Equals("module", StringComparison.OrdinalIgnoreCase)) return ScriptKind.Module;
-            return type.Value.Length == 0 || ClassicScriptTypes.Contains(type.Value.Trim(' ', '\t', '\n', '\r', '\f'))
+            if (StaticValue(type) is not { } value) return null;
+            if (value.Equals("module", StringComparison.OrdinalIgnoreCase)) return ScriptKind.Module;
+            return value.Length == 0 || ClassicScriptTypes.Contains(value.Trim(' ', '\t', '\n', '\r', '\f'))
                 ? ScriptKind.Classic : null;
         }
-        var language = element.Attribute("language")?.Value;
-        return string.IsNullOrEmpty(language) || ClassicScriptTypes.Contains("text/" + language) ? ScriptKind.Classic : null;
+        if (element.Attribute("language") is not { } language) return ScriptKind.Classic;
+        return StaticValue(language) is { } name && (name.Length == 0 || ClassicScriptTypes.Contains("text/" + name))
+            ? ScriptKind.Classic : null;
+
+        string? StaticValue(RazorAttribute attribute) => attribute.IsDynamic
+            ? InlineScriptText.TryDecodeRazorLiteral(attribute.RawValue, token)?.Text : attribute.Value;
     }
 }
 
