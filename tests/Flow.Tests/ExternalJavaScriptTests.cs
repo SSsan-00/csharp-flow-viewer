@@ -11,6 +11,118 @@ namespace Flow.Tests;
 public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
+    [DataRow("literal", true)]
+    [DataRow("literal-quoted", true)]
+    [DataRow("literal-verbatim", true)]
+    [DataRow("literal-raw", true)]
+    [DataRow("literal-escaped-offset", true)]
+    [DataRow("literal-entity", false)]
+    [DataRow("argument", true)]
+    [DataRow("other-attribute", true)]
+    [DataRow("class-before", true)]
+    [DataRow("class-after", true)]
+    [DataRow("class-line", true)]
+    [DataRow("class-multiline", true)]
+    [DataRow("markup-line", true)]
+    [DataRow("script-line", true)]
+    [DataRow("runtime-value", false)]
+    [DataRow("runtime-appended", false)]
+    [DataRow("runtime-interpolated-callee", false)]
+    [DataRow("conditional-script-line", false)]
+    public async Task InlineRazorSyntaxDoesNotLoseAStaticDefinition(string shape, bool links)
+    {
+        const string definition = "function reload() { return 42; }";
+        var input = shape switch
+        {
+            "literal" => """<select onchange="@("reload();")"></select>""",
+            "literal-quoted" => """<select onchange='@("reload(\"quoted\");")'></select>""",
+            "literal-verbatim" => """<select onchange='@(@"reload(""quoted"");")'></select>""",
+            "literal-raw" => """"<select onchange='@("""reload("quoted");""")'></select>"""",
+            "literal-escaped-offset" => """<select onchange='@("ignore(\"\U0001F603\"); \u0072eload();")'></select>""",
+            "literal-entity" => """<select onchange='@("reload(&quot;notJavaScript&quot;);")'></select>""",
+            "argument" => """<select onchange="reload(@(Model.Id));"></select>""",
+            "other-attribute" => """<select data-label="@($"{Model.Label} > \"box\"")" onchange="reload();"></select>""",
+            "class-before" => """<select class="@(Model.Active ? "highlight" : "normal")" onchange="reload();"></select>""",
+            "class-after" => """<select onchange="reload();" class="@(Model.Active ? "highlight" : "normal")"></select>""",
+            "class-line" => """
+                @{
+                    @:<select class="@(Model.Active ? "highlight" : "normal")" onchange="reload();"></select>
+                }
+                """,
+            "class-multiline" => """
+                <select
+                    class="@(Model.Active
+                        ? "highlight"
+                        : "normal")"
+                    onchange="reload();"
+                    data-text="@(Model.Item ? "x > y" : "b")"></select>
+                """,
+            "markup-line" => """
+                @{
+                    @:<select onchange="reload();"></select>
+                }
+                """,
+            "runtime-value" => """<select onchange="@(Model.Handler)"></select>""",
+            "runtime-appended" => """<select onchange='@("reload();" + Model.Handler)'></select>""",
+            "runtime-interpolated-callee" => """<select onchange="@($"{Model.Handler}();")"></select>""",
+            _ => """<select onchange="reload();"></select>"""
+        };
+        var script = shape switch
+        {
+            "script-line" => $$"""
+                @{
+                    @:{{definition}}
+                }
+                """,
+            "conditional-script-line" => $$"""
+                @if (Model.Enabled)
+                {
+                    @:{{definition}}
+                }
+                """,
+            _ => definition
+        };
+        var text = $$"""
+            {{input}}
+            <script language="javascript">
+            {{script}}
+            </script>
+            """;
+        using var tree = new Files();
+        var path = tree.Add("Pages/InlineRazor.cshtml", text);
+        using var session = tree.Open(path);
+        var page = await ReadPage(session);
+        var handler = Assert.ContainsSingle(page.Entries.Where(entry => page.IsInlineEvent(entry.Id)));
+        var flow = page.Analyze(handler.Id);
+        if (!links)
+        {
+            Assert.DoesNotContain(node => node.TargetMethod is not null || node.TargetDeclaration is not null, flow.Nodes);
+            var overview = page.Analyze(-1);
+            Assert.DoesNotContain(node => node.Label.StartsWith("onchange", StringComparison.Ordinal)
+                && (node.TargetMethod is not null || node.TargetDeclaration is not null), overview.Nodes);
+            return;
+        }
+
+        var calleeText = shape == "literal-escaped-offset" ? @"\u0072eload(" : "reload(";
+        var callOffset = text.IndexOf(calleeText, StringComparison.Ordinal);
+        var line = 1 + text.AsSpan(0, callOffset).Count('\n');
+        var clicked = SourceNodePicker.Find(flow.Nodes, path, callOffset, line);
+        Assert.IsNotNull(clicked);
+        Assert.AreEqual(NodeKind.Call, clicked.Kind);
+        Assert.AreEqual(callOffset, clicked.Source?.Offset);
+        var target = Assert.ContainsSingle(page.Entries.Where(entry => entry.Name == "reload"));
+        Assert.AreEqual(path, clicked.TargetFilePath);
+        Assert.AreEqual(target.Id, clicked.TargetMethod);
+        var destination = session.Files.Single(file => file.Path == clicked.TargetFilePath);
+        var reopened = await session.ReadRazorAsync(destination, CancellationToken.None);
+        var body = Assert.ContainsSingle(reopened.Analyze(target.Id).Nodes.Where(node => node.Label == "return 42;"));
+        Assert.AreEqual(text.IndexOf("return 42;", StringComparison.Ordinal), body.Source?.Offset);
+        var eventNode = Assert.ContainsSingle(page.Analyze(-1).Nodes.Where(node =>
+            node.Label.StartsWith("onchange", StringComparison.Ordinal)));
+        Assert.AreEqual(target.Id, eventNode.TargetMethod);
+    }
+
+    [TestMethod]
     [DataRow("if", "function reload() { return 42; }", true)]
     [DataRow("if-crlf", "function reload() { return 42; }", true)]
     [DataRow("foreach", "function reload() { return 42; }", true)]
