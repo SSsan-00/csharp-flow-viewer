@@ -76,9 +76,11 @@ public sealed class RazorSourceFile
             {
                 if (attribute.Name.Length <= 2 || !attribute.Name.StartsWith("on", StringComparison.OrdinalIgnoreCase)) continue;
                 var eventLabel = $"{attribute.Name[2..]} · {label}";
-                var code = attribute.IsDynamic ? document.ProjectJavaScript(attribute.ValueStart, attribute.ValueLength) : attribute.RawValue;
+                var literal = attribute.IsDynamic ? InlineScriptText.TryDecodeRazorLiteral(attribute.RawValue, token) : null;
+                var code = literal ?? InlineScriptText.Decode(attribute.IsDynamic
+                    ? document.ProjectJavaScript(attribute.ValueStart, attribute.ValueLength) : attribute.RawValue, token);
                 var id = javaScript.AddInlineHandler(eventLabel, code,
-                    document.Range(attribute.ValueStart, attribute.ValueLength), attribute.IsDynamic, token);
+                    document.Range(attribute.ValueStart, attribute.ValueLength), attribute.IsDynamic && literal is null, token);
                 inlineLabels[id] = (attribute.Name, document.Range(attribute.Start, attribute.Length), ElementId(element));
                 if (element.TagName == "a" && attribute.Name.Equals("onclick", StringComparison.OrdinalIgnoreCase))
                 {

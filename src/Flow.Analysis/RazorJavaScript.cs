@@ -270,15 +270,18 @@ public sealed class RazorJavaScript
 
     /// <summary>onclick/onchangeなどの属性を、returnを許す関数本体として解析する。</summary>
     public int AddInlineHandler(string name, string code, SourceRange source, bool containsRazorCode = false,
-        CancellationToken token = default)
+        CancellationToken token = default) =>
+        AddInlineHandler(name, InlineScriptText.Decode(code, token), source, containsRazorCode, token);
+
+    internal int AddInlineHandler(string name, InlineScriptText decoded, SourceRange source, bool containsRazorCode,
+        CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var decoded = InlineScriptText.Decode(code, token);
         var fragment = new RazorJavaScriptFragment(decoded.Text, source, containsRazorCode);
         var unit = Parse(fragment, inline: true, token, decoded);
         if (unit is null)
         {
-            var failed = AddEntry(name, null, new ScriptUnit(decoded.Text, code, source, null!, containsRazorCode),
+            var failed = AddEntry(name, null, new ScriptUnit(decoded.Text, decoded.Encoded, source, null!, containsRazorCode),
                 new Scope(globals));
             failed.Failure = "JavaScriptを静的に解析できません。診断を確認してください。";
             return failed.Entry.Id;
