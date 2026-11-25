@@ -10,11 +10,22 @@ internal static class RazorScriptBoundaries
     public static HashSet<int> IndependentSlots(JsProgram root) =>
         RazorJavaScript.Descendants(root).OfType<EmptyStatement>().Select(node => node.Start).ToHashSet();
 
-    public static (string Text, IReadOnlyDictionary<int, SourceRange> Slots)? RestoreTopLevelAsi(
+    public static (string Text, IReadOnlyDictionary<int, SourceRange> Slots)? RestoreStatementAsi(
         string projected, JsProgram root, IReadOnlyDictionary<int, SourceRange> slots, IReadOnlySet<int> independent,
         CancellationToken token)
     {
-        var declarations = root.Body.OfType<VariableDeclaration>().ToDictionary(declaration => declaration.End - 1);
+        var ends = new Dictionary<int, int>();
+        // A direct statement-list member can end here without changing the association of an if, loop or label.
+        foreach (var node in RazorJavaScript.Descendants(root))
+        {
+            token.ThrowIfCancellationRequested();
+            if (node is JsProgram program)
+                foreach (var statement in program.Body) RememberEnd(statement);
+            else if (node is BlockStatement block)
+                foreach (var statement in block.Body) RememberEnd(statement);
+            else if (node is SwitchCase branch)
+                foreach (var statement in branch.Consequent) RememberEnd(statement);
+        }
         var newSlots = new Dictionary<int, SourceRange>(slots.Count);
         var text = projected.ToCharArray();
         foreach (var (offset, source) in slots)
@@ -25,20 +36,31 @@ internal static class RazorScriptBoundaries
                 newSlots.Add(offset, source);
                 continue;
             }
-            if (!declarations.TryGetValue(offset, out var declaration) || declaration.Declarations.Count == 0
-                || declaration.Declarations[^1].Init is null || source.Length < 2 || offset + 1 >= text.Length
+            if (!ends.TryGetValue(offset, out var end) || end > offset || source.Length < 2 || offset + 1 >= text.Length
                 || text[offset] != ';' || text[offset + 1] != ' ' || slots.ContainsKey(offset + 1))
                 return null;
-            var end = declaration.Declarations[^1].End;
-            if (end > offset) return null;
             var gap = projected.AsSpan(end, offset - end);
             if (gap.IndexOfAny('\r', '\n') < 0 || !gap.IsWhiteSpace()) return null;
 
-            // The first semicolon closes the variable statement; the second remains a Razor boundary.
+            // The first semicolon closes the JavaScript statement; the second remains a Razor boundary.
             text[offset + 1] = ';';
             newSlots.Add(offset + 1, source);
         }
         return (new string(text), newSlots);
+
+        void RememberEnd(Node statement)
+        {
+            var terminator = statement.End - 1;
+            if (!slots.ContainsKey(terminator)) return;
+            var end = statement switch
+            {
+                ExpressionStatement expression => expression.Expression.End,
+                VariableDeclaration { Declarations.Count: > 0 } declaration when declaration.Declarations[^1].Init is not null
+                    => declaration.Declarations[^1].End,
+                _ => -1
+            };
+            if (end >= 0) ends.TryAdd(terminator, end);
+        }
     }
 
     public static (JsProgram Root, IReadOnlySet<int> Offsets)? TryParseGeneratedValues(
