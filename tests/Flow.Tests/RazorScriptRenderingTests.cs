@@ -38,7 +38,7 @@ public sealed class RazorScriptRenderingTests
         Assert.AreEqual(page.FilePath, call.TargetFilePath);
         Assert.AreEqual(source.IndexOf("load();", StringComparison.Ordinal), call.Source?.Offset);
         Assert.AreEqual("JS断片の終了", Next(graph, call).Label);
-        Assert.AreEqual("合流", Next(graph, server).Label);
+        Assert.AreEqual("Razor側の生成終了", Next(graph, server).Label);
         Assert.DoesNotContain(edge => edge.From == call.Id && !IsRender(edge.To), graph.Edges);
     }
 
@@ -53,6 +53,75 @@ public sealed class RazorScriptRenderingTests
         Assert.AreEqual("load()", call.Label);
         Assert.AreEqual(page.Entries.Single(entry => entry.Name == "load").Id, call.TargetMethod);
         Assert.AreEqual("load()", Slice(source, call.Source!));
+    }
+
+    [TestMethod]
+    [DataRow("\n")]
+    [DataRow("\r\n")]
+    public void ATextWrappedNestedRazorIfKeepsBothGeneratedCallsAndJumps(string newline)
+    {
+        var source = """
+            <button onclick="run(event.target)"></button>
+            <script>
+            function success() {}
+            function failure() {}
+            function run(obj) {
+                @if (Model.Outer) {
+                    <text>
+                        @if (Model.Inner) { <text>obj.focus(); success();</text> }
+                        else { <text>failure();</text> }
+                    </text>
+                }
+                done();
+            }
+            </script>
+            """.ReplaceLineEndings(newline);
+        var page = new RazorSourceFile(source, Path.GetFullPath("NestedGeneratedCalls.cshtml"));
+        var entry = page.Analyze(-1).Nodes.Single(node => node.Label == "onclick → run()");
+        var graph = page.Analyze(entry.TargetMethod!.Value);
+        var outer = Condition(graph, "Model.Outer");
+        var inner = Condition(graph, "Model.Inner");
+        Assert.AreEqual(inner, Next(graph, Next(graph, outer, "True")));
+        var end = Next(graph, outer, "False");
+        Assert.AreEqual("Razor側の生成終了", end.Label);
+        foreach (var (branch, name, line) in new[] { ("True", "success", 3), ("False", "failure", 4) })
+        {
+            var render = Next(graph, inner, branch);
+            Assert.AreEqual(end, Next(graph, render));
+            var call = Next(graph, render, "生成後、このJSが実行される場合");
+            Assert.AreEqual(name + "()", Slice(source, call.Source!));
+            Assert.AreEqual(page.FilePath, call.TargetFilePath);
+            Assert.AreEqual(line, page.Entries.Single(method => method.Id == call.TargetMethod).NavigationSource.Line);
+            Assert.AreEqual("JS断片の終了", Next(graph, call).Label);
+        }
+        Assert.DoesNotContain(node => node.Label == "合流" || node.Label.Contains("obj.focus()", StringComparison.Ordinal), graph.Nodes);
+        Assert.Contains(node => node.Label == "done()", graph.Nodes);
+    }
+
+    [TestMethod]
+    [DataRow("const value = ", ";")]
+    [DataRow("load = alternative;", "done();")]
+    public void ATextWrappedNestedRazorIfDoesNotInventAJumpWhenAdjacentOutputCanChangeTheCall(string before, string after)
+    {
+        var source = $$"""
+            <script>
+            function load() {}
+            function run() {
+                @if (Model.Outer) {
+                    <text>
+                        {{before}}
+                        @if (Model.Inner) { <text>load();</text> }
+                        {{after}}
+                    </text>
+                }
+            }
+            </script>
+            """;
+        var page = new RazorSourceFile(source, Path.GetFullPath("NestedAdjacentOutput.cshtml"));
+        var graph = Analyze(page, "run");
+        var render = Next(graph, Condition(graph, "Model.Inner"), "True");
+        StringAssert.Contains(render.Label, "load()");
+        Assert.DoesNotContain(edge => edge.From == render.Id && edge.Label == "生成後、このJSが実行される場合", graph.Edges);
     }
 
     [TestMethod]
@@ -134,7 +203,7 @@ public sealed class RazorScriptRenderingTests
             Assert.AreEqual(no, Slice(source, second.Source!));
             Assert.AreEqual(Next(graph, first), Next(graph, second));
             Assert.AreEqual("JS断片の終了", Next(graph, first).Label);
-            Assert.AreEqual("合流", Next(graph, render).Label);
+            Assert.AreEqual("Razor側の生成終了", Next(graph, render).Label);
         }
         Assert.AreEqual(1, graph.Nodes.Count(node => node.Kind == NodeKind.Start));
         Assert.Contains(node => node.Label == "finish()", graph.Nodes);
@@ -342,8 +411,8 @@ public sealed class RazorScriptRenderingTests
         Assert.IsNotNull(no.Source);
         StringAssert.Contains(Slice(source, yes.Source), "enable();");
         StringAssert.Contains(Slice(source, no.Source), "disable();");
-        Assert.AreEqual(Next(graph, yes), Next(graph, no));
-        Assert.AreEqual(loop, Next(graph, Next(graph, yes)));
+        Assert.AreEqual(loop, Next(graph, yes));
+        Assert.AreEqual(loop, Next(graph, no));
         Assert.AreEqual(loop, Next(graph, Next(graph, loop, "True")));
         Assert.AreEqual(NodeKind.End, Next(graph, loop, "False").Kind);
 

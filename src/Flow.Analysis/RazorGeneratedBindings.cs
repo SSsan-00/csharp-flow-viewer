@@ -8,6 +8,7 @@ internal sealed class RazorGeneratedBindings
     private readonly HashSet<string> blocked = new(StringComparer.Ordinal);
     private readonly HashSet<string> changedReceivers = new(StringComparer.Ordinal);
     private readonly Dictionary<string, VariableDeclarator> staticInitializers = new(StringComparer.Ordinal);
+    private readonly HashSet<CallExpression> standaloneFocus = [];
 
     public static RazorGeneratedBindings? Changes(Node root, CancellationToken token)
     {
@@ -21,6 +22,7 @@ internal sealed class RazorGeneratedBindings
         {
             token.ThrowIfCancellationRequested();
             if (node is WithStatement or CallExpression { Callee: Identifier { Name: "eval" } }) return null;
+            if (RazorBrowserCalls.StandaloneFocus(node) is { } call) result.standaloneFocus.Add(call);
             var write = node switch
             {
                 VariableDeclarator declaration => declaration.Id,
@@ -69,6 +71,8 @@ internal sealed class RazorGeneratedBindings
     }
 
     public bool IsUnchanged(string name) => !blocked.Contains(name);
+
+    public bool IsStandaloneFocus(CallExpression call) => standaloneFocus.Contains(call);
 
     public bool IsReceiverUnchanged(string name) => !changedReceivers.Contains(name);
 

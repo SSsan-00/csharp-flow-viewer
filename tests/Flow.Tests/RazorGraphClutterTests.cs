@@ -213,7 +213,7 @@ public sealed class RazorGraphClutterTests
         Assert.AreEqual("条件成立時に描画 · 生成JS", housekeeping.Label);
         StringAssert.Contains(page.Text.Substring(housekeeping.Source!.Offset, housekeeping.Source.Length), "++i;");
         Assert.AreEqual("条件不成立時に描画 · 生成JS: load()", Next(graph, guard, "False").Label);
-        Assert.AreEqual("合流", Next(graph, housekeeping).Label);
+        Assert.AreEqual("Razor側の生成終了", Next(graph, housekeeping).Label);
     }
 
     [TestMethod]
@@ -258,6 +258,81 @@ public sealed class RazorGraphClutterTests
         Assert.AreEqual(page.Entries.Single(entry => entry.Name == "settings").Id, settings.TargetMethod);
         Assert.AreEqual("JS断片の終了", Next(generated, settings).Label);
         Assert.AreEqual(Next(generated, settings), Next(generated, candidate, "False"));
+    }
+
+    [TestMethod]
+    public void UnresolvedObjFocusStatementsAreHiddenButTheirArgumentsAndResultUsesRemain()
+    {
+        var page = Page("""
+            <button onclick="obj.focus(); run(event.target)"></button>
+            <script>
+            function prepare() { return {}; }
+            function run(obj) {
+                obj.focus(prepare());
+                if (obj.focus()) obj.submit();
+                use(obj.focus());
+                finish();
+            }
+            </script>
+            """);
+        var overview = page.Analyze(-1);
+        var eventNode = ByLabel(overview, "onclick → run()");
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "run").Id, eventNode.TargetMethod);
+        var inline = page.Analyze(page.Entries.Single(entry => page.IsInlineEvent(entry.Id)).Id);
+        Assert.AreEqual("run(event.target)", Assert.ContainsSingle(inline.Nodes.Where(n => n.Kind == NodeKind.Call)).Label);
+
+        var graph = page.Analyze(eventNode.TargetMethod!.Value);
+        var setup = Next(graph, graph.Nodes.Single(n => n.Kind == NodeKind.Start));
+        Assert.AreEqual("prepare()", setup.Label);
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "prepare").Id, setup.TargetMethod);
+        Assert.DoesNotContain(n => n.Label == "obj.focus(prepare())", graph.Nodes);
+        var test = Next(graph, Next(graph, setup));
+        Assert.AreEqual((NodeKind.Condition, "obj.focus()"), (test.Kind, test.Label));
+        Assert.AreEqual("obj.submit()", Next(graph, test, "True").Label);
+        Assert.AreEqual("use(obj.focus())", Next(graph, Next(graph, test, "False")).Label);
+        Assert.AreEqual("finish()", Next(graph, ByLabel(graph, "use(obj.focus())")).Label);
+    }
+
+    [TestMethod]
+    public void GeneratedObjFocusStatementsAreHiddenButExplicitCustomReceiversRemain()
+    {
+        var page = Page("""
+            <script>
+            function prepare() { return {}; }
+            function run(obj) {
+                @if (Model.Ready) {
+                    <text>obj.focus(prepare()); finish();</text>
+                }
+            }
+            function own() {
+                const widget = { focus() { return 1; } };
+                const obj = widget;
+                obj.focus();
+                @if (Model.Ready) {
+                    <text>obj.focus(); finish();</text>
+                }
+            }
+            function generatedOwn() {
+                @if (Model.Ready) {
+                    <text>const obj = { focus: prepare }; obj.focus(); finish();</text>
+                }
+            }
+            function assigned(obj) {
+                obj.focus = prepare;
+                obj.focus();
+            }
+            </script>
+            """);
+
+        var graph = Analyze(page, "run");
+        var output = Next(graph, ByLabel(graph, "描画条件: Model.Ready"), "True");
+        Assert.AreEqual("条件成立時に描画 · 生成JS: prepare() · finish()", output.Label);
+        var preparation = Next(graph, output, "生成後、このJSが実行される場合");
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "prepare").Id, preparation.TargetMethod);
+        Assert.AreEqual("finish()", Next(graph, preparation).Label);
+        Assert.HasCount(2, Analyze(page, "own").Nodes.Where(n => n.Kind == NodeKind.Call && n.Label == "obj.focus()"));
+        Assert.AreEqual(NodeKind.Call, ByLabel(Analyze(page, "generatedOwn"), "obj.focus()").Kind);
+        Assert.AreEqual(NodeKind.Call, ByLabel(Analyze(page, "assigned"), "obj.focus()").Kind);
     }
 
     [TestMethod]

@@ -5,7 +5,8 @@ namespace Flow.Analysis;
 
 internal static class RazorBrowserCalls
 {
-    public static bool IsRoutine(CallExpression call, Scope scope, RazorGeneratedBindings? generated = null)
+    public static bool IsRoutine(CallExpression call, Scope scope, RazorGeneratedBindings? generated = null,
+        bool isStandaloneFocus = false)
     {
         if (scope.HasDynamicBinding) return false;
         if (call.Callee is Identifier { Name: "$" or "jQuery" } && call.Arguments.Count > 0
@@ -23,8 +24,22 @@ internal static class RazorBrowserCalls
         if (receiver is MemberExpression classes && RazorJavaScript.PropertyName(classes) == "classList")
             return (name is "add" or "remove" or "toggle" or "replace" or "contains")
                 && IsElement(classes.Object, scope, generated);
+        if (isStandaloneFocus && receiver is Identifier obj && !scope.HasDomOverride(obj.Name)
+            && (generated?.InitializerAt(obj) is { } initializer
+                ? !IsExplicitFocusReceiver(initializer, scope)
+                : generated?.IsReceiverUnchanged(obj.Name) != false && !scope.IsExplicitFocusReceiver(obj.Name)))
+            return true;
         return IsElementMember(name) && IsElement(receiver, scope, generated);
     }
+
+    public static CallExpression? StandaloneFocus(Node node) => node is ExpressionStatement
+        { Expression: CallExpression { Callee: MemberExpression { Object: Identifier { Name: "obj" } } member } call }
+        && RazorJavaScript.PropertyName(member) == "focus" ? call : null;
+
+    public static bool IsExplicitFocusReceiver(Expression expression, Scope scope) =>
+        expression is ObjectExpression or NewExpression or IFunction or ClassExpression
+        || expression is Identifier name
+            && (scope.IsExplicitFocusReceiver(name.Name) || scope.Resolve(name.Name) is not null);
 
     public static bool IsElement(Expression expression, Scope scope, RazorGeneratedBindings? generated = null, int depth = 0)
     {

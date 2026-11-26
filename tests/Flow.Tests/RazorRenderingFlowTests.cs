@@ -29,7 +29,7 @@ public sealed class RazorRenderingFlowTests
         var special = Next(graph, before);
         Assert.AreEqual(Condition(graph, "Model.Special"), special);
         StringAssert.Contains(Next(graph, special, "True").Label, "<i>special</i>");
-        var last = Next(graph, Next(graph, special, "False"));
+        var last = Next(graph, special, "False");
         StringAssert.Contains(last.Label, "<u>last</u>");
         Assert.AreEqual(5, last.Source!.Line);
         StringAssert.Contains(Next(graph, ready, "False").Label, "<p>other</p>");
@@ -38,7 +38,7 @@ public sealed class RazorRenderingFlowTests
     [TestMethod]
     [DataRow("\n")]
     [DataRow("\r\n")]
-    public void MarkupOnlyIfAndElseIfShowBothOutcomesAndJoin(string newline)
+    public void MarkupOnlyIfAndElseIfConnectBothOutcomesDirectlyToTheContinuation(string newline)
     {
         var source = """
             @page
@@ -70,10 +70,40 @@ public sealed class RazorRenderingFlowTests
         var whenTrue = Next(graph, first, "True");
         var whenFalse = Next(graph, first, "False");
         Assert.AreEqual(second, Next(graph, whenFalse));
-        var join = Next(graph, whenTrue);
-        Assert.AreEqual("合流", join.Label);
-        Assert.AreEqual(join, Next(graph, Next(graph, Next(graph, second, "True"))));
-        Assert.AreEqual(join, Next(graph, Next(graph, Next(graph, second, "False"))));
+        var end = Next(graph, whenTrue);
+        Assert.AreEqual("描画終了", end.Label);
+        Assert.AreEqual(end, Next(graph, Next(graph, second, "True")));
+        Assert.AreEqual(end, Next(graph, Next(graph, second, "False")));
+        Assert.DoesNotContain(node => node.Label == "合流", graph.Nodes);
+    }
+
+    [TestMethod]
+    public void OnlyNormallyCompletedRazorArmsReachTheNextCondition()
+    {
+        var page = new RazorSourceFile("""
+            @if (Model.Ready) {
+                if (Model.Abort) { return; }
+                if (Model.Fail) { throw new Exception(); }
+                <p>Ready</p>
+            }
+            @if (Model.More) { <p>More</p> }
+            """, Path.GetFullPath("ContinueRendering.cshtml"));
+        var graph = page.Analyze(-1);
+        var ready = Condition(graph, "Model.Ready");
+        var more = Condition(graph, "Model.More");
+        Assert.AreEqual(more, Next(graph, ready, "False"));
+        var abort = Condition(graph, "Model.Abort");
+        var fail = Next(graph, abort, "False");
+        Assert.AreEqual(Condition(graph, "Model.Fail"), fail);
+        var draw = Next(graph, fail, "False");
+        StringAssert.Contains(draw.Label, "<p>Ready</p>");
+        Assert.AreEqual(more, Next(graph, draw));
+        foreach (var condition in new[] { abort, fail })
+        {
+            var transfer = Next(graph, Next(graph, condition, "True"));
+            Assert.AreEqual(NodeKind.Transfer, transfer.Kind);
+            Assert.AreEqual("描画終了", Next(graph, transfer).Label);
+        }
     }
 
     [TestMethod]
@@ -102,10 +132,10 @@ public sealed class RazorRenderingFlowTests
         var end = Next(graph, loop, "False");
         Assert.AreEqual(NodeKind.End, end.Kind);
         Assert.AreEqual(skip, Next(graph, Next(graph, loop, "True")));
-        Assert.AreEqual(stop, Next(graph, Next(graph, skip, "False")));
+        Assert.AreEqual(stop, Next(graph, skip, "False"));
         Assert.AreEqual(loop, Next(graph, Next(graph, Next(graph, skip, "True"))));
         Assert.AreEqual(end, Next(graph, Next(graph, Next(graph, stop, "True"))));
-        var drawn = Next(graph, Next(graph, stop, "False"));
+        var drawn = Next(graph, stop, "False");
         StringAssert.Contains(drawn.Label, "<p>");
         Assert.AreEqual(loop, Next(graph, drawn));
         Assert.DoesNotContain(node => node.Label == "更新して次の反復へ", graph.Nodes);
@@ -165,7 +195,7 @@ public sealed class RazorRenderingFlowTests
     }
 
     [TestMethod]
-    public void EmptyIfWithoutElseJoinsAndGotoDoesNotPretendToFallThrough()
+    public void EmptyIfWithoutElseGoesDirectlyToTheSwitchAndGotoDoesNotPretendToFallThrough()
     {
         var page = new RazorSourceFile("""
             @page
@@ -184,9 +214,8 @@ public sealed class RazorRenderingFlowTests
         var graph = page.Analyze(-1);
         var check = Condition(graph, "Model.Visible");
         var choice = Condition(graph, "switch (Model.State)");
-        var join = Next(graph, check, "False");
-        Assert.AreEqual(join, Next(graph, Next(graph, check, "True")));
-        Assert.AreEqual(choice, Next(graph, join));
+        Assert.AreEqual(choice, Next(graph, check, "False"));
+        Assert.AreEqual(choice, Next(graph, Next(graph, check, "True")));
         var boundary = Next(graph, Next(graph, choice, "case 1"));
         StringAssert.Contains(boundary.Label, "goto");
         Assert.DoesNotContain(edge => edge.From == boundary.Id, graph.Edges);
