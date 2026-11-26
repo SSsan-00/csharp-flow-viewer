@@ -183,9 +183,14 @@ public sealed class RazorSourceFile
         var nodes = flow.Nodes.ToList();
         var edges = flow.Edges.ToList();
         var rendering = new RazorRenderProjector(document, nodes, edges, token, scope.NestedFunctions);
-        if (rendering.Project(scope.Range, controls) is null) return flow;
-        // The server emits source before a browser can run it; there is no browser edge into Razor.
-        var notices = flow.Notices.Append("Razorの生成フローとブラウザー側の実行候補は別々に表示します。").ToList();
+        var sharedStart = scope.IsFunction ? nodes.Single(node => node.Kind == NodeKind.Start).Id : null;
+        var browserEntry = sharedStart is null ? -1 : edges.FindIndex(edge => edge.From == sharedStart);
+        if (rendering.Project(scope.Range, controls, sharedStart) is null) return flow;
+        if (browserEntry >= 0)
+            edges[browserEntry] = edges[browserEntry] with { Label = "ブラウザー側の実行候補" };
+        var notices = flow.Notices.Append(sharedStart is null
+            ? "Razorの生成フローとブラウザー側の実行候補は別々に表示します。"
+            : "同じ関数のサーバー側の生成とブラウザー側の実行候補を分けて表示します。接続は実行順序を表しません。").ToList();
         if (rendering.IsTruncated)
             notices.Add("サーバー側の描画フローは最大100件の制御構文を表示しています。");
         return flow with { Nodes = nodes, Edges = edges, Notices = notices };

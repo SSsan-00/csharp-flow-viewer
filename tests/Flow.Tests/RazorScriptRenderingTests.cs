@@ -1,4 +1,5 @@
 using Flow.Analysis;
+using Flow.Mermaid;
 using Flow.Model;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -140,7 +141,15 @@ public sealed class RazorScriptRenderingTests
         var path = Path.GetFullPath("ScriptControls.cshtml");
         var page = new RazorSourceFile(source, path);
         var graph = Analyze(page, "update");
+        var entry = Assert.ContainsSingle(graph.Nodes.Where(node => node.Kind == NodeKind.Start));
+        Assert.AreEqual("update", entry.Label);
         var enabled = Condition(graph, "Model.Enabled");
+        Assert.AreEqual(enabled, Next(graph, entry, "サーバー側の生成"));
+        Assert.AreEqual("before()", Next(graph, entry, "ブラウザー側の実行候補").Label);
+        var diagram = MermaidWriter.Write(graph);
+        StringAssert.Contains(diagram, "サーバー側の生成");
+        StringAssert.Contains(diagram, "ブラウザー側の実行候補");
+        Assert.IsFalse(diagram.Contains("Razor · JavaScriptの生成", StringComparison.Ordinal));
         var loop = Condition(graph, "index < Model.Total");
         Assert.IsNotNull(enabled.Source);
         Assert.AreEqual(path, enabled.Source.FilePath);
@@ -164,14 +173,66 @@ public sealed class RazorScriptRenderingTests
         Assert.AreEqual(2, graph.Nodes.Count(node => node.Label.Contains("実行経路未解決", StringComparison.Ordinal)));
         Assert.DoesNotContain(node => node.Label is "enable()" or "disable()" or "append(@index)", graph.Nodes);
         Assert.DoesNotContain(node => node.Kind == NodeKind.Condition && node.Label.Contains("SiblingReady", StringComparison.Ordinal), graph.Nodes);
-        Assert.DoesNotContain(edge => IsRender(edge.From) != IsRender(edge.To), graph.Edges);
+        Assert.DoesNotContain(edge => edge.From != entry.Id && IsRender(edge.From) != IsRender(edge.To), graph.Edges);
         Assert.DoesNotContain(notice => notice.Contains("JavaScript構文エラー", StringComparison.Ordinal), graph.Notices);
 
         var initial = Analyze(page, "JavaScript 初期化");
+        Assert.Contains(node => node.Kind == NodeKind.Start && node.Label == "Razor · JavaScriptの生成", initial.Nodes);
+        Assert.DoesNotContain(edge => IsRender(edge.From) != IsRender(edge.To), initial.Edges);
         Condition(initial, "Model.ScriptReady");
         Assert.AreEqual(1, initial.Nodes.Count(node => node.Kind == NodeKind.Condition && IsRender(node.Id)));
         Condition(Analyze(page, "sibling"), "Model.SiblingReady");
         Condition(page.Analyze(-1), "Model.Enabled");
+    }
+
+    [TestMethod]
+    public void SameNamedFunctionsKeepSeparateDefinitionsAndRazorControls()
+    {
+        var page = new RazorSourceFile("""
+            <select onchange="reload();"></select>
+            <script>
+            function reload() {
+                @if (Model.GlobalReady)
+                {
+                    @:loadGlobal();
+                }
+                return 1;
+            }
+            function setup() {
+                function reload() {
+                    @if (Model.LocalReady)
+                    {
+                        @:loadLocal();
+                    }
+                    return 2;
+                }
+                return reload();
+            }
+            </script>
+            """, Path.GetFullPath("ScopedScripts.cshtml"));
+        var declared = page.Entries.Where(entry => entry.Name == "reload").OrderBy(entry => entry.Source.Offset).ToArray();
+        Assert.HasCount(2, declared);
+        var overview = page.Analyze(-1);
+        var inline = page.Entries.Single(entry => page.IsInlineEvent(entry.Id));
+        Assert.AreEqual(declared[0].Id, overview.Nodes.Single(node => node.Label == "onchange → reload()").TargetMethod);
+        Assert.AreEqual(declared[0].Id, page.Analyze(inline.Id).Nodes.Single(node => node.Label == "reload()").TargetMethod);
+        var setup = Analyze(page, "setup");
+        Assert.AreEqual(declared[1].Id, setup.Nodes.Single(node => node.Label == "reload()").TargetMethod);
+        Assert.DoesNotContain(node => IsRender(node.Id), setup.Nodes);
+
+        foreach (var (declaration, own, other) in new[]
+        {
+            (declared[0], "Model.GlobalReady", "Model.LocalReady"),
+            (declared[1], "Model.LocalReady", "Model.GlobalReady"),
+        })
+        {
+            var graph = page.Analyze(declaration.Id);
+            var entry = Assert.ContainsSingle(graph.Nodes.Where(node => node.Kind == NodeKind.Start));
+            Assert.AreEqual(declaration.Source, entry.Source);
+            var condition = Condition(graph, own);
+            Assert.AreEqual(condition, Next(graph, entry, "サーバー側の生成"));
+            Assert.DoesNotContain(node => node.Label.Contains(other, StringComparison.Ordinal), graph.Nodes);
+        }
     }
 
     [TestMethod]
