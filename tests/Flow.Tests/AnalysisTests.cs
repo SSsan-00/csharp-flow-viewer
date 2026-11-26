@@ -51,6 +51,51 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    public void EmptyCSharpBranchJoinsTheNextCallWithoutChangingReachability()
+    {
+        var graph = Diagram(File("""
+            class Demo
+            {
+                void Run()
+                {
+                    int value = 0;
+                    if (false) value = 1;
+                    Finish();
+                }
+                void Finish() {}
+            }
+            """));
+        var condition = Single(graph, "false");
+        var next = Single(graph, "Demo.Finish()");
+        Assert.AreEqual(next, Next(graph, condition, "False"));
+        Assert.AreEqual(new FlowEdge(condition.Id, next.Id, "True", false),
+            Assert.ContainsSingle(graph.Edges.Where(edge => edge.From == condition.Id && edge.Label == "True")));
+        Assert.DoesNotContain(node => node.Kind == NodeKind.Junction, graph.Nodes);
+    }
+
+    [TestMethod]
+    public void ALoopOfOnlyHiddenStatementsIsNotRewiredToTheEnd()
+    {
+        var graph = Diagram(File("""
+            class Demo
+            {
+                void Run()
+                {
+                    int value = 0;
+                    for (;;) value++;
+                }
+            }
+            """));
+        var start = graph.Nodes.Single(node => node.Kind == NodeKind.Start);
+        var end = graph.Nodes.Single(node => node.Kind == NodeKind.End);
+        var loop = Next(graph, start);
+        Assert.AreEqual("繰り返し（表示対象の処理なし）", loop.Label);
+        Assert.AreEqual(loop, Next(graph, loop));
+        Assert.IsFalse(end.IsReachable);
+        Assert.DoesNotContain(node => node.Kind == NodeKind.Junction, graph.Nodes);
+    }
+
+    [TestMethod]
     public void RuntimeDispatchShowsStaticBodiesAndOffersOnlyMatchingSourceImplementations()
     {
         var directory = Path.GetFullPath("FictionalProject");

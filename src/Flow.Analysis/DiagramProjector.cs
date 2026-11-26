@@ -918,24 +918,45 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
     private FlowDiagram Simplify()
     {
         var outgoing = edges.ToLookup(edge => edge.From);
-        var redirects = new Dictionary<string, string>();
+        var redirects = new Dictionary<string, (string To, bool IsReachable)>();
+        var emptyCycles = new HashSet<string>();
         foreach (var node in nodes)
         {
-            if (!transparent.Contains(node.Id) || redirects.ContainsKey(node.Id))
+            token.ThrowIfCancellationRequested();
+            if (!transparent.Contains(node.Id) || redirects.ContainsKey(node.Id) || emptyCycles.Contains(node.Id))
                 continue;
-            var path = new HashSet<string>();
+            var seen = new HashSet<string>();
+            var path = new List<FlowEdge>();
             var last = node.Id;
-            while (transparent.Contains(last) && !redirects.ContainsKey(last) && path.Add(last)
-                   && outgoing[last].Count() == 1 && outgoing[last].First() is { Label: null } edge
-                   && edge.IsReachable)
+            while (transparent.Contains(last) && !redirects.ContainsKey(last) && !emptyCycles.Contains(last)
+                   && outgoing[last].Count() == 1 && outgoing[last].First() is { Label: null } edge)
+            {
+                token.ThrowIfCancellationRequested();
+                if (!seen.Add(last))
+                {
+                    emptyCycles.Add(last);
+                    break;
+                }
+                path.Add(edge);
                 last = edge.To;
-            var destination = redirects.GetValueOrDefault(last, last);
-            foreach (var id in path.Where(id => id != destination))
-                redirects[id] = destination;
+            }
+            var destination = redirects.GetValueOrDefault(last, (To: last, IsReachable: true));
+            for (var i = path.Count - 1; i >= 0; i--)
+            {
+                var edge = path[i];
+                if (emptyCycles.Contains(edge.From))
+                    destination = (edge.From, true);
+                else
+                    redirects[edge.From] = destination = (destination.To, destination.IsReachable && edge.IsReachable);
+            }
         }
-        var visible = nodes.Where(node => !redirects.ContainsKey(node.Id)).ToArray();
+        var visible = nodes.Where(node => !redirects.ContainsKey(node.Id))
+            .Select(node => emptyCycles.Contains(node.Id)
+                ? node with { Kind = NodeKind.Transfer, Label = "繰り返し（表示対象の処理なし）" } : node).ToArray();
         var transitions = edges.Where(edge => !redirects.ContainsKey(edge.From))
-            .Select(edge => edge with { To = redirects.GetValueOrDefault(edge.To, edge.To) }).Distinct().ToArray();
+            .Select(edge => redirects.TryGetValue(edge.To, out var destination)
+                ? edge with { To = destination.To, IsReachable = edge.IsReachable && destination.IsReachable } : edge)
+            .Distinct().ToArray();
         return new FlowDiagram(visible, transitions, notices.ToArray(), partial);
     }
 }

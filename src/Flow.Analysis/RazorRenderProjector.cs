@@ -64,7 +64,8 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
     public string? ScopeAt(int offset) => bodies.Where(branch => branch.Body.Contains(offset))
         .OrderBy(branch => branch.Body.Length).Select(branch => branch.Id).FirstOrDefault();
 
-    private string Visit(StatementSyntax statement, string next, string? breakTo, string? continueTo)
+    private string Visit(StatementSyntax statement, string next, string? breakTo, string? continueTo,
+        int? scriptSlot = null)
     {
         token.ThrowIfCancellationRequested();
         if (IsExcluded(statement.Span)) return next;
@@ -95,13 +96,12 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             case IfStatementSyntax conditional:
             {
                 var id = Node("if", NodeKind.Condition, $"描画条件: {conditional.Condition}", conditional.Condition);
-                var join = Node("join", NodeKind.Junction, "合流", conditional);
-                edges.Add(new FlowEdge(join, next));
-                Branch(id, "true", "True", "条件成立時に描画", conditional.Statement, join, breakTo, continueTo);
+                scriptSlot ??= document.OriginalSpan(conditional.Span).Start;
+                Branch(id, "true", "True", "条件成立時に描画", conditional.Statement, next, breakTo, continueTo, scriptSlot.Value);
                 if (conditional.Else is { } alternative)
-                    Branch(id, "false", "False", "条件不成立時に描画", alternative.Statement, join, breakTo, continueTo);
+                    Branch(id, "false", "False", "条件不成立時に描画", alternative.Statement, next, breakTo, continueTo, scriptSlot.Value);
                 else
-                    edges.Add(new FlowEdge(id, join, "False"));
+                    edges.Add(new FlowEdge(id, next, "False"));
                 return id;
             }
             case ForStatementSyntax loop:
@@ -140,7 +140,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             if (condition is not null)
                 edges.Add(new FlowEdge(id, next, kind == "foreach" ? "要素なし" : "False"));
             var entry = Branch(id, "body", kind == "foreach" ? "要素あり" : "True", "ループ本体を描画",
-                body, repeatId, next, repeatId);
+                body, repeatId, next, repeatId, scriptSlot ?? document.OriginalSpan(statement.Span).Start);
             return firstBody ? entry : id;
         }
 
@@ -186,7 +186,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
     }
 
     private string Branch(string from, string suffix, string outcome, string label, StatementSyntax body,
-        string next, string? breakTo, string? continueTo)
+        string next, string? breakTo, string? continueTo, int scriptSlot)
     {
         var span = document.OriginalSpan(body.Span);
         var id = from + "_" + suffix;
@@ -196,31 +196,37 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             var interior = document.OriginalSpan(TextSpan.FromBounds(block.OpenBraceToken.Span.End, block.CloseBraceToken.SpanStart));
             var statements = block.Statements.Where(statement => statement is not EmptyStatementSyntax).ToArray();
             if (statements.Length == 0)
-            {
-                var control = (body.Parent is ElseClauseSyntax ? body.Parent.Parent : body.Parent) as StatementSyntax;
-                while (control?.Parent is ElseClauseSyntax { Parent: IfStatementSyntax outer }) control = outer;
-                DescribeOutput(interior, id, ref label, ref source, control is null ? null : document.OriginalSpan(control.Span).Start);
-            }
+                DescribeOutput(interior, id, ref label, ref source, scriptSlot);
             else
             {
+                // A nested if can share the script insertion point only if nothing else is emitted on this arm.
+                var slot = statements is [IfStatementSyntax only] && IsOnlyOutput(only, interior) ? scriptSlot : (int?)null;
                 var end = interior.End;
                 for (var index = statements.Length - 1; index >= 0; index--)
                 {
                     var statement = statements[index];
                     var child = document.OriginalSpan(statement.Span);
                     next = OutputNode(TextSpan.FromBounds(child.End, end), next);
-                    next = Visit(statement, next, breakTo, continueTo);
+                    next = Visit(statement, next, breakTo, continueTo, slot);
                     end = child.Start;
                 }
                 next = OutputNode(TextSpan.FromBounds(interior.Start, end), next);
             }
         }
-        else next = Visit(body, next, breakTo, continueTo);
+        else next = Visit(body, next, breakTo, continueTo, scriptSlot);
         nodes.Add(new FlowNode(id, NodeKind.Junction, label, source));
         bodies.Add((span, id));
         edges.Add(new FlowEdge(from, id, outcome));
         edges.Add(new FlowEdge(id, next));
         return id;
+    }
+
+    private bool IsOnlyOutput(StatementSyntax statement, TextSpan interior)
+    {
+        var nested = document.OriginalSpan(statement.Span);
+        return interior.Contains(nested)
+            && document.RenderedOutput(TextSpan.FromBounds(interior.Start, nested.Start)) is null
+            && document.RenderedOutput(TextSpan.FromBounds(nested.End, interior.End)) is null;
     }
 
     private string OutputNode(TextSpan span, string next)

@@ -40,6 +40,7 @@ public sealed class RazorJavaScript
     private readonly Dictionary<Node, EntryData> functions = [];
     private readonly Dictionary<Node, Scope> scopes = [];
     private readonly Dictionary<Node, int> owners = [];
+    private readonly HashSet<CallExpression> standaloneFocus = [];
     private readonly HashSet<Node> conditionalNodes = [];
     private readonly Dictionary<Node, int> requestNodes = [];
     private readonly List<XhrState> requestClients = [];
@@ -210,6 +211,7 @@ public sealed class RazorJavaScript
                     _ => null
                 };
                 scope.Declare(name, exportedName is not null ? target?.GetValueOrDefault(exportedName) : null);
+                scope.RememberExplicitFocusReceiver(name);
             }
         }
     }
@@ -366,7 +368,7 @@ public sealed class RazorJavaScript
         {
             if (scope is null || blocked is null) return default;
             var target = Resolve(call.Callee, scope, blocked);
-            return new(target, target is null && RazorBrowserCalls.IsRoutine(call, scope, blocked));
+            return new(target, target is null && RazorBrowserCalls.IsRoutine(call, scope, blocked, blocked.IsStandaloneFocus(call)));
         }
 
         bool IsHiddenHandler(MemberExpression member) => scope is not null && blocked is not null
@@ -516,6 +518,7 @@ public sealed class RazorJavaScript
         if (depth > 128) { Notice("JavaScriptの入れ子が深いため、一部の宣言とイベントを省略しました。"); return; }
         scopes[node] = scope;
         owners[node] = scope.OwnerEntryId;
+        if (RazorBrowserCalls.StandaloneFocus(node) is { } focus) standaloneFocus.Add(focus);
         if (conditional) conditionalNodes.Add(node);
         if (canTrackGeneratedScope && node is EmptyStatement && unit.RenderingSlots?.TryGetValue(node.Start, out var slot) == true)
             generatedStatementScopes[slot.Offset] = scope;
@@ -568,6 +571,8 @@ public sealed class RazorJavaScript
                 entries[entries.FindIndex(item => item.Id == renamed.Id)] = renamed;
                 namedFunction.Entry = renamed;
             }
+            if (declarator.Init is { } initialValue && RazorBrowserCalls.IsExplicitFocusReceiver(initialValue, scope))
+                scope.RememberExplicitFocusReceiver(variable.Name);
             if (!conditional && declarator.Init is { } value)
             {
                 if (Selector(value, scope) is { } selector) scope.Selectors.TryAdd(variable.Name, selector);
@@ -595,13 +600,18 @@ public sealed class RazorJavaScript
         else if (node is UpdateExpression { Argument: Identifier counter })
             scope.Block(counter.Name);
         else if (node is ClassDeclaration { Id: { } declaredClass })
+        {
             scope.Declare(declaredClass.Name, null);
+            scope.RememberExplicitFocusReceiver(declaredClass.Name);
+        }
         else if (node is AssignmentExpression { Left: Identifier assigned } assignment)
         {
             var declarationScope = scope.DeclarationScope(assigned.Name) ?? globals;
             var previousXhr = declarationScope.FindXhr(assigned.Name);
             // 閉包から外側の変数が変更される場合も、元の関数への確定リンクを消す。
             scope.Block(assigned.Name);
+            if (RazorBrowserCalls.IsExplicitFocusReceiver(assignment.Right, scope))
+                declarationScope.RememberExplicitFocusReceiver(assigned.Name);
             if (IsXhrConstructor(assignment.Right, scope, out var legacy))
             {
                 var client = previousXhr ?? new XhrState(legacy);
@@ -853,7 +863,8 @@ public sealed class RazorJavaScript
     {
         var scope = scopes.GetValueOrDefault(call, entry.Scope);
         var target = ResolveFunctionReference(call.Callee, scope);
-        return new(target, omitBrowserDetails && target is null && RazorBrowserCalls.IsRoutine(call, scope));
+        return new(target, omitBrowserDetails && target is null
+            && RazorBrowserCalls.IsRoutine(call, scope, isStandaloneFocus: standaloneFocus.Contains(call)));
     }
 
     internal bool IsHiddenXhrHandler(MemberExpression member, EntryData entry) =>
@@ -1048,6 +1059,7 @@ public sealed class RazorJavaScript
         private readonly Dictionary<string, List<int?>> names = new(StringComparer.Ordinal);
         private HashSet<string>? domElements;
         private HashSet<string>? domOverrides;
+        private HashSet<string>? explicitFocusReceivers;
         public Scope? Parent { get; } = parent;
         public bool InlineEvent { get; init; }
         public bool IsInInlineEvent => InlineEvent || Parent?.IsInInlineEvent == true;
@@ -1098,6 +1110,9 @@ public sealed class RazorJavaScript
         public void RememberDomElement(string name) => (domElements ??= new(StringComparer.Ordinal)).Add(name);
         public void BlockDomProof(string name) => (domOverrides ??= new(StringComparer.Ordinal)).Add(name);
         public bool HasDomOverride(string name) => domOverrides?.Contains(name) == true || Parent?.HasDomOverride(name) == true;
+        public void RememberExplicitFocusReceiver(string name) => (explicitFocusReceivers ??= new(StringComparer.Ordinal)).Add(name);
+        public bool IsExplicitFocusReceiver(string name) => explicitFocusReceivers?.Contains(name) == true
+            || !names.ContainsKey(name) && Parent?.IsExplicitFocusReceiver(name) == true;
         public bool IsDomElement(string name) => names.TryGetValue(name, out var declared)
             ? declared.Count == 1 && domElements?.Contains(name) == true && domOverrides?.Contains(name) != true
             : Parent?.IsDomElement(name) == true;
