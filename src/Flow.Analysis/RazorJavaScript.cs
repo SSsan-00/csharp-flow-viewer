@@ -32,7 +32,7 @@ public sealed class RazorJavaScript
     private readonly string pageText;
     private readonly string pagePath;
     private readonly List<MethodEntry> entries = [];
-    private readonly HashSet<int> generatedStatementStarts = [];
+    private readonly Dictionary<int, Scope?> generatedStatementScopes = [];
     private readonly List<string> notices = [];
     private readonly List<RazorJavaScriptBinding> bindings = [];
     private readonly List<RazorJavaScriptRequest> requests = [];
@@ -156,7 +156,7 @@ public sealed class RazorJavaScript
             }
 
             if (!external && unit.RenderingSlots is { } slots)
-                foreach (var slot in slots.Values) generatedStatementStarts.Add(slot.Offset);
+                foreach (var slot in slots.Values) generatedStatementScopes.TryAdd(slot.Offset, null);
             if (external) externalUnits.Add(path!, unit);
             if (external && fragment.IsModule) modules.Add(path!, (unit, scope));
             if (fragment.IsolatedClassic && !fragment.IsModule)
@@ -309,15 +309,30 @@ public sealed class RazorJavaScript
 
     internal FlowDiagram? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, CancellationToken token)
     {
-        if (!generatedStatementStarts.Contains(controlStart)) return null;
+        if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)) return null;
         JsProgram root;
         try { root = new Parser(new ParserOptions { AllowReturnOutsideFunction = true }).ParseScript(text); }
         catch (Exception failure) when (failure is ParseErrorException or InsufficientExecutionStackException) { return null; }
-        // A generated fragment is not an independently indexed script: never export its bindings or guess a target.
         var unit = new ScriptUnit(text, text, source, root, false);
         var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
-        var graph = new RazorJavaScriptProjector(this, entry, token).Build();
+        // Use the actual insertion scope without exporting declarations or modifying that scope.
+        var blocked = scope is { HasDynamicBinding: false } ? RazorGeneratedBindings.Changes(root, token) : null;
+        var graph = new RazorJavaScriptProjector(this, entry, token, Resolve).Build();
         return graph.Nodes.Any(node => node.Kind == NodeKind.Condition) ? graph : null;
+
+        int? Resolve(CallExpression call)
+        {
+            if (scope is null || blocked?.Allows(call.Callee) != true
+                || ResolveFunctionReference(call.Callee, scope) is not { } target) return null;
+            var globalName = call.Callee switch
+            {
+                Identifier identifier => identifier.Name,
+                MemberExpression { Object: Identifier { Name: "window" } } member => PropertyName(member),
+                _ => null
+            };
+            return globalName is not null && scope.DeclarationScope(globalName) == globals
+                && isolatedClassicScopes.Keys.Any(other => other.Dynamic || other.DeclaresHere(globalName)) ? null : target;
+        }
     }
 
     internal (SourceRange Range, IReadOnlyList<SourceRange> NestedFunctions, bool IsFunction)? ScriptRenderingScope(int entryId)
@@ -423,10 +438,13 @@ public sealed class RazorJavaScript
         }
     }
 
-    private EntryData AddEntry(string name, Node? body, ScriptUnit unit, Scope scope)
+    private EntryData AddEntry(string name, Node? body, ScriptUnit unit, Scope scope, Node? declaration = null)
     {
         var source = body is JsProgram or null ? unit.Source : Range(unit, body);
-        var entry = new MethodEntry(nextId--, name, name, source);
+        var entry = new MethodEntry(nextId--, name, name, source)
+        {
+            NavigationSource = declaration is null ? source : Range(unit, declaration)
+        };
         entries.Add(entry);
         var detail = new EntryData(entry, body, unit, scope);
         data.Add(entry.Id, detail);
@@ -440,18 +458,21 @@ public sealed class RazorJavaScript
         bindings.Add((unit, requiresWindow));
     }
 
-    private void Index(Node node, ScriptUnit unit, Scope scope, CancellationToken token, int depth, bool conditional)
+    private void Index(Node node, ScriptUnit unit, Scope scope, CancellationToken token, int depth, bool conditional,
+        bool canTrackGeneratedScope = true)
     {
         token.ThrowIfCancellationRequested();
         if (depth > 128) { Notice("JavaScriptの入れ子が深いため、一部の宣言とイベントを省略しました。"); return; }
         scopes[node] = scope;
         owners[node] = scope.OwnerEntryId;
         if (conditional) conditionalNodes.Add(node);
+        if (canTrackGeneratedScope && node is EmptyStatement && unit.RenderingSlots?.TryGetValue(node.Start, out var slot) == true)
+            generatedStatementScopes[slot.Offset] = scope;
         if (node is IFunction function)
         {
             var functionScope = new Scope(scope);
             var name = function.Id?.Name ?? $"無名関数 L{Range(unit, node).Line}";
-            var entry = AddEntry(name, function.Body, unit, functionScope);
+            var entry = AddEntry(name, function.Body, unit, functionScope, node);
             functionScope.OwnerEntryId = entry.Entry.Id;
             functions[node] = entry;
             if (node is FunctionDeclaration { Id: { } id })
@@ -469,13 +490,14 @@ public sealed class RazorJavaScript
             foreach (var parameter in function.Params)
                 foreach (var identifier in Descendants(parameter).OfType<Identifier>())
                     functionScope.Declare(identifier.Name, null);
-            Index(function.Body, unit, functionScope, token, depth + 1, conditional: false);
+            Index(function.Body, unit, functionScope, token, depth + 1, conditional: false, canTrackGeneratedScope);
             return;
         }
         foreach (var child in node.ChildNodes)
             Index(child, unit, scope, token, depth + 1,
                 conditional || node is IfStatement or ConditionalExpression or WhileStatement or ForStatement
-                    or ForInStatement or ForOfStatement or SwitchCase or TryStatement);
+                    or ForInStatement or ForOfStatement or SwitchCase or TryStatement,
+                canTrackGeneratedScope && node is not (WithStatement or CatchClause));
 
         if (node is VariableDeclarator { Id: Identifier variable } declarator)
         {
