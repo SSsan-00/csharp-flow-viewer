@@ -65,9 +65,10 @@ public sealed class RazorScriptRecoveryTests
         Assert.AreEqual(target.Id, EventNode(page).TargetMethod);
         var flow = page.Analyze(target.Id);
         Assert.IsTrue(flow.IsPartial);
-        Assert.Contains(node => node.Label == "broken=", flow.Nodes);
-        Assert.DoesNotContain(node => node.Label == "broken=0", flow.Nodes);
-        Assert.Contains(node => node.Label == "return 11;", flow.Nodes);
+        Assert.Contains(notice => notice.Contains("元のJavaScriptに構文エラー", StringComparison.Ordinal), flow.Notices);
+        Assert.DoesNotContain(node => node.Label.StartsWith("broken=", StringComparison.Ordinal), flow.Nodes);
+        var returned = Assert.ContainsSingle(flow.Nodes.Where(node => node.Label == "return 11;"));
+        Assert.AreEqual(page.Text.IndexOf(returned.Label, StringComparison.Ordinal), returned.Source?.Offset);
     }
 
     [TestMethod]
@@ -75,13 +76,13 @@ public sealed class RazorScriptRecoveryTests
     {
         var page = Page("""
             const broken;
-            const seed = @Model.Seed;
+            const seed = seedValue(@Model.Seed);
             function reload() { return seed; }
             """);
         Assert.IsNotNull(EventNode(page).TargetMethod);
         var init = page.Entries.Single(entry => entry.Name.StartsWith("JavaScript 初期化", StringComparison.Ordinal));
         var graph = page.Analyze(init.Id);
-        var seed = Assert.ContainsSingle(graph.Nodes.Where(node => node.Label == "seed = @Model.Seed"));
+        var seed = Assert.ContainsSingle(graph.Nodes.Where(node => node.Label == "seedValue(@Model.Seed)"));
         Assert.AreEqual(page.Text.IndexOf(seed.Label, StringComparison.Ordinal), seed.Source!.Offset);
         Assert.AreEqual(seed.Label, page.Text.Substring(seed.Source.Offset, seed.Source.Length));
         Assert.AreEqual(4, seed.Source.Line);

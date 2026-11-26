@@ -127,7 +127,7 @@ public sealed class RazorScriptRenderingTests
         var source = $$"""
             <select onchange="reload();"></select>
             <script language="javascript">
-            const value = 1{{separator}}
+            const value = prepareValue(){{separator}}
             @if (Model.Enabled)
             {
                 <text>console.log(value);</text>
@@ -141,9 +141,9 @@ public sealed class RazorScriptRenderingTests
         var inline = page.Entries.Single(entry => page.IsInlineEvent(entry.Id));
         Assert.AreEqual(target.Id, page.Analyze(inline.Id).Nodes.Single(node => node.Label == "reload()").TargetMethod);
         var init = Analyze(page, "JavaScript 初期化");
-        var declaration = Assert.ContainsSingle(init.Nodes.Where(node => node.Label == "value = 1"));
-        Assert.AreEqual(source.IndexOf("value = 1", StringComparison.Ordinal), declaration.Source!.Offset);
-        var boundary = Next(init, declaration);
+        var initializer = Assert.ContainsSingle(init.Nodes.Where(node => node.Label == "prepareValue()"));
+        Assert.AreEqual(source.IndexOf("prepareValue()", StringComparison.Ordinal), initializer.Source!.Offset);
+        var boundary = Next(init, initializer);
         Assert.IsNotNull(boundary.Source);
         Assert.AreEqual(source.IndexOf("if (Model.Enabled)", StringComparison.Ordinal), boundary.Source.Offset);
         Assert.AreEqual(4, boundary.Source.Line);

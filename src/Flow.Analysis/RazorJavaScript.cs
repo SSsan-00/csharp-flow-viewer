@@ -300,11 +300,15 @@ public sealed class RazorJavaScript
     }
 
     /// <summary>選択されたJS関数だけの制御フローを作り、大きなページの全展開を避ける。</summary>
-    public FlowDiagram Analyze(int entryId, CancellationToken token = default)
+    public FlowDiagram Analyze(int entryId, CancellationToken token = default) => Analyze(entryId, false, token);
+
+    internal FlowDiagram AnalyzeRazor(int entryId, CancellationToken token) => Analyze(entryId, true, token);
+
+    private FlowDiagram Analyze(int entryId, bool simplifyRazor, CancellationToken token)
     {
         if (!data.TryGetValue(entryId, out var entry))
             throw new ArgumentOutOfRangeException(nameof(entryId));
-        return new RazorJavaScriptProjector(this, entry, token).Build();
+        return new RazorJavaScriptProjector(this, entry, token, simplifyRazor).Build();
     }
 
     internal FlowDiagram? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, CancellationToken token)
@@ -317,20 +321,26 @@ public sealed class RazorJavaScript
         var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
         // Use the actual insertion scope without exporting declarations or modifying that scope.
         var blocked = scope is { HasDynamicBinding: false } ? RazorGeneratedBindings.Changes(root, token) : null;
-        var graph = new RazorJavaScriptProjector(this, entry, token, Resolve).Build();
+        var graph = new RazorJavaScriptProjector(this, entry, token, simplifyRazor: true, Describe).Build();
         return graph.Nodes.Any(node => node.Kind == NodeKind.Condition) ? graph : null;
 
-        int? Resolve(CallExpression call)
+        CallProjection Describe(CallExpression call)
         {
-            if (scope is null || blocked?.Allows(call.Callee) != true
-                || ResolveFunctionReference(call.Callee, scope) is not { } target) return null;
-            var globalName = call.Callee switch
+            if (scope is null || blocked is null) return default;
+            var target = Resolve(call.Callee, scope, blocked);
+            return new(target, target is null && RazorDomCalls.IsRoutine(call, scope, blocked));
+        }
+
+        int? Resolve(Expression callee, Scope context, RazorGeneratedBindings bindings)
+        {
+            if (!bindings.Allows(callee) || ResolveFunctionReference(callee, context) is not { } target) return null;
+            var globalName = callee switch
             {
                 Identifier identifier => identifier.Name,
                 MemberExpression { Object: Identifier { Name: "window" } } member => PropertyName(member),
                 _ => null
             };
-            return globalName is not null && scope.DeclarationScope(globalName) == globals
+            return globalName is not null && context.DeclarationScope(globalName) == globals
                 && isolatedClassicScopes.Keys.Any(other => other.Dynamic || other.DeclaresHere(globalName)) ? null : target;
         }
     }
@@ -513,6 +523,7 @@ public sealed class RazorJavaScript
             if (!conditional && declarator.Init is { } value)
             {
                 if (Selector(value, scope) is { } selector) scope.Selectors.TryAdd(variable.Name, selector);
+                if (RazorDomCalls.IsElement(value, scope)) scope.RememberDomElement(variable.Name);
                 if (IsJQuery(value, scope)) scope.JQueryVariables.Add(variable.Name);
                 if (IsXhrConstructor(value, scope, out var legacy)) scope.Xhrs.TryAdd(variable.Name, new XhrState(legacy));
             }
@@ -741,7 +752,7 @@ public sealed class RazorJavaScript
         return null;
     }
 
-    private static bool IsDocument(Expression expression, Scope scope) =>
+    internal static bool IsDocument(Expression expression, Scope scope) =>
         expression is Identifier { Name: "document" } && !scope.IsDeclared("document")
         || expression is MemberExpression { Object: Identifier { Name: "window" } } member
             && !scope.IsDeclared("window") && PropertyName(member) == "document";
@@ -750,10 +761,13 @@ public sealed class RazorJavaScript
         expression is CallExpression { Callee: Identifier { Name: "$" or "jQuery" } jquery } && !scope.IsDeclared(jquery.Name)
         || expression is Identifier identifier && scope.FindJQuery(identifier.Name);
 
-    internal int? ResolveCall(CallExpression call, EntryData entry)
+    internal readonly record struct CallProjection(int? Target, bool Omit);
+
+    internal CallProjection ProjectCall(CallExpression call, EntryData entry, bool simplifyRazor)
     {
-        var scope = scopes.TryGetValue(call, out var indexed) ? indexed : entry.Scope;
-        return ResolveFunctionReference(call.Callee, scope);
+        var scope = scopes.GetValueOrDefault(call, entry.Scope);
+        var target = ResolveFunctionReference(call.Callee, scope);
+        return new(target, simplifyRazor && target is null && RazorDomCalls.IsRoutine(call, scope));
     }
 
     private int? ResolveFunctionReference(Expression reference, Scope scope)
@@ -802,7 +816,7 @@ public sealed class RazorJavaScript
     internal record CallSite(string? Name, SourceRange Source, MethodEntry Owner, FlowTarget? Target,
         SourceRange? SourceOnlyDefinition = null);
 
-    internal IEnumerable<CallSite> CallSites(int? ownerId, CancellationToken token)
+    internal IEnumerable<CallSite> CallSites(int? ownerId, CancellationToken token, bool omitRoutine = false)
     {
         if (ownerId is int selected)
         {
@@ -810,8 +824,8 @@ public sealed class RazorJavaScript
                 foreach (var call in Descendants(body).OfType<CallExpression>())
                 {
                     token.ThrowIfCancellationRequested();
-                    if (owners.TryGetValue(call, out var owner) && owner == selected)
-                        yield return DescribeCall(call, entry);
+                    if (owners.TryGetValue(call, out var owner) && owner == selected
+                        && DescribeCall(call, entry, omitRoutine) is { } site) yield return site;
                 }
             yield break;
         }
@@ -819,13 +833,15 @@ public sealed class RazorJavaScript
         foreach (var (node, owner) in owners)
         {
             token.ThrowIfCancellationRequested();
-            if (node is CallExpression call && owner is int key && data.TryGetValue(key, out var entry))
-                yield return DescribeCall(call, entry);
+            if (node is CallExpression call && owner is int key && data.TryGetValue(key, out var entry)
+                && DescribeCall(call, entry, omitRoutine) is { } site) yield return site;
         }
     }
 
-    private CallSite DescribeCall(CallExpression call, EntryData entry)
+    private CallSite? DescribeCall(CallExpression call, EntryData entry, bool omitRoutine)
     {
+        var projection = ProjectCall(call, entry, omitRoutine);
+        if (projection.Omit) return null;
         var name = call.Callee switch
         {
             Identifier identifier => identifier.Name,
@@ -833,7 +849,7 @@ public sealed class RazorJavaScript
                 => receiver.Name + "." + property,
             _ => null
         };
-        var id = ResolveCall(call, entry);
+        var id = projection.Target;
         var target = ResolveNavigationTarget(id);
         SourceRange? candidate = null;
         if (id is null && call.Callee is Identifier bare && sourceOnlyDefinitions.TryGetValue(bare.Name, out var found)
@@ -941,6 +957,7 @@ public sealed class RazorJavaScript
     internal sealed class Scope(Scope? parent)
     {
         private readonly Dictionary<string, List<int?>> names = new(StringComparer.Ordinal);
+        private HashSet<string>? domElements;
         public Scope? Parent { get; } = parent;
         public bool InlineEvent { get; init; }
         public bool IsInInlineEvent => InlineEvent || Parent?.IsInInlineEvent == true;
@@ -988,6 +1005,9 @@ public sealed class RazorJavaScript
         }
         public Scope? DeclarationScope(string name) => names.ContainsKey(name) ? this : Parent?.DeclarationScope(name);
         public bool IsDeclared(string name) => names.ContainsKey(name) || Parent?.IsDeclared(name) == true;
+        public void RememberDomElement(string name) => (domElements ??= new(StringComparer.Ordinal)).Add(name);
+        public bool IsDomElement(string name) => names.TryGetValue(name, out var declared)
+            ? declared.Count == 1 && domElements?.Contains(name) == true : Parent?.IsDomElement(name) == true;
         public bool FindJQuery(string name) => names.ContainsKey(name) ? JQueryVariables.Contains(name) : Parent?.FindJQuery(name) == true;
         public int? ResolveLocal(string name) => !Dynamic && names.TryGetValue(name, out var declared)
             && declared.Count == 1 ? declared[0] : null;

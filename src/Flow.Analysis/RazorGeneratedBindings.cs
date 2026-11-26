@@ -44,6 +44,8 @@ internal sealed class RazorGeneratedBindings
         return result;
     }
 
+    public bool IsUnchanged(string name) => !blocked.Contains(name);
+
     public bool Allows(Expression callee) => callee switch
     {
         Identifier name => !blocked.Contains(name.Name),
