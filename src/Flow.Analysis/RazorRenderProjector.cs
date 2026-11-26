@@ -253,12 +253,17 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         source = document.Range(offset, length);
         if (script) label += " · 生成JS";
         string? analyzedPreview = null;
-        if (script && !dynamic && controlStart is int start && length <= MaxGeneratedScriptLength
-            && outputNodes < MaxOutputNodes
-            && javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, MaxOutputNodes - outputNodes, token) is { } branch)
+        if (script && controlStart is int start && length <= MaxGeneratedScriptLength && outputNodes < MaxOutputNodes
+            && (!dynamic || output.Contains("bind", StringComparison.Ordinal)))
         {
-            analyzedPreview = branch.Preview;
-            if (branch.ClientFlow is { } graph && graph.Nodes.Count <= MaxOutputNodes - outputNodes)
+            var outputSource = source;
+            var remaining = MaxOutputNodes - outputNodes;
+            var branch = dynamic
+                ? javaScript.AnalyzeGeneratedBranch(start, document.ProjectJavaScript(offset, length), outputSource, remaining, token,
+                    (document.SourcePreview(offset, length), literal => document.HasOnlyGeneratedIdExpressions(outputSource, literal)))
+                : javaScript.AnalyzeGeneratedBranch(start, output.ToString(), outputSource, remaining, token);
+            analyzedPreview = branch?.Preview;
+            if (branch?.ClientFlow is { } graph && graph.Nodes.Count <= remaining)
                 AddClientAlternative(id, graph);
         }
         if (analyzedPreview == "") return true;

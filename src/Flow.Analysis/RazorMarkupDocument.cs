@@ -166,6 +166,45 @@ internal sealed class RazorMarkupDocument
 
     internal string SourcePreview(int offset, int length) => source.ToString(new TextSpan(offset, length));
 
+    internal bool HasOnlyGeneratedIdExpressions(SourceRange output, SourceRange literal)
+    {
+        if (literal.Length < 3) return false;
+        var start = output.Offset;
+        var end = start + output.Length;
+        var insideQuotes = new TextSpan(literal.Offset + 1, literal.Length - 2);
+        var cursor = start;
+        var search = expressions.BinarySearch(new TextSpan(start, output.Length), ByStart);
+        for (var i = search < 0 ? ~search : search; i < expressions.Count && expressions[i].Start < end; i++)
+        {
+            var expression = expressions[i];
+            if (!insideQuotes.Contains(expression) || expression.Start < cursor
+                || IsDynamic(cursor, expression.Start - cursor) || !IsSimpleReference(expression))
+                return false;
+            cursor = expression.End;
+        }
+        return cursor > start && !IsDynamic(cursor, end - cursor);
+
+        bool IsSimpleReference(TextSpan expression)
+        {
+            var syntax = SyntaxFactory.ParseExpression(source.ToString(expression));
+            if (syntax.ContainsDiagnostics) return false;
+            while (true)
+            {
+                switch (syntax)
+                {
+                    case ParenthesizedExpressionSyntax parenthesized:
+                        syntax = parenthesized.Expression;
+                        break;
+                    case MemberAccessExpressionSyntax { Name: IdentifierNameSyntax } member when member.RawKind == (int)SyntaxKind.SimpleMemberAccessExpression:
+                        syntax = member.Expression;
+                        break;
+                    default:
+                        return syntax is IdentifierNameSyntax;
+                }
+            }
+        }
+    }
+
     public bool IsDynamic(int offset, int length)
     {
         var end = Math.Min(offset + length, dynamicCharacters.Length);
