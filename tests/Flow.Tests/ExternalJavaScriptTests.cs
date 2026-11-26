@@ -149,6 +149,45 @@ public sealed class ExternalJavaScriptTests
     }
 
     [TestMethod]
+    [DataRow("<script src='/js/actions.js'></script>", true)]
+    [DataRow("<script defer src='/js/actions.js'></script>", false)]
+    [DataRow("<script src='/js/actions.js'></script><script>function apply() {}</script>", false)]
+    public async Task GeneratedIdBindingFollowsOnlyAVisibleUniqueExternalDefinition(string imported, bool follows)
+    {
+        var source = $$"""
+            {{imported}}
+            <script>
+            $(function () {
+                @for (var i = 0; i < 3; i++) {
+                    <text>$("#item_@(i)").bind("change", apply);</text>
+                }
+            });
+            </script>
+            """;
+        const string definition = "// external\nfunction apply() {}";
+        using var tree = new Files();
+        var path = tree.Add("Pages/Generated.cshtml", source);
+        var external = tree.Add("wwwroot/js/actions.js", definition);
+        using var session = tree.Open(path, external);
+        var page = await ReadPage(session);
+        var graph = page.Analyze(-1);
+        var change = graph.Edges.Where(edge => edge.Label == "change 発生時（候補・対象要素未確定）").ToArray();
+        if (!follows)
+        {
+            Assert.AreEqual(0, change.Length);
+            Assert.DoesNotContain(node => node.Label == "apply()" && node.TargetMethod is not null, graph.Nodes);
+            return;
+        }
+        var call = graph.Nodes.Single(node => node.Id == Assert.ContainsSingle(change).To);
+        Assert.AreEqual("apply()", call.Label);
+        Assert.AreEqual(external, call.TargetFilePath);
+        var script = await session.ReadJavaScriptAsync(session.Files.Single(file => file.Path == external), CancellationToken.None, page);
+        var target = script.Entries.Single(entry => entry.Id == call.TargetMethod);
+        Assert.AreEqual("apply", target.Name);
+        Assert.AreEqual(definition.IndexOf("function", StringComparison.Ordinal), target.NavigationSource.Offset);
+    }
+
+    [TestMethod]
     [DataRow("top-call", "\n", true)]
     [DataRow("nested-var", "\r\n", true)]
     [DataRow("chain", "\n", true)]

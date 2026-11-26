@@ -346,20 +346,22 @@ public sealed class RazorJavaScript
     internal sealed record GeneratedBranch(FlowDiagram? ClientFlow, string? Preview);
 
     internal GeneratedBranch? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, int maxNodes,
-        CancellationToken token)
+        CancellationToken token, (string Original, Func<SourceRange, bool> IsSelector)? dynamicId = null)
     {
         if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)) return null;
         JsProgram root;
         var insideFunction = scope is not null && data[scope.OwnerEntryId].Body is not JsProgram;
         try { root = new Parser(new ParserOptions { AllowReturnOutsideFunction = insideFunction }).ParseScript(text); }
         catch (Exception failure) when (failure is ParseErrorException or InsufficientExecutionStackException) { return null; }
-        var unit = new ScriptUnit(text, text, source, root, false);
+        var unit = new ScriptUnit(text, dynamicId?.Original ?? text, source, root, false);
         var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
+        var eventLabel = dynamicId is null ? "change 発生時（候補）" : "change 発生時（候補・対象要素未確定）";
         // Use the actual insertion scope without exporting declarations or modifying that scope.
         var blocked = scope is { HasDynamicBinding: false } ? RazorGeneratedBindings.Changes(root, token) : null;
         var changeHandlers = new Dictionary<SourceRange, Expression>();
         var graph = new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails: true, Describe, IsHiddenHandler).Build();
         if (changeHandlers.Count > 0) graph = WithChangeCallbacks(graph);
+        if (dynamicId is not null && !graph.Edges.Any(edge => edge.Label == eventLabel)) return null;
         var conditions = graph.Nodes.Any(node => node.Kind == NodeKind.Condition);
         var standalone = !graph.IsPartial && root.Body is { Count: > 0 } statements
             && text[statements[^1].End - 1] == ';'
@@ -423,12 +425,13 @@ public sealed class RazorJavaScript
                 || StringValue(call.Arguments[0]) is not { } events
                 || !events.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Any(name => name.Split('.')[0] == "change"))
                 return null;
+            if (dynamicId is { } generated && (!selector.Value.StartsWith('#') || !generated.IsSelector(Range(unit, selector))))
+                return null;
             return call.Arguments[^1];
         }
 
         FlowDiagram WithChangeCallbacks(FlowDiagram flow)
         {
-            const string eventLabel = "change 発生時（候補）";
             var nodes = flow.Nodes.ToList();
             var edges = flow.Edges.ToList();
             foreach (var registration in flow.Nodes)
