@@ -9,6 +9,73 @@ namespace Flow.Tests;
 public sealed class RazorScriptRenderingTests
 {
     [TestMethod]
+    [DataRow("<text>result = load();</text>")]
+    [DataRow("@:result = load();")]
+    public void CompleteGeneratedCallsHaveNodesAndDefinitionJumpsWithoutAClientCondition(string emitted)
+    {
+        var source = $$"""
+            <button onclick="reload()"></button>
+            <script>
+              function load() { return 42; }
+              function reload() {
+                @if (Model.Ready) {
+                    {{emitted}}
+                }
+                after();
+              }
+            </script>
+            """;
+        var page = new RazorSourceFile(source, Path.GetFullPath("GeneratedCall.cshtml"));
+        var handler = page.Analyze(-1).Nodes.Single(node => node.Label == "onclick → reload()");
+        var graph = page.Analyze(handler.TargetMethod!.Value);
+        var server = Next(graph, Condition(graph, "Model.Ready"), "True");
+        var call = Next(graph, server, "生成後、このJSが実行される場合");
+        Assert.AreEqual(NodeKind.Call, call.Kind);
+        Assert.AreEqual("load()", call.Label);
+        var target = Assert.ContainsSingle(page.Entries.Where(entry => entry.Id == call.TargetMethod));
+        Assert.AreEqual("load", target.Name);
+        Assert.AreEqual(3, target.NavigationSource.Line);
+        Assert.AreEqual(page.FilePath, call.TargetFilePath);
+        Assert.AreEqual(source.IndexOf("load();", StringComparison.Ordinal), call.Source?.Offset);
+        Assert.AreEqual("JS断片の終了", Next(graph, call).Label);
+        Assert.AreEqual("合流", Next(graph, server).Label);
+        Assert.DoesNotContain(edge => edge.From == call.Id && !IsRender(edge.To), graph.Edges);
+    }
+
+    [TestMethod]
+    [DataRow("<script>function load() { return 42; }\n@{ <text>load();</text> }</script>")]
+    [DataRow("@{ <text><script>function load() { return 42; }\nload();</script></text> }")]
+    public void UnconditionalRazorTextAndADirectlyRenderedScriptAreVisibleInScriptInitialization(string source)
+    {
+        var page = new RazorSourceFile(source, Path.GetFullPath("TextScript.cshtml"));
+        var graph = Analyze(page, "JavaScript 初期化");
+        var call = Assert.ContainsSingle(graph.Nodes.Where(node => node.Kind == NodeKind.Call));
+        Assert.AreEqual("load()", call.Label);
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "load").Id, call.TargetMethod);
+        Assert.AreEqual("load()", Slice(source, call.Source!));
+    }
+
+    [TestMethod]
+    [DataRow("load()")]
+    [DataRow("(load());")]
+    public void StandaloneGeneratedCallNeedsASeparateStatementBoundary(string emitted)
+    {
+        var source = $$"""
+            <script>
+            start()
+            @if (Model.Ready) {
+                <text>{{emitted}}</text>
+            }
+            (finish());
+            </script>
+            """;
+        var page = new RazorSourceFile(source, Path.GetFullPath("AsiBoundaries.cshtml"));
+        var graph = Analyze(page, "JavaScript 初期化");
+        var branch = Next(graph, Condition(graph, "Model.Ready"), "True");
+        StringAssert.Contains(branch.Label, "load()");
+        Assert.DoesNotContain(edge => edge.From == branch.Id && edge.Label == "生成後、このJSが実行される場合", graph.Edges);
+    }
+    [TestMethod]
     public void UnverifiedJavaScriptContextAndOversizedBranchesStayPreviews()
     {
         foreach (var (setup, finish, padding) in new[] { ("const markup = `", "`;", ""), ("", "", new string(' ', 10000)) })
@@ -148,7 +215,10 @@ public sealed class RazorScriptRenderingTests
         Assert.AreEqual(source.IndexOf("if (Model.Enabled)", StringComparison.Ordinal), boundary.Source.Offset);
         Assert.AreEqual(4, boundary.Source.Line);
         Assert.AreEqual("Model.Enabled", Slice(source, Condition(init, "Model.Enabled").Source!));
-        Assert.DoesNotContain(node => node.Label == "console.log(value)", init.Nodes);
+        var guardedOutput = Next(init, Condition(init, "Model.Enabled"), "True");
+        var emitted = Next(init, guardedOutput, "生成後、このJSが実行される場合");
+        Assert.AreEqual("console.log(value)", emitted.Label);
+        Assert.AreEqual("JS断片の終了", Next(init, emitted).Label);
         Assert.IsTrue(init.IsPartial);
         Assert.DoesNotContain(notice => notice.Contains("独立したJavaScript文として確定できません", StringComparison.Ordinal), page.Notices);
         var returned = Assert.ContainsSingle(page.Analyze(target.Id).Nodes.Where(node => node.Label == "return value;"));
@@ -214,7 +284,7 @@ public sealed class RazorScriptRenderingTests
     [TestMethod]
     [DataRow("\n")]
     [DataRow("\r\n")]
-    public void JavaScriptFunctionShowsOnlyItsRazorFlowWithoutExecutingEmittedAlternatives(string newline)
+    public void JavaScriptFunctionKeepsGeneratedCallsSeparateFromOrdinaryBrowserFlow(string newline)
     {
         var source = """
             @page
@@ -281,7 +351,13 @@ public sealed class RazorScriptRenderingTests
         Assert.Contains(node => node.Label == "before()", graph.Nodes);
         Assert.Contains(node => node.Label == "after()", graph.Nodes);
         Assert.AreEqual(2, graph.Nodes.Count(node => node.Label.Contains("実行経路未解決", StringComparison.Ordinal)));
-        Assert.DoesNotContain(node => node.Label is "enable()" or "disable()" or "append(@index)", graph.Nodes);
+        foreach (var (branch, name) in new[] { (yes, "enable()"), (no, "disable()") })
+        {
+            var call = Next(graph, branch, "生成後、このJSが実行される場合");
+            Assert.AreEqual(name, call.Label);
+            Assert.AreEqual("JS断片の終了", Next(graph, call).Label);
+        }
+        Assert.DoesNotContain(node => node.Label == "append(@index)" || (node.Label is "enable()" or "disable()") && !IsRender(node.Id), graph.Nodes);
         Assert.DoesNotContain(node => node.Kind == NodeKind.Condition && node.Label.Contains("SiblingReady", StringComparison.Ordinal), graph.Nodes);
         Assert.DoesNotContain(edge => edge.From != entry.Id && IsRender(edge.From) != IsRender(edge.To), graph.Edges);
         Assert.DoesNotContain(notice => notice.Contains("JavaScript構文エラー", StringComparison.Ordinal), graph.Notices);
@@ -416,7 +492,11 @@ public sealed class RazorScriptRenderingTests
         Assert.AreEqual("tail()", Next(graph, browserIf, "False").Label);
         Assert.AreEqual(NodeKind.Exception, boundary.Kind);
         Assert.AreEqual("tail()", Next(graph, boundary, "続行する場合").Label);
-        Assert.DoesNotContain(node => node.Label == "emit()", graph.Nodes);
+        var branch = Next(graph, Condition(graph, "Model.Enabled"), "True");
+        var emitted = Next(graph, branch, "生成後、このJSが実行される場合");
+        Assert.AreEqual("emit()", emitted.Label);
+        Assert.DoesNotContain(edge => edge.To == emitted.Id && edge.From != branch.Id, graph.Edges);
+        Assert.AreEqual("JS断片の終了", Next(graph, emitted).Label);
     }
 
     [TestMethod]
@@ -481,7 +561,9 @@ public sealed class RazorScriptRenderingTests
         var graph = Analyze(page, "JavaScript 初期化");
         Assert.AreEqual(100, graph.Nodes.Count(node => node.Kind == NodeKind.Condition && IsRender(node.Id)));
         Assert.AreEqual(101, graph.Nodes.Count(node => node.Label.Contains("実行経路未解決", StringComparison.Ordinal)));
-        Assert.DoesNotContain(node => node.Label.StartsWith("onlyCandidate", StringComparison.Ordinal), graph.Nodes);
+        var generated = graph.Nodes.Where(node => node.Label.StartsWith("onlyCandidate", StringComparison.Ordinal)).ToArray();
+        Assert.IsTrue(generated.Length is > 0 and <= 66);
+        Assert.IsTrue(generated.All(node => IsRender(node.Id)));
         Assert.Contains(node => node.Label == "tail()", graph.Nodes);
     }
 

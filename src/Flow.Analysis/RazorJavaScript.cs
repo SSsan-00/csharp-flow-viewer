@@ -317,7 +317,8 @@ public sealed class RazorJavaScript
     {
         if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)) return null;
         JsProgram root;
-        try { root = new Parser(new ParserOptions { AllowReturnOutsideFunction = true }).ParseScript(text); }
+        var insideFunction = scope is not null && data[scope.OwnerEntryId].Body is not JsProgram;
+        try { root = new Parser(new ParserOptions { AllowReturnOutsideFunction = insideFunction }).ParseScript(text); }
         catch (Exception failure) when (failure is ParseErrorException or InsufficientExecutionStackException) { return null; }
         var unit = new ScriptUnit(text, text, source, root, false);
         var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
@@ -325,7 +326,11 @@ public sealed class RazorJavaScript
         var blocked = scope is { HasDynamicBinding: false } ? RazorGeneratedBindings.Changes(root, token) : null;
         var graph = new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails: true, Describe, IsHiddenHandler).Build();
         var conditions = graph.Nodes.Any(node => node.Kind == NodeKind.Condition);
-        return new(conditions ? graph : null, Preview());
+        var standalone = !graph.IsPartial && root.Body is { Count: > 0 } statements
+            && text[statements[^1].End - 1] == ';'
+            && text[statements[0].Start] is not ('(' or '[' or '`' or '/' or '+' or '-' or '.')
+            && graph.Nodes.Any(node => node.Kind is NodeKind.Call or NodeKind.Transfer);
+        return new(conditions || standalone ? graph : null, Preview());
 
         string? Preview()
         {
