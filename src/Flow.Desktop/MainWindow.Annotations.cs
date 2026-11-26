@@ -120,7 +120,7 @@ public partial class MainWindow
         if (!ReferenceEquals(appliedGray, grayed.Work) || !ReferenceEquals(appliedMarks, marked.Work))
         {
             editorAnnotations.SetRanges(Editor.Document,
-                graph.Nodes.Where(node => node.Source is { } range && IsCurrentSource(range)), marked.Roots, gray);
+                graph.Nodes.Where(node => node.Source is { } range && IsCurrentSource(range)), marked.Roots, marks, gray);
             Editor.TextArea.TextView.Redraw();
             appliedGray = grayed.Work;
             appliedMarks = marked.Work;
