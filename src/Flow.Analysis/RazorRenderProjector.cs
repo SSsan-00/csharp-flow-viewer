@@ -8,6 +8,7 @@ namespace Flow.Analysis;
 internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<FlowNode> nodes,
     List<FlowEdge> edges, CancellationToken token, IReadOnlyList<SourceRange>? excluded = null)
 {
+    private const string Start = "render_start";
     private const string End = "render_end";
     private const int MaxConditions = 100;
     private readonly List<(TextSpan Body, string Id)> bodies = [];
@@ -18,17 +19,20 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<Fl
     internal static bool IsControl(StatementSyntax statement) => statement is IfStatementSyntax or ForStatementSyntax
         or CommonForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax or SwitchStatementSyntax;
 
-    public string? Project(SourceRange pageSource, IReadOnlyList<StatementSyntax>? selectedControls = null)
+    public string? Project(SourceRange pageSource, IReadOnlyList<StatementSyntax>? selectedControls = null,
+        string? sharedStart = null)
     {
         var first = selectedControls is null
             ? Visit(document.ServerCode, End, null, null)
             : ProjectSelected(selectedControls);
         if (first == End) return null;
-        nodes.Add(new FlowNode("render_start", NodeKind.Start, selectedControls is null ? "サーバー側描画" : "Razor · JavaScriptの生成", pageSource));
+        var start = sharedStart ?? Start;
+        if (sharedStart is null)
+            nodes.Add(new FlowNode(start, NodeKind.Start, selectedControls is null ? "サーバー側描画" : "Razor · JavaScriptの生成", pageSource));
         nodes.Add(new FlowNode(End, NodeKind.End, selectedControls is null ? "描画終了" : "Razor側の生成終了", pageSource));
-        edges.Add(new FlowEdge("render_start", first));
-        MarkDisconnectedPaths();
-        return "render_start";
+        edges.Add(new FlowEdge(start, first, sharedStart is null ? null : "サーバー側の生成"));
+        MarkDisconnectedPaths(start);
+        return start;
     }
 
     private string ProjectSelected(IReadOnlyList<StatementSyntax> selectedControls)
@@ -143,12 +147,12 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<Fl
         }
     }
 
-    private void MarkDisconnectedPaths()
+    private void MarkDisconnectedPaths(string start)
     {
         var outgoing = edges.ToLookup(edge => edge.From, edge => edge.To);
         var reachable = new HashSet<string>();
         var pending = new Stack<string>();
-        pending.Push("render_start");
+        pending.Push(start);
         while (pending.TryPop(out var id))
         {
             token.ThrowIfCancellationRequested();

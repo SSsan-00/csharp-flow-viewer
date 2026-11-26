@@ -304,14 +304,15 @@ public sealed class RazorJavaScript
         return new RazorJavaScriptProjector(this, entry, token).Build();
     }
 
-    internal (SourceRange Range, IReadOnlyList<SourceRange> NestedFunctions)? ScriptRenderingScope(int entryId)
+    internal (SourceRange Range, IReadOnlyList<SourceRange> NestedFunctions, bool IsFunction)? ScriptRenderingScope(int entryId)
     {
         var entry = data[entryId];
         if (entry.Unit.RenderingSlots is not { Count: > 0 }) return null;
-        var range = entry.Body is JsProgram or null ? entry.Unit.Source : entry.Entry.Source;
+        var isFunction = entry.Body is not (JsProgram or null);
+        var range = isFunction ? entry.Entry.Source : entry.Unit.Source;
         var nested = entry.Body is null ? [] : Descendants(entry.Body)
             .Where(node => node is IFunction).Select(node => Range(entry.Unit, node)).ToArray();
-        return (range, nested);
+        return (range, nested, isFunction);
     }
 
     private ScriptUnit? Parse(RazorJavaScriptFragment fragment, bool inline, CancellationToken token,
