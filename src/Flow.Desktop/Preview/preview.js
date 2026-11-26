@@ -236,7 +236,9 @@
 
   function updateMark(node, marked) {
     node.classList.toggle("marked", marked);
-    for (const shape of node.querySelectorAll(":scope > rect:not(.selection-ring), :scope > polygon:not(.selection-ring), :scope > path:not(.selection-ring), :scope > circle:not(.selection-ring)")) {
+    const shapes = node.querySelectorAll(
+      ":scope > :is(rect, polygon, path, circle):not(.selection-ring), :scope > .label-container > :is(rect, polygon, path, circle)");
+    for (const shape of shapes) {
       if (marked) {
         const properties = ["fill", "stroke", "stroke-width"];
         originalStyles.set(shape, properties.map(name => [name, shape.style.getPropertyValue(name), shape.style.getPropertyPriority(name)]));

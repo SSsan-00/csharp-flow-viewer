@@ -91,7 +91,7 @@ try {
   assert.equal(await graph.locator(".marked").count(), 2);
   assert.equal(await condition.locator(".selection-ring").evaluate(shape => getComputedStyle(shape).stroke), "rgb(0, 82, 187)");
   const markedShape = condition.locator(":scope > rect, :scope > polygon, :scope > path, :scope > circle").first();
-  const upstreamShape = upstream.locator(":scope > rect, :scope > polygon, :scope > path, :scope > circle").first();
+  const upstreamShape = upstream.locator(":scope > .label-container > path").first();
   assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
   assert.equal(await upstreamShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
   assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).stroke), "rgb(123, 82, 0)");
@@ -103,6 +103,7 @@ try {
   assert.deepEqual(cleared.value, { id: picked.value, action: "clear" });
   await page.evaluate(id => window.receiveFromHost({ type: "annotations", marked: [], gray: [id] }), picked.value);
   assert.notEqual(await markedShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
+  assert.notEqual(await upstreamShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
   assert.equal(await graph.locator(".marked").count(), 0);
   assert.equal(await graph.locator(".grayed").count(), 1);
 
