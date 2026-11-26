@@ -6,6 +6,7 @@
     <Compile Include="../../src/Flow.Desktop/BoundedCache.cs" Link="Desktop/BoundedCache.cs" />
     <Compile Include="../../src/Flow.Desktop/FlowCacheWeight.cs" Link="Desktop/FlowCacheWeight.cs" />
     <Compile Include="../../src/Flow.Desktop/SourceNodePicker.cs" Link="Desktop/SourceNodePicker.cs" />
+    <Compile Include="../../src/Flow.Desktop/SourceAnnotationRange.cs" Link="Desktop/SourceAnnotationRange.cs" />
     <None Include="../../global.json" Link="TestAssets/global.json" CopyToOutputDirectory="PreserveNewest" />
     <ProjectReference Include="../../src/Flow.Analysis/Flow.Analysis.csproj" />
     <ProjectReference Include="../../src/Flow.Mermaid/Flow.Mermaid.csproj" />

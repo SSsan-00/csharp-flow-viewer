@@ -25,21 +25,15 @@ internal sealed class SourceAnnotationColorizer : DocumentColorizingTransformer
     public void Clear() => ranges.Clear();
 
     public void SetRanges(TextDocument document, IEnumerable<FlowNode> nodes,
-        IReadOnlySet<string> marked, IReadOnlySet<string> gray)
+        IReadOnlySet<string> explicitMarks, IReadOnlySet<string> visibleMarks, IReadOnlySet<string> gray)
     {
         ranges.Clear();
+        Func<int, int> lineEnd = offset => document.GetLineByOffset(offset).EndOffset;
         foreach (var node in nodes)
         {
-            var isMarked = marked.Contains(node.Id);
-            if ((!isMarked && !gray.Contains(node.Id)) || node.Source is not { } range ||
-                range.Offset >= document.TextLength)
-                continue;
-
-            var length = range.Length;
-            if (length == 0)
-                length = document.GetLineByOffset(range.Offset).EndOffset - range.Offset;
-            if (length > 0)
-                ranges.Add(new AnnotationSpan { StartOffset = range.Offset, Length = length, Marked = isMarked });
+            if (SourceAnnotationRange.ForNode(node, explicitMarks.Contains(node.Id), visibleMarks.Contains(node.Id),
+                    gray.Contains(node.Id), document.TextLength, lineEnd) is { } span)
+                ranges.Add(new AnnotationSpan { StartOffset = span.Offset, Length = span.Length, Marked = span.Marked });
         }
     }
 
