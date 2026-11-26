@@ -11,6 +11,104 @@ namespace Flow.Tests;
 public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
+    public async Task GeneratedRazorCallsFollowDefinitionsThroughTheProjectSession()
+    {
+        const string source = """
+            <script src="/js/actions.js"></script>
+            <button onclick="reload()"></button>
+            <script>
+              function reload() {
+                @if (Model.Ready) {
+                  <text>if (enabled) localAction();</text>
+                } else {
+                  @:if (enabled) {
+                  @:    window.remoteAction();
+                  @:}
+                }
+                function localAction() { return 42; }
+              }
+            </script>
+            """;
+        const string externalSource = "// actions\n\nfunction remoteAction()\n{\n  return 17;\n}";
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Generated.cshtml", source);
+        var scriptPath = tree.Add("wwwroot/js/actions.js", externalSource);
+        using var session = tree.Open(pagePath, scriptPath);
+        var page = await ReadPage(session);
+        var handler = FindCall(page.Analyze(-1), "onclick → reload()");
+        var graph = page.Analyze(handler.TargetMethod!.Value);
+        var local = PickGeneratedCall("localAction()", 6);
+        var remote = PickGeneratedCall("window.remoteAction()", 9);
+        var localDefinition = Assert.ContainsSingle(page.Entries.Where(entry => entry.Name == "localAction"));
+        Assert.AreEqual(localDefinition.Id, local.TargetMethod);
+        Assert.AreEqual(pagePath, local.TargetFilePath);
+        Assert.AreEqual(12, localDefinition.NavigationSource.Line);
+        Assert.AreEqual(localDefinition.NavigationSource, page.Analyze(local.TargetMethod!.Value).Nodes.Single(node => node.Kind == NodeKind.Start).Source);
+
+        Assert.AreEqual(scriptPath, remote.TargetFilePath);
+        var script = await session.ReadJavaScriptAsync(session.Files.Single(file => file.Path == remote.TargetFilePath), CancellationToken.None, page);
+        var remoteDefinition = Assert.ContainsSingle(script.Entries.Where(entry => entry.Id == remote.TargetMethod));
+        Assert.AreEqual("remoteAction", remoteDefinition.Name);
+        Assert.AreEqual(3, remoteDefinition.NavigationSource.Line);
+        Assert.AreEqual(externalSource.IndexOf("function", StringComparison.Ordinal), remoteDefinition.NavigationSource.Offset);
+        Assert.AreEqual(remoteDefinition.NavigationSource, script.Analyze(remoteDefinition.Id).Nodes.Single(node => node.Kind == NodeKind.Start).Source);
+
+        FlowNode PickGeneratedCall(string name, int line)
+        {
+            var offset = source.IndexOf(name, StringComparison.Ordinal);
+            var node = SourceNodePicker.Find(graph.Nodes, pagePath, offset, line);
+            Assert.IsNotNull(node);
+            Assert.AreEqual(NodeKind.Call, node.Kind);
+            Assert.AreEqual(name, node.Label);
+            Assert.AreEqual(line, node.Source?.Line);
+            return node;
+        }
+    }
+
+    [TestMethod]
+    [DataRow("unreferenced", false)]
+    [DataRow("duplicate", false)]
+    [DataRow("also-deferred", false)]
+    [DataRow("module-import", true)]
+    public async Task GeneratedRazorCallsOnlyFollowExternalBindingsVisibleToTheOwningScript(string shape, bool follows)
+    {
+        var head = shape switch
+        {
+            "duplicate" => "<script src='/js/actions.js'></script><script>function apply() {}</script><script>",
+            "also-deferred" => "<script src='/js/actions.js'></script><script defer src='/js/another.js'></script><script>",
+            "module-import" => "<script type='module'>\nimport * as actions from '/js/actions.js';",
+            _ => "<script>"
+        };
+        var call = shape == "module-import" ? "actions.apply()" : "apply()";
+        var source = $$"""
+            {{head}}
+            @if (Model.Ready) {
+              @:if (enabled) {{call}};
+            }
+            </script>
+            """;
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Generated.cshtml", source);
+        var external = tree.Add("wwwroot/js/actions.js", (shape == "module-import" ? "export " : "") + "function apply() {}");
+        var another = tree.Add("wwwroot/js/another.js", "function apply() {}");
+        using var session = tree.Open(pagePath, external, another);
+        var page = await ReadPage(session);
+        var node = FindCall(page.Analyze(-1), call);
+        Assert.IsTrue(node.Id.Contains("_candidate_", StringComparison.Ordinal));
+        Assert.AreEqual(follows ? external : null, node.TargetFilePath);
+        if (follows)
+        {
+            var script = await session.ReadJavaScriptAsync(session.Files.Single(file => file.Path == node.TargetFilePath), CancellationToken.None, page);
+            Assert.AreEqual("apply", script.Entries.Single(entry => entry.Id == node.TargetMethod).Name);
+        }
+        else
+        {
+            Assert.IsNull(node.TargetMethod);
+            Assert.IsNull(node.TargetDeclaration);
+        }
+    }
+
+    [TestMethod]
     [DataRow("top-call", "\n", true)]
     [DataRow("nested-var", "\r\n", true)]
     [DataRow("chain", "\n", true)]

@@ -248,7 +248,7 @@ public partial class MainWindow : Window
         method = entry;
         FlowTitle.Text = entry.Signature;
         FlowTitle.ToolTip = entry.Signature;
-        NavigateSource(entry.Source with { Length = 0 });
+        NavigateSource(entry.NavigationSource with { Length = 0 });
         var result = flow.Graph;
         diagram = result;
         nodes = result.Nodes.ToDictionary(node => node.Id);
@@ -428,7 +428,7 @@ public partial class MainWindow : Window
         if (targetFile == file && target == entry.Id)
         {
             history.Push(origin);
-            NavigateSource(entry.Source with { Length = 0 });
+            NavigateSource(entry.NavigationSource with { Length = 0 });
             if (diagram?.Nodes.FirstOrDefault(node => node.Kind == NodeKind.Start) is { } start)
                 JumpToPreviewNode(start, navigateSource: false, keepList: true);
             SetStatus("同じメソッドの開始位置へ移動しました。");

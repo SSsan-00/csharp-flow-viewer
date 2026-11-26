@@ -10,7 +10,7 @@ namespace Flow.Analysis;
 /// 呼び出し位置で実行されたものとして展開せず、別エントリーへの移動先にする。
 /// </summary>
 internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaScript.EntryData entry,
-    CancellationToken token)
+    CancellationToken token, Func<CallExpression, int?>? resolveGeneratedCall = null)
 {
     private readonly List<FlowNode> nodes = [];
     private readonly List<FlowEdge> edges = [];
@@ -54,7 +54,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                 first = Add(NodeKind.Exception, "解析範囲の上限", null, ignoreLimit: true);
                 Connect(first, end);
             }
-            var start = Add(NodeKind.Start, entry.Entry.Signature, entry.Body, ignoreLimit: true);
+            var start = Add(NodeKind.Start, entry.Entry.Signature, null, ignoreLimit: true, source: entry.Entry.NavigationSource);
             Connect(start, first);
         }
         return new FlowDiagram(nodes, edges, notices, partial);
@@ -229,7 +229,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     return Condition(ternary.Test, Expression(ternary.Consequent, next), Expression(ternary.Alternate, next));
                 case CallExpression call:
                     var request = owner.Request(call);
-                    var target = owner.ResolveCall(call, entry);
+                    var target = resolveGeneratedCall is null ? owner.ResolveCall(call, entry) : resolveGeneratedCall(call);
                     var label = request is null ? Text(call) : $"HTTP {request.HttpMethod} {request.Url}" +
                         (request.IsAsync ? "（非同期送信）" : "（同期送信）") + (request.IsResolved ? "" : " · 未解決");
                     var callNode = Add(request is null ? NodeKind.Call : NodeKind.Transfer, label, call, target);

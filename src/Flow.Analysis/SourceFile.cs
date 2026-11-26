@@ -9,7 +9,9 @@ namespace Flow.Analysis;
 
 public sealed record MethodEntry(int Id, string Name, string Signature, SourceRange Source)
 {
-    public override string ToString() => $"{Signature}  ·  L{Source.Line}";
+    public SourceRange NavigationSource { get; init; } = Source;
+
+    public override string ToString() => $"{Signature}  ·  L{NavigationSource.Line}";
 }
 
 public sealed class SourceFile

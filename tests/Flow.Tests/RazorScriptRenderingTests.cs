@@ -74,6 +74,38 @@ public sealed class RazorScriptRenderingTests
     }
 
     [TestMethod]
+    [DataRow("", "", "apply()", true)]
+    [DataRow("const other = input; window.status = 'ready';", "", "window.apply()", true)]
+    [DataRow("", "let apply = input;", "apply()", false)]
+    [DataRow("let apply = input;", "", "apply()", false)]
+    [DataRow("function apply() {}", "", "apply()", false)]
+    [DataRow("apply = input;", "", "apply()", false)]
+    [DataRow("window.apply = input;", "", "window.apply()", false)]
+    [DataRow("window[key] = input;", "", "apply()", false)]
+    [DataRow("eval(input);", "", "apply()", false)]
+    public void GeneratedRazorCallsDoNotInventTargetsWhenBindingsCanChange(
+        string fragment, string outer, string call, bool follows)
+    {
+        var source = $$"""
+            <script>
+            function apply() { return 42; }
+            function reload() {
+                {{outer}}
+                @if (Model.Ready) {
+                    <text>{{fragment}} if (enabled) {{call}};</text>
+                }
+            }
+            </script>
+            """;
+        var page = new RazorSourceFile(source, Path.GetFullPath("GeneratedBindings.cshtml"));
+        var entry = page.Entries.Single(entry => entry.Name == "apply");
+        var node = Analyze(page, "reload").Nodes.Single(node => node.Label == call);
+        Assert.AreEqual(follows ? entry.Id : (int?)null, node.TargetMethod);
+        Assert.AreEqual(follows ? page.FilePath : null, node.TargetFilePath);
+        Assert.IsNull(node.TargetDeclaration);
+    }
+
+    [TestMethod]
     [DataRow("if (@Model.Value) ok();")]
     [DataRow("if (incomplete) {")]
     public void DynamicOrIncompleteOutputHasOnlyAPreview(string emitted)
@@ -306,7 +338,7 @@ public sealed class RazorScriptRenderingTests
         {
             var graph = page.Analyze(declaration.Id);
             var entry = Assert.ContainsSingle(graph.Nodes.Where(node => node.Kind == NodeKind.Start));
-            Assert.AreEqual(declaration.Source, entry.Source);
+            Assert.AreEqual(declaration.NavigationSource, entry.Source);
             var condition = Condition(graph, own);
             Assert.AreEqual(condition, Next(graph, entry, "サーバー側の生成"));
             Assert.DoesNotContain(node => node.Label.Contains(other, StringComparison.Ordinal), graph.Nodes);
