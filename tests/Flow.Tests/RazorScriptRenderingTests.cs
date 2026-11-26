@@ -592,11 +592,15 @@ public sealed class RazorScriptRenderingTests
             """, Path.GetFullPath("ScriptExpression.cshtml"));
         var graph = Analyze(page, "JavaScript 初期化");
         var condition = Condition(graph, "Model.Enabled");
+        var start = Assert.ContainsSingle(graph.Nodes.Where(node => node.Kind == NodeKind.Start));
+        Assert.AreEqual(condition, Next(graph, start, "サーバー側の生成"));
         Assert.AreEqual(Next(graph, Next(graph, condition, "True")), Next(graph, Next(graph, condition, "False")));
         Assert.IsTrue(graph.IsPartial);
-        Assert.Contains(node => node.Kind == NodeKind.Exception && !IsRender(node.Id), graph.Nodes);
+        var browser = Next(graph, start, "ブラウザー側の実行候補");
+        Assert.AreEqual(NodeKind.Exception, browser.Kind);
+        Assert.IsFalse(IsRender(browser.Id));
         Assert.Contains(notice => notice.Contains("JavaScript構文エラー", StringComparison.Ordinal), graph.Notices);
-        Assert.DoesNotContain(edge => IsRender(edge.From) != IsRender(edge.To), graph.Edges);
+        Assert.DoesNotContain(edge => edge.From != start.Id && IsRender(edge.From) != IsRender(edge.To), graph.Edges);
     }
 
     [TestMethod]
