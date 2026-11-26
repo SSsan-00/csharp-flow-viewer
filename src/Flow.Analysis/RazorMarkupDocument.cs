@@ -22,6 +22,7 @@ internal sealed class RazorMarkupDocument
     private readonly SourceText source;
     private readonly string filePath;
     private readonly bool[] dynamicCharacters;
+    private readonly SourceBracket[] statementBrackets;
     private readonly List<RazorGuard> guards = [];
     private readonly List<TextSpan> expressions = [];
     private static readonly IComparer<TextSpan> ByStart = Comparer<TextSpan>.Create((a, b) => a.Start.CompareTo(b.Start));
@@ -49,6 +50,8 @@ internal sealed class RazorMarkupDocument
         var document = engine.Process(RazorSourceDocument.ReadFrom(new MemoryProjectItem(text, filePath)), FileKinds.Legacy,
             (imports ?? []).Select(import => RazorSourceDocument.ReadFrom(new MemoryProjectItem(import.Text, import.Path))).ToImmutableArray(), []);
         token.ThrowIfCancellationRequested();
+        statementBrackets = text.Contains("@{", StringComparison.Ordinal)
+            ? RazorStatementBrackets.Read(document.GetSyntaxTree(), text, token).ToArray() : [];
         var intermediate = document.GetDocumentIntermediateNode();
         Project(intermediate, false);
         expressions.Sort(ByStart);
@@ -121,6 +124,22 @@ internal sealed class RazorMarkupDocument
 
     public SourceRange Range(int offset, int length) => new(offset, length,
         source.Lines.GetLineFromPosition(Math.Min(offset, source.Length)).LineNumber + 1, filePath);
+
+    internal IEnumerable<SourceBracket> Brackets(CancellationToken token)
+    {
+        foreach (var pair in statementBrackets) yield return pair;
+        foreach (var pair in CSharpSourceBrackets.Read(ServerCode, source, -1, token)) yield return pair;
+        foreach (var expression in expressions)
+        {
+            token.ThrowIfCancellationRequested();
+            var syntax = SyntaxFactory.ParseExpression(source.ToString(expression));
+            if (syntax.ContainsDiagnostics) continue;
+            foreach (var pair in CSharpSourceBrackets.Read(syntax, source, expression.Start, token)) yield return pair;
+            if (expression.Start >= 2 && expression.End < source.Length && source[expression.Start - 2] == '@'
+                && source[expression.Start - 1] == '(' && source[expression.End] == ')')
+                yield return new SourceBracket(expression.Start - 1, expression.End);
+        }
+    }
 
     internal (TextSpan Span, bool Dynamic)? RenderedOutput(TextSpan scope)
     {

@@ -56,10 +56,13 @@ public sealed class RazorJavaScript
     private readonly Dictionary<string, SourceRange?> sourceOnlyDefinitions = new(StringComparer.Ordinal);
     private readonly Dictionary<Scope, bool> isolatedClassicScopes = new();
     private readonly Dictionary<string, ScriptUnit> externalUnits = new(LocalJavaScriptFiles.PathComparer);
+    private readonly Dictionary<string, List<SourceBracket>> sourceBrackets = new(LocalJavaScriptFiles.PathComparer);
     private readonly Dictionary<string, (ScriptUnit Unit, Scope Scope)> modules = new(LocalJavaScriptFiles.PathComparer);
     private int nextId = -2;
 
     public IReadOnlyList<MethodEntry> Entries => entries;
+    internal IReadOnlyList<SourceBracket> GetBrackets(string path) =>
+        sourceBrackets.TryGetValue(path, out var brackets) ? brackets : [];
     public IReadOnlyList<string> Notices => notices;
     public IReadOnlyList<RazorJavaScriptBinding> Bindings => bindings;
     public IReadOnlyList<RazorJavaScriptRequest> Requests
@@ -408,7 +411,8 @@ public sealed class RazorJavaScript
         }
         try
         {
-            var parser = new Parser(new ParserOptions { AllowReturnOutsideFunction = inline });
+            var delimiters = new List<(int Offset, char Value, bool CanFold)>();
+            var parser = new Parser(new ParserOptions { AllowReturnOutsideFunction = inline, OnToken = TrackBracket });
             var text = fragment.Text;
             var renderingSlots = fragment.RenderingSlots;
             var canOfferLocalDefinition = !fragment.IsModule && !fragment.IsolatedClassic
@@ -461,8 +465,19 @@ public sealed class RazorJavaScript
             var original = fragment.Source.Offset >= 0 && fragment.Source.Offset + projected.Length <= pageText.Length
                 && (fragment.Source.FilePath is null || fragment.Source.FilePath == pagePath)
                 ? pageText.Substring(fragment.Source.Offset, projected.Length) : projected;
+            if (recovery is null && delimiters.Count != 0)
+                SaveBrackets(delimiters, fragment.Source, original, inlineText);
             return new ScriptUnit(text, original, fragment.Source, root, fragment.ContainsRazorCode,
                 renderingSlots, inlineText, recovery);
+
+            void TrackBracket(in Token current)
+            {
+                if (current.Kind != TokenKind.Punctuator || current.Value is not string value) return;
+                if (value == "${")
+                    delimiters.Add((current.Start + 1, '{', false));
+                else if (value is "(" or ")" or "[" or "]" or "{" or "}")
+                    delimiters.Add((current.Start, value[0], value == "{"));
+            }
 
             void IndexDefinitionCandidates(JsProgram candidate, IReadOnlyDictionary<int, SourceRange> candidateSlots,
                 IReadOnlySet<int> independent, IReadOnlySet<int>? generatedValues = null)
@@ -477,6 +492,7 @@ public sealed class RazorJavaScript
                 token.ThrowIfCancellationRequested();
                 try
                 {
+                    delimiters.Clear();
                     var parsed = parser.ParseScript(candidate);
                     var independent = RazorScriptBoundaries.IndependentSlots(parsed);
                     return candidateSlots.Keys.All(independent.Contains) ? parsed : null;
@@ -488,6 +504,31 @@ public sealed class RazorJavaScript
         {
             Notice($"L{fragment.Source.Line}: JavaScriptの入れ子が深いため解析できません。");
             return null;
+        }
+    }
+
+    private void SaveBrackets(IEnumerable<(int Offset, char Value, bool CanFold)> delimiters,
+        SourceRange range, string original, InlineScriptText? inlineText)
+    {
+        var path = range.FilePath ?? pagePath;
+        if (!sourceBrackets.TryGetValue(path, out var result)) sourceBrackets[path] = result = [];
+        var pending = new Stack<(int Offset, char Value, bool CanFold)>();
+        foreach (var item in delimiters)
+        {
+            if (item.Value is '(' or '[' or '{')
+            {
+                pending.Push(item);
+                continue;
+            }
+            if (!pending.TryPop(out var open) || item.Value != (open.Value switch { '(' => ')', '[' => ']', _ => '}' }))
+            {
+                pending.Clear();
+                continue;
+            }
+            var first = inlineText?.EncodedOffset(open.Offset) ?? open.Offset;
+            var last = inlineText?.EncodedOffset(item.Offset) ?? item.Offset;
+            if (first >= 0 && first < last && last < original.Length && original[first] == open.Value && original[last] == item.Value)
+                result.Add(new SourceBracket(range.Offset + first, range.Offset + last, open.CanFold && inlineText is null));
         }
     }
 

@@ -12,6 +12,8 @@ public sealed record FileViewState(
     int Version, string? Method, int MethodLine, int SourceLine, int SourceColumn, double SourceScroll,
     string? Diagram, string? Node, PreviewViewport? Viewport, Dictionary<string, NodeAnnotations> Annotations)
 {
+    public FoldViewState? SourceFolds { get; init; }
+
     public static string Key(params string?[] parts) =>
         Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(parts)));
 
@@ -43,3 +45,5 @@ public sealed record FileViewState(
         }
     }
 }
+
+public sealed record FoldViewState(string ContentHash, int[] Starts);

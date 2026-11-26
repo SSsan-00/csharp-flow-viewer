@@ -14,6 +14,7 @@ public partial class MainWindow
     {
         public object Identity => (object?)CSharp ?? (object?)Razor ?? JavaScript!.NavigationContext;
         public string Text => CSharp?.Text ?? Razor?.Text ?? JavaScript!.Text;
+        public IReadOnlyList<SourceBracket> Brackets => CSharp?.Brackets ?? Razor?.Brackets ?? JavaScript!.Brackets;
         public IReadOnlyList<MethodEntry> Entries => CSharp?.Methods ?? Razor?.Entries ?? JavaScript!.Entries;
         public IReadOnlyList<string> Notices => CSharp?.Notices ?? Razor?.Notices ?? JavaScript!.Notices;
     }

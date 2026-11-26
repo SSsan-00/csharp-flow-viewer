@@ -213,6 +213,8 @@
           <Border Style="{StaticResource PanelHeader}">
             <DockPanel>
               <TextBlock x:Name="SourceLanguage" DockPanel.Dock="Left" Text="C#" Foreground="{DynamicResource AccentBrush}" FontWeight="Bold" Margin="0,0,9,0" VerticalAlignment="Center"/>
+              <Button x:Name="JumpBracketButton" DockPanel.Dock="Right" Content="対応括弧へ" Click="JumpBracket"
+                      ToolTip="カーソルの位置か直前の括弧の相手へ移動 (Ctrl+])" IsEnabled="False" Margin="8,0,0,0"/>
               <TextBlock x:Name="SourceTitle" Text="ソース" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             </DockPanel>
           </Border>

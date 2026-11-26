@@ -30,6 +30,7 @@ public sealed class SourceFile
         this.navigableCSharpPaths = navigableCSharpPaths;
         text = model.SyntaxTree.GetText(token);
         root = (CSharpSyntaxNode)model.SyntaxTree.GetRoot(token);
+        Brackets = CSharpSourceBrackets.Read(root, text, 0, token).ToArray();
         Notices = notices ?? [];
         var methods = new List<MethodEntry>();
         foreach (var node in root.DescendantNodes().OfType<CSharpSyntaxNode>())
@@ -64,6 +65,7 @@ public sealed class SourceFile
             SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
 
     public string Text => text.ToString();
+    public IReadOnlyList<SourceBracket> Brackets { get; }
     public IReadOnlyList<MethodEntry> Methods { get; }
     public IReadOnlyList<string> Notices { get; }
 
