@@ -166,7 +166,7 @@ internal sealed class RazorMarkupDocument
 
     internal string SourcePreview(int offset, int length) => source.ToString(new TextSpan(offset, length));
 
-    internal bool HasOnlyGeneratedIdExpressions(SourceRange output, SourceRange literal)
+    internal bool HasOnlyQuotedReferences(SourceRange output, SourceRange literal)
     {
         if (literal.Length < 3) return false;
         var start = output.Offset;
@@ -203,6 +203,24 @@ internal sealed class RazorMarkupDocument
                 }
             }
         }
+    }
+
+    internal SourceRange CoverGeneratedExpressions(SourceRange range)
+    {
+        var span = new TextSpan(range.Offset, range.Length);
+        var search = expressions.BinarySearch(span, ByStart);
+        var start = span.Start;
+        var end = span.End;
+        for (var i = Math.Max(0, (search < 0 ? ~search : search) - 1);
+             i < expressions.Count && expressions[i].Start < span.End; i++)
+        {
+            var expression = expressions[i];
+            if (!span.OverlapsWith(expression)) continue;
+            var transition = expression.Start > 0 && source[expression.Start - 1] == '@' ? 1 : 0;
+            start = Math.Min(start, expression.Start - transition);
+            end = Math.Max(end, expression.End);
+        }
+        return Range(start, end - start);
     }
 
     public bool IsDynamic(int offset, int length)

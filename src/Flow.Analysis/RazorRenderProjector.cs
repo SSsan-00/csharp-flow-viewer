@@ -140,7 +140,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             if (condition is not null)
                 edges.Add(new FlowEdge(id, next, kind == "foreach" ? "要素なし" : "False"));
             var entry = Branch(id, "body", kind == "foreach" ? "要素あり" : "True", "ループ本体を描画",
-                body, repeatId, next, repeatId, scriptSlot ?? document.OriginalSpan(statement.Span).Start);
+                body, repeatId, next, repeatId, scriptSlot ?? document.OriginalSpan(statement.Span).Start, unfoldMixedLoop: true);
             return firstBody ? entry : id;
         }
 
@@ -186,7 +186,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
     }
 
     private string Branch(string from, string suffix, string outcome, string label, StatementSyntax body,
-        string next, string? breakTo, string? continueTo, int scriptSlot)
+        string next, string? breakTo, string? continueTo, int scriptSlot, bool unfoldMixedLoop = false)
     {
         var span = document.OriginalSpan(body.Span);
         var id = from + "_" + suffix;
@@ -196,7 +196,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             var interior = document.OriginalSpan(TextSpan.FromBounds(block.OpenBraceToken.Span.End, block.CloseBraceToken.SpanStart));
             var statements = block.Statements.Where(statement => statement is not EmptyStatementSyntax).ToArray();
             if (statements.Length == 0)
-                DescribeOutput(interior, id, ref label, ref source, scriptSlot);
+                DescribeOutput(interior, id, ref label, ref source, scriptSlot, unfoldMixedLoop);
             else
             {
                 // A nested if can share the script insertion point only if nothing else is emitted on this arm.
@@ -242,7 +242,8 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         return id;
     }
 
-    private bool DescribeOutput(TextSpan span, string id, ref string label, ref SourceRange source, int? controlStart = null)
+    private bool DescribeOutput(TextSpan span, string id, ref string label, ref SourceRange source, int? controlStart = null,
+        bool unfoldMixedLoop = false)
     {
         if (document.RenderedOutput(span) is not { } rendered) return false;
         var (range, dynamic) = rendered;
@@ -254,17 +255,23 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         if (script) label += " · 生成JS";
         string? analyzedPreview = null;
         if (script && controlStart is int start && length <= MaxGeneratedScriptLength && outputNodes < MaxOutputNodes
-            && (!dynamic || output.Contains("bind", StringComparison.Ordinal)))
+            && (!dynamic || unfoldMixedLoop || output.Contains("bind", StringComparison.Ordinal)))
         {
-            var outputSource = source;
             var remaining = MaxOutputNodes - outputNodes;
             var branch = dynamic
-                ? javaScript.AnalyzeGeneratedBranch(start, document.ProjectJavaScript(offset, length), outputSource, remaining, token,
-                    (document.SourcePreview(offset, length), literal => document.HasOnlyGeneratedIdExpressions(outputSource, literal)))
-                : javaScript.AnalyzeGeneratedBranch(start, output.ToString(), outputSource, remaining, token);
+                ? javaScript.AnalyzeGeneratedBranch(start, document.ProjectJavaScript(offset, length), source, remaining,
+                    token, document, unfoldMixedLoop)
+                : javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, remaining, token);
             analyzedPreview = branch?.Preview;
             if (branch?.ClientFlow is { } graph && graph.Nodes.Count <= remaining)
+            {
                 AddClientAlternative(id, graph);
+                if (dynamic && unfoldMixedLoop)
+                {
+                    label += "（一部未確定）";
+                    return true;
+                }
+            }
         }
         if (analyzedPreview == "") return true;
         var prefix = analyzedPreview ?? (dynamic ? document.SourcePreview(offset, Math.Min(180, length))

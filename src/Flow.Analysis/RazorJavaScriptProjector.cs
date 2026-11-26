@@ -11,7 +11,8 @@ namespace Flow.Analysis;
 internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaScript.EntryData entry,
     CancellationToken token, bool omitBrowserDetails,
     Func<CallExpression, RazorJavaScript.CallProjection>? describeGeneratedCall = null,
-    Func<MemberExpression, bool>? isHiddenGeneratedHandler = null)
+    Func<MemberExpression, bool>? isHiddenGeneratedHandler = null,
+    Func<Expression, SourceRange?>? opaqueGeneratedExpression = null)
 {
     private readonly List<FlowNode> nodes = [];
     private readonly List<FlowEdge> edges = [];
@@ -195,6 +196,13 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
     private string Condition(Expression expression, string yes, string no)
     {
         token.ThrowIfCancellationRequested();
+        if (opaqueGeneratedExpression?.Invoke(expression) is { } opaque)
+        {
+            var unknown = Add(NodeKind.Condition, "Razorで生成される条件（未確定）", expression, source: opaque);
+            Connect(unknown, yes, "True");
+            Connect(unknown, no, "False");
+            return unknown;
+        }
         if (expression is LogicalExpression logical)
         {
             if (logical.Operator == Operator.LogicalAnd)
@@ -216,6 +224,12 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
         if (++depth > 128) throw new AnalysisLimitException();
         try
         {
+            if (expression is not IFunction && opaqueGeneratedExpression?.Invoke(expression) is { } opaque)
+            {
+                var unknown = Add(NodeKind.Exception, "Razorで生成される処理（未確定）", expression, source: opaque);
+                Connect(unknown, next, "続行する場合");
+                return unknown;
+            }
             switch (expression)
             {
                 case IFunction:
