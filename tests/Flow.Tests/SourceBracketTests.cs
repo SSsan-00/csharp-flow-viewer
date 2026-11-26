@@ -124,6 +124,64 @@ public sealed class SourceBracketTests
     }
 
     [TestMethod]
+    [DataRow("\n")]
+    [DataRow("\r\n")]
+    public void RazorGeneratedTextAndConsecutiveMarkupLinesKeepJavaScriptBrackets(string newline)
+    {
+        var source = """
+            <script>
+            function render() {
+                @if (Model.ShowText) {
+                    <text>
+                        function emitted() {
+                            if (state.ready && @(Model.Ready)) {
+                                const literal = "{unrelated}";
+                                // {ignored comment}
+                                run([1]);
+                            } // inner text block
+                        } // emitted function
+                    </text>
+                }
+                else {
+                    @:if (state.alternative) {
+                    @:    alternate();
+                    @:} // alternative block
+                }
+                @if (Model.Broken) {
+                    <text>
+                        if (state.incomplete) {
+                            start();
+                    </text>
+                }
+                else {
+                    @:} // unbalanced sibling
+                }
+            }
+            </script>
+            @{
+                <text>
+                    if (state.markup) {
+                        contentOnly();
+                    }
+                </text>
+            }
+            """.ReplaceLineEndings(newline);
+        var brackets = new RazorSourceFile(source, Path.GetFullPath("GeneratedBrackets.cshtml")).Brackets;
+        Assert.IsTrue(AssertPair(source, brackets, "emitted() {", 10, "} // emitted function", 0).CanFold);
+        Assert.IsTrue(AssertPair(source, brackets, "Ready)) {", 8, "} // inner text block", 0).CanFold);
+        Assert.IsTrue(AssertPair(source, brackets, "(state.alternative) {", 20, "} // alternative block", 0).CanFold);
+        AssertPair(source, brackets, "[1]", 0, "[1]", 2);
+        AssertPair(source, brackets, "(state.alternative)", 0, "(state.alternative)", 18);
+        foreach (var (ignored, offset) in new[] { ("{unrelated}", 0), ("{ignored comment}", 0),
+                     ("state.incomplete) {", 18), ("} // unbalanced sibling", 0), ("state.markup) {", 14) })
+        {
+            var start = source.IndexOf(ignored, StringComparison.Ordinal);
+            Assert.IsGreaterThanOrEqualTo(0, start, ignored);
+            Assert.IsNull(SourceBracket.MatchAt(brackets, start + offset), ignored);
+        }
+    }
+
+    [TestMethod]
     public void PiecesFromDifferentScriptsAndRecoveryDoNotPair()
     {
         const string source = """

@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Windows;
+using System.Windows.Media;
 using Flow.Model;
 using ICSharpCode.AvalonEdit.Folding;
 
@@ -14,11 +15,27 @@ public partial class MainWindow
 
     private void InstallSourceFolding()
     {
-        sourceFolding = FoldingManager.Install(Editor.TextArea);
+        var area = Editor.TextArea;
+        sourceFolding = FoldingManager.Install(area);
+        area.LeftMargins[^1] = new SourceFoldingMargin { FoldingManager = sourceFolding };
         Editor.SetResourceReference(FoldingMargin.FoldingMarkerBrushProperty, "MutedBrush");
         Editor.SetResourceReference(FoldingMargin.FoldingMarkerBackgroundBrushProperty, "CanvasBrush");
         Editor.SetResourceReference(FoldingMargin.SelectedFoldingMarkerBrushProperty, "AccentBrush");
         Editor.SetResourceReference(FoldingMargin.SelectedFoldingMarkerBackgroundBrushProperty, "CanvasBrush");
+    }
+
+    private sealed class SourceFoldingMargin : FoldingMargin
+    {
+        protected override void OnRender(DrawingContext drawingContext)
+        {
+            // The fold buttons are child visuals; filter only the margin's own guide strokes.
+            var guides = new DrawingGroup();
+            using (var buffer = guides.Open())
+                base.OnRender(buffer);
+            foreach (var drawing in guides.Children)
+                if (drawing is not GeometryDrawing { Geometry: LineGeometry line } || line.StartPoint.Y != line.EndPoint.Y)
+                    drawingContext.DrawDrawing(drawing);
+        }
     }
 
     private void SetSourceBrackets(IReadOnlyList<SourceBracket> brackets, FoldViewState? saved)

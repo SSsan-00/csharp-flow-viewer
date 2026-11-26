@@ -180,9 +180,14 @@ internal sealed class RazorMarkupDocument
     public string ProjectJavaScript(int offset, int length)
     {
         var projection = Html.Substring(offset, length).ToCharArray();
-        foreach (var expression in expressions)
+        var range = new TextSpan(offset, length);
+        var index = expressions.BinarySearch(range, ByStart);
+        if (index < 0) index = ~index;
+        else while (index > 0 && expressions[index - 1].Start == offset) index--;
+        for (var i = index; i < expressions.Count && expressions[i].Start < range.End; i++)
         {
-            if (expression.Start < offset || expression.End > offset + length) continue;
+            var expression = expressions[i];
+            if (!range.Contains(expression)) continue;
             var start = expression.Start - offset;
             var available = 0;
             while (available < expression.Length && projection[start + available] is not ('\r' or '\n')) available++;
@@ -192,7 +197,7 @@ internal sealed class RazorMarkupDocument
         return new string(projection);
     }
 
-    internal RazorJavaScriptFragment ProjectScript(int offset, int length, bool isModule)
+    internal RazorJavaScriptFragment ProjectScript(int offset, int length, bool isModule, CancellationToken token)
     {
         var range = Range(offset, length);
         var text = ProjectJavaScript(offset, length);
@@ -202,9 +207,11 @@ internal sealed class RazorMarkupDocument
 
         var projected = text.ToCharArray();
         var slots = new Dictionary<int, SourceRange>();
+        var generated = new List<(int Slot, SourceRange Source, string Text)>();
         var previousEnd = offset;
         foreach (var control in controls)
         {
+            token.ThrowIfCancellationRequested();
             var span = OriginalSpan(control.Span);
             if (span.Start < previousEnd) continue;
             for (var i = span.Start; i < span.End; i++)
@@ -213,9 +220,41 @@ internal sealed class RazorMarkupDocument
             projected[span.Start - offset] = ';';
             slots.Add(span.Start - offset, Range(span.Start, span.Length));
             previousEnd = span.End;
+            foreach (var node in control.DescendantNodes())
+            {
+                token.ThrowIfCancellationRequested();
+                if (node is BlockSyntax block && !block.OpenBraceToken.IsMissing && !block.CloseBraceToken.IsMissing)
+                    AddGeneratedOutput(span.Start, block.Statements, block.OpenBraceToken.Span.End, block.CloseBraceToken.SpanStart);
+                else if (node is SwitchSectionSyntax section && section.Labels.Count > 0)
+                    AddGeneratedOutput(span.Start, section.Statements, section.Labels[^1].Span.End, section.Span.End);
+            }
         }
 
-        return new RazorJavaScriptFragment(new string(projected), range, true, isModule) { RenderingSlots = slots };
+        return new RazorJavaScriptFragment(new string(projected), range, true, isModule)
+        {
+            RenderingSlots = slots,
+            GeneratedStatements = generated
+        };
+
+        void AddGeneratedOutput(int slot, Microsoft.CodeAnalysis.SyntaxList<StatementSyntax> statements, int start, int end)
+        {
+            foreach (var statement in statements)
+            {
+                if (statement is EmptyStatementSyntax) continue;
+                Add(start, statement.SpanStart);
+                start = statement.Span.End;
+            }
+            Add(start, end);
+
+            void Add(int first, int last)
+            {
+                if (first >= last || RenderedOutput(OriginalSpan(TextSpan.FromBounds(first, last))) is not { } output)
+                    return;
+                var body = output.Span;
+                var text = output.Dynamic ? ProjectJavaScript(body.Start, body.Length) : Html.Substring(body.Start, body.Length);
+                generated.Add((slot, Range(body.Start, body.Length), text));
+            }
+        }
     }
 
     internal IReadOnlyList<StatementSyntax> ControlsWithin(SourceRange range)

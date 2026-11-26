@@ -121,7 +121,7 @@ internal sealed class RazorMarkupReader
                                 element.Attribute("defer") is { IsDynamic: false }
                                     && element.Attribute("async") is null && element.Attribute("nomodule") is null));
                         }
-                        else scripts.Add(document.ProjectScript(position, contentEnd - position, module));
+                        else scripts.Add(document.ProjectScript(position, contentEnd - position, module, token));
                     }
                     else if (element.Attribute("language") is { } language && !language.Value.Equals("javascript", StringComparison.OrdinalIgnoreCase))
                         notices.Add($"L{document.Range(start, 1).Line}: {language.Value} のスクリプトはJavaScriptとして解析しません。");
