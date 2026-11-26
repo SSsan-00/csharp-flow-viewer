@@ -83,14 +83,27 @@ try {
   await page.getByRole("menuitem", { name: "マーク" }).click();
   const annotation = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "annotate"));
   assert.deepEqual(annotation.value, { id: picked.value, action: "mark" });
-  await page.evaluate(id => window.receiveFromHost({ type: "annotations", marked: [id], gray: [] }), picked.value);
-  assert.equal(await graph.locator(".marked").count(), 1);
+  const upstream = graph.locator(".node.flow_start");
+  const upstreamId = await upstream.getAttribute("data-flow-id");
+  await page.evaluate(([id, start]) => window.receiveFromHost({
+    type: "annotations", marked: [start, id], explicitMarks: [id], gray: []
+  }), [picked.value, upstreamId]);
+  assert.equal(await graph.locator(".marked").count(), 2);
   assert.equal(await condition.locator(".selection-ring").evaluate(shape => getComputedStyle(shape).stroke), "rgb(0, 82, 187)");
   const markedShape = condition.locator(":scope > rect, :scope > polygon, :scope > path, :scope > circle").first();
+  const upstreamShape = upstream.locator(":scope > rect, :scope > polygon, :scope > path, :scope > circle").first();
   assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
+  assert.equal(await upstreamShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
   assert.equal(await markedShape.evaluate(shape => getComputedStyle(shape).stroke), "rgb(123, 82, 0)");
+  await upstream.click({ button: "right" });
+  assert.equal(await page.getByRole("menuitem", { name: "解除", exact: true }).isDisabled(), true);
+  await condition.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "解除", exact: true }).click();
+  const cleared = await page.evaluate(() => window.previewMessages.findLast(message => message.type === "annotate"));
+  assert.deepEqual(cleared.value, { id: picked.value, action: "clear" });
   await page.evaluate(id => window.receiveFromHost({ type: "annotations", marked: [], gray: [id] }), picked.value);
   assert.notEqual(await markedShape.evaluate(shape => getComputedStyle(shape).fill), "rgb(255, 229, 161)");
+  assert.equal(await graph.locator(".marked").count(), 0);
   assert.equal(await graph.locator(".grayed").count(), 1);
 
   await page.evaluate(() => {

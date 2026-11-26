@@ -1,9 +1,68 @@
+using System.Runtime.CompilerServices;
+
 namespace Flow.Model;
 
 public sealed class NodeAnnotations
 {
+    private static readonly ConditionalWeakTable<FlowDiagram, Lazy<UpstreamMarkIndex>> upstreamIndexes = new();
+
     public HashSet<string> Marked { get; init; } = [];
     public HashSet<string> GrayRoots { get; init; } = [];
+
+    public HashSet<string> VisibleMarks(FlowDiagram diagram) => Marked.Count == 0 ? []
+        : upstreamIndexes.GetValue(diagram, static graph => new Lazy<UpstreamMarkIndex>(() => new(graph))).Value.WithUpstream(Marked);
+
+    private sealed class UpstreamMarkIndex
+    {
+        private readonly string[] ids;
+        private readonly Dictionary<string, int> index;
+        private readonly int[] dominators;
+
+        public UpstreamMarkIndex(FlowDiagram diagram)
+        {
+            var nodes = diagram.Nodes.Where(node => node.IsReachable).ToArray();
+            ids = ["", .. nodes.Select(node => node.Id)];
+            index = nodes.Select((node, i) => (node.Id, Vertex: i + 1))
+                .ToDictionary(item => item.Id, item => item.Vertex, StringComparer.Ordinal);
+            var outgoing = Enumerable.Range(0, ids.Length).Select(_ => new List<int>()).ToArray();
+            var incoming = Enumerable.Range(0, ids.Length).Select(_ => new List<int>()).ToArray();
+            foreach (var edge in diagram.Edges)
+                if (edge.IsReachable && index.TryGetValue(edge.From, out var from) && index.TryGetValue(edge.To, out var to))
+                    Connect(from, to);
+
+            // A Start reached from another visible node (e.g. Razor's render start) is not another entry.
+            foreach (var node in nodes)
+            {
+                var vertex = index[node.Id];
+                if (node.IsIndependentEntry || node.Kind == NodeKind.Start && incoming[vertex].Count == 0)
+                    Connect(0, vertex);
+            }
+            var order = ReversePostorder(outgoing);
+            dominators = ImmediateDominators(order, Ranks(order, ids.Length), incoming);
+
+            void Connect(int from, int to)
+            {
+                outgoing[from].Add(to);
+                incoming[to].Add(from);
+            }
+        }
+
+        public HashSet<string> WithUpstream(IReadOnlySet<string> marks)
+        {
+            var result = new HashSet<string>(marks, StringComparer.Ordinal);
+            var seen = new bool[ids.Length];
+            foreach (var id in marks)
+            {
+                if (!index.TryGetValue(id, out var vertex)) continue;
+                for (var parent = dominators[vertex]; parent > 0 && !seen[parent]; parent = dominators[parent])
+                {
+                    seen[parent] = true;
+                    result.Add(ids[parent]);
+                }
+            }
+            return result;
+        }
+    }
 
     public HashSet<string> GrayNodes(FlowDiagram diagram)
     {
@@ -42,8 +101,7 @@ public sealed class NodeAnnotations
         // synthetic vertex makes that cut equivalent to removing a regular vertex.
         var roots = GrayRoots.Where(ids.ContainsKey).Select(root => caseBranches.GetValueOrDefault(root, ids[root])).ToArray();
         var rpo = ReversePostorder(outgoing);
-        var rank = Enumerable.Repeat(-1, outgoing.Count).ToArray();
-        for (var i = 0; i < rpo.Count; ++i) rank[rpo[i]] = i;
+        var rank = Ranks(rpo, outgoing.Count);
         var dominators = ImmediateDominators(rpo, rank, incoming);
         var gray = new bool[outgoing.Count];
         foreach (var root in roots) gray[root] = true;
@@ -87,6 +145,13 @@ public sealed class NodeAnnotations
             outgoing[from].Add(to);
             incoming[to].Add(from);
         }
+    }
+
+    private static int[] Ranks(IReadOnlyList<int> order, int count)
+    {
+        var ranks = Enumerable.Repeat(-1, count).ToArray();
+        for (var i = 0; i < order.Count; ++i) ranks[order[i]] = i;
+        return ranks;
     }
 
     private static List<int> ReversePostorder(IReadOnlyList<List<int>> outgoing)

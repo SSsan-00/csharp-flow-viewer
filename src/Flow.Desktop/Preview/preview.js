@@ -3,6 +3,7 @@
   const graph = document.querySelector("#graph");
   const feedback = document.querySelector("#feedback");
   const menu = document.querySelector("#node-menu");
+  const clearMark = menu.querySelector('[data-action="clear"]');
   const scroller = document.querySelector("#vertical-scroll");
   const search = document.querySelector("#preview-search");
   const query = search.querySelector("input");
@@ -21,6 +22,7 @@
   const originalStyles = new WeakMap();
   const annotationNodes = new Map();
   let appliedMarks = new Set(), appliedGray = new Set();
+  let explicitMarks = new Set(), grayRoots = new Set();
   const send = (type, value) => host?.postMessage({ type, value, version });
   const sendZoom = () => send("zoom", Number((scale * 100).toPrecision(3)));
 
@@ -210,9 +212,11 @@
     annotationNodes.clear();
     appliedMarks.clear();
     appliedGray.clear();
+    explicitMarks.clear();
+    grayRoots.clear();
   }
 
-  function applyAnnotations({ marked, gray }) {
+  function applyAnnotations({ marked, gray, explicitMarks: marksByUser = marked, grayRoots: graysByUser = gray }) {
     const marks = new Set(marked.filter(id => annotationNodes.has(id)));
     const grayed = new Set(gray.filter(id => annotationNodes.has(id)));
     for (const id of appliedMarks)
@@ -225,6 +229,9 @@
       if (!appliedGray.has(id)) annotationNodes.get(id).classList.add("grayed");
     appliedMarks = marks;
     appliedGray = grayed;
+    explicitMarks = new Set(marksByUser);
+    grayRoots = new Set(graysByUser);
+    if (menuNode) updateClearAction();
   }
 
   function updateMark(node, marked) {
@@ -355,6 +362,11 @@
     menuNode = undefined;
   }
 
+  function updateClearAction() {
+    clearMark.disabled = appliedMarks.has(menuNode) && !explicitMarks.has(menuNode) && !grayRoots.has(menuNode);
+    clearMark.title = clearMark.disabled ? "自動で付いたマークです。マークした先のノードで解除できます。" : "";
+  }
+
   graph.addEventListener("click", event => {
     const node = event.target.closest("[data-flow-id]");
     if (!node || suppressClick) return;
@@ -373,6 +385,7 @@
     const node = event.target.closest("[data-flow-id]");
     if (!node) { closeMenu(); return; }
     menuNode = node.dataset.flowId;
+    updateClearAction();
     menu.hidden = false;
     menu.style.left = Math.max(0, Math.min(event.clientX, viewport.clientWidth - menu.offsetWidth)) + "px";
     menu.style.top = Math.max(0, Math.min(event.clientY, viewport.clientHeight - menu.offsetHeight)) + "px";
