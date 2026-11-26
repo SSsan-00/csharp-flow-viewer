@@ -56,6 +56,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         SearchPanel.Install(Editor);
+        InstallSourceFolding();
         Editor.TextArea.AddHandler(MouseLeftButtonDownEvent, new MouseButtonEventHandler(EditorPressed), true);
         Editor.TextArea.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(EditorClicked), true);
         dark = Theme.Read();
@@ -190,6 +191,7 @@ public partial class MainWindow : Window
         (source, razorSource, javaScriptSource) = loaded;
         currentFile = file;
         Editor.Text = loaded.Text;
+        SetSourceBrackets(loaded.Brackets, state?.SourceFolds);
         ApplyFileState(statePath, state);
         SourceTitle.Text = file.Label;
         SourceTitle.ToolTip = file.Label;
@@ -295,6 +297,7 @@ public partial class MainWindow : Window
         MethodCount.Text = "メソッド";
         Filter.Clear();
         if (!preserveHistory) history.Clear();
+        SetSourceBrackets([], null);
         Editor.Clear();
         GoToPanel.Visibility = Visibility.Collapsed;
         SourceTitle.Text = "ソース";
@@ -394,6 +397,7 @@ public partial class MainWindow : Window
         var offset = Math.Clamp(location.Offset, 0, Editor.Document.TextLength);
         var length = Math.Clamp(location.Length, 0, Editor.Document.TextLength - offset);
         var position = Editor.Document.GetLocation(offset);
+        RevealSourceOffset(offset);
         Editor.Select(offset, length);
         Editor.ScrollTo(position.Line, position.Column);
         SourceLocation.Text = $"L{position.Line}  /  {Editor.LineCount:N0} 行";
@@ -650,6 +654,7 @@ public partial class MainWindow : Window
         CancelOperationButton.IsEnabled = operationCancellation is { IsCancellationRequested: false };
         BackButton.IsEnabled = !busy && CanFindCaller;
         FollowButton.IsEnabled = !busy && selectedNode is { } node && CanFollow(node);
+        JumpBracketButton.IsEnabled = !busy && sourceBrackets.Count > 0;
         ListButton.Content = showList ? "図" : "一覧";
         ListButton.IsEnabled = hasGraph && ready && !previewUnavailable;
         AnnotationsButton.IsEnabled = hasGraph && !busy;
@@ -758,6 +763,12 @@ public partial class MainWindow : Window
         {
             args.Handled = true;
             OpenGoToLine();
+        }
+        else if (args.Key == Key.OemCloseBrackets && Keyboard.Modifiers == ModifierKeys.Control
+            && Editor.IsKeyboardFocusWithin && JumpBracketButton.IsEnabled)
+        {
+            args.Handled = true;
+            JumpToMatchingBracket();
         }
         else if (args.Key == Key.F12 && Keyboard.Modifiers == ModifierKeys.None && FollowButton.IsEnabled)
         {

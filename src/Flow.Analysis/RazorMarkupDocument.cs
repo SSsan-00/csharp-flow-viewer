@@ -122,6 +122,21 @@ internal sealed class RazorMarkupDocument
     public SourceRange Range(int offset, int length) => new(offset, length,
         source.Lines.GetLineFromPosition(Math.Min(offset, source.Length)).LineNumber + 1, filePath);
 
+    internal IEnumerable<SourceBracket> Brackets(CancellationToken token)
+    {
+        foreach (var pair in CSharpSourceBrackets.Read(ServerCode, source, -1, token)) yield return pair;
+        foreach (var expression in expressions)
+        {
+            token.ThrowIfCancellationRequested();
+            var syntax = SyntaxFactory.ParseExpression(source.ToString(expression));
+            if (syntax.ContainsDiagnostics) continue;
+            foreach (var pair in CSharpSourceBrackets.Read(syntax, source, expression.Start, token)) yield return pair;
+            if (expression.Start >= 2 && expression.End < source.Length && source[expression.Start - 2] == '@'
+                && source[expression.Start - 1] == '(' && source[expression.End] == ')')
+                yield return new SourceBracket(expression.Start - 1, expression.End);
+        }
+    }
+
     internal (TextSpan Span, bool Dynamic)? RenderedOutput(TextSpan scope)
     {
         var html = Html.AsSpan(scope.Start, scope.Length);

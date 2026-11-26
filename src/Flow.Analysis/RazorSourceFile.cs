@@ -121,9 +121,11 @@ public sealed class RazorSourceFile
                 ? entry with { Signature = InlineLabel(entry.Id, javaScript.CallSites(entry.Id, token, omitRoutine: true)) }
                 : entry));
         Entries = entries;
+        Brackets = document.Brackets(token).Concat(javaScript.GetBrackets(filePath)).Distinct().ToArray();
     }
 
     public string Text { get; }
+    public IReadOnlyList<SourceBracket> Brackets { get; }
     public bool IsInlineEvent(int entryId) => inlineLabels.ContainsKey(entryId);
     public string FilePath => filePath;
     public string? ModelName => document.ModelName;

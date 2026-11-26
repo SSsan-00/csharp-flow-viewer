@@ -17,11 +17,16 @@ public sealed class FileViewStateTests
             Assert.IsNull(FileViewState.Read(file));
             var state = new FileViewState(1, FileViewState.Key("Process()"), 17, 23, 11, 320.5,
                 "diagram-key", "b3_2", new PreviewViewport(12, -300, 1.18),
-                new Dictionary<string, NodeAnnotations> { ["diagram-key"] = new() { Marked = ["b3_2"], GrayRoots = ["b5_1"] } });
+                new Dictionary<string, NodeAnnotations> { ["diagram-key"] = new() { Marked = ["b3_2"], GrayRoots = ["b5_1"] } })
+            {
+                SourceFolds = new FoldViewState("source-hash", [13, 84])
+            };
             state.Write(file);
             var restored = FileViewState.Read(file);
             Assert.IsNotNull(restored);
             Assert.AreEqual(JsonSerializer.Serialize(state), JsonSerializer.Serialize(restored));
+            var olderJson = """{"Version":1,"Annotations":{}}""";
+            Assert.IsNull(JsonSerializer.Deserialize<FileViewState>(olderJson)?.SourceFolds);
             var updated = state with { Node = "b5_1" };
             updated.Write(file);
             Assert.AreEqual("b5_1", FileViewState.Read(file)?.Node);

@@ -47,7 +47,10 @@ public partial class MainWindow
         var caret = Editor.TextArea.Caret;
         var state = new FileViewState(1, method is { } entry ? FileViewState.Key(entry.Signature) : null,
             method?.Source.Line ?? 0, caret.Line, caret.Column, Editor.VerticalOffset,
-            AnnotationKey, selectedNode?.Id, viewport, annotationHistory);
+            AnnotationKey, selectedNode?.Id, viewport, annotationHistory)
+        {
+            SourceFolds = SavedSourceFolds()
+        };
         try { state.Write(fileStatePath); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {

@@ -25,6 +25,7 @@ public sealed class JavaScriptSourceFile
     public string FilePath { get; }
     public object NavigationContext => analyzer;
     public string Text { get; }
+    public IReadOnlyList<SourceBracket> Brackets => analyzer.GetBrackets(FilePath);
     public IReadOnlyList<MethodEntry> Entries { get; }
     public IReadOnlyList<string> Notices => analyzer.Notices;
 
