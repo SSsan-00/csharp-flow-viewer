@@ -254,7 +254,8 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         if (script) label += " · 生成JS";
         string? analyzedPreview = null;
         if (script && !dynamic && controlStart is int start && length <= MaxGeneratedScriptLength
-            && outputNodes < MaxOutputNodes && javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, token) is { } branch)
+            && outputNodes < MaxOutputNodes
+            && javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, MaxOutputNodes - outputNodes, token) is { } branch)
         {
             analyzedPreview = branch.Preview;
             if (branch.ClientFlow is { } graph && graph.Nodes.Count <= MaxOutputNodes - outputNodes)

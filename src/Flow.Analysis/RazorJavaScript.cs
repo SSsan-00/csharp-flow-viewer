@@ -345,7 +345,8 @@ public sealed class RazorJavaScript
 
     internal sealed record GeneratedBranch(FlowDiagram? ClientFlow, string? Preview);
 
-    internal GeneratedBranch? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, CancellationToken token)
+    internal GeneratedBranch? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, int maxNodes,
+        CancellationToken token)
     {
         if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)) return null;
         JsProgram root;
@@ -356,7 +357,9 @@ public sealed class RazorJavaScript
         var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
         // Use the actual insertion scope without exporting declarations or modifying that scope.
         var blocked = scope is { HasDynamicBinding: false } ? RazorGeneratedBindings.Changes(root, token) : null;
+        var changeHandlers = new Dictionary<SourceRange, Expression>();
         var graph = new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails: true, Describe, IsHiddenHandler).Build();
+        if (changeHandlers.Count > 0) graph = WithChangeCallbacks(graph);
         var conditions = graph.Nodes.Any(node => node.Kind == NodeKind.Condition);
         var standalone = !graph.IsPartial && root.Body is { Count: > 0 } statements
             && text[statements[^1].End - 1] == ';'
@@ -397,8 +400,72 @@ public sealed class RazorJavaScript
         CallProjection Describe(CallExpression call)
         {
             if (scope is null || blocked is null) return default;
+            if (GeneratedChangeHandler(call, scope, blocked) is { } handler)
+                changeHandlers.TryAdd(Range(unit, call), handler);
+            return DescribeCall(call);
+        }
+
+        CallProjection DescribeCall(CallExpression call)
+        {
+            if (scope is null || blocked is null) return default;
             var target = Resolve(call.Callee, scope, blocked);
             return new(target, target is null && RazorBrowserCalls.IsRoutine(call, scope, blocked, blocked.IsStandaloneFocus(call)));
+        }
+
+        Expression? GeneratedChangeHandler(CallExpression call, Scope context, RazorGeneratedBindings bindings)
+        {
+            if (call is not { Optional: false, Callee: MemberExpression { Optional: false, Object: CallExpression
+                { Optional: false, Callee: Identifier { Name: "$" or "jQuery" } jquery, Arguments: [StringLiteral selector] } } member }
+                || PropertyName(member) != "bind" || call.Arguments.Count is < 2 or > 3
+                || string.IsNullOrWhiteSpace(selector.Value) || selector.Value.TrimStart().StartsWith('<')
+                || !IsJQuery(member.Object, context, bindings)
+                || isolatedClassicScopes.Keys.Any(other => other.Dynamic || other.DeclaresHere(jquery.Name))
+                || StringValue(call.Arguments[0]) is not { } events
+                || !events.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Any(name => name.Split('.')[0] == "change"))
+                return null;
+            return call.Arguments[^1];
+        }
+
+        FlowDiagram WithChangeCallbacks(FlowDiagram flow)
+        {
+            const string eventLabel = "change 発生時（候補）";
+            var nodes = flow.Nodes.ToList();
+            var edges = flow.Edges.ToList();
+            foreach (var registration in flow.Nodes)
+            {
+                token.ThrowIfCancellationRequested();
+                if (nodes.Count >= maxNodes) break;
+                if (registration is not { Kind: NodeKind.Call, Source: { } range }
+                    || !changeHandlers.TryGetValue(range, out var handler)) continue;
+                var prefix = registration.Id + "_change_";
+                if (handler is IFunction callback)
+                {
+                    var localNames = callback.Params.SelectMany(JavaScriptWriteTargets.Leaves).OfType<Identifier>()
+                        .Select(name => name.Name).ToHashSet(StringComparer.Ordinal);
+                    if (callback.Id is { } name) localNames.Add(name.Name);
+                    var body = new EntryData(entry.Entry, callback.Body, unit, entry.Scope);
+                    var projected = new RazorJavaScriptProjector(this, body, token, omitBrowserDetails: true,
+                        call => MentionsLocal(call.Callee) ? default : DescribeCall(call),
+                        member => !MentionsLocal(member) && IsHiddenHandler(member)).Build();
+                    if (nodes.Count + projected.Nodes.Count - 1 > maxNodes) continue;
+                    var start = projected.Nodes.Single(node => node.Kind == NodeKind.Start).Id;
+                    nodes.AddRange(projected.Nodes.Where(node => node.Id != start).Select(node => node with { Id = prefix + node.Id }));
+                    edges.AddRange(projected.Edges.Select(edge => edge.From == start
+                        ? new FlowEdge(registration.Id, prefix + edge.To, eventLabel)
+                        : edge with { From = prefix + edge.From, To = prefix + edge.To }));
+
+                    bool MentionsLocal(Expression expression) => localNames.Count > 0
+                        && Descendants(expression).OfType<Identifier>().Any(identifier => localNames.Contains(identifier.Name));
+                }
+                else if (Resolve(handler, scope!, blocked!) is { } target)
+                {
+                    var navigation = ResolveNavigationTarget(target);
+                    nodes.Add(new FlowNode(prefix + "call", NodeKind.Call, Slice(unit, handler) + "()", Range(unit, handler),
+                        navigation.Method, TargetFilePath: navigation.Path));
+                    edges.Add(new FlowEdge(registration.Id, prefix + "call", eventLabel));
+                }
+            }
+            return flow with { Nodes = nodes, Edges = edges };
         }
 
         bool IsHiddenHandler(MemberExpression member) => scope is not null && blocked is not null
