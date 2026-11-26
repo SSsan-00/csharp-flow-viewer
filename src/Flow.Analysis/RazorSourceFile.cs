@@ -161,7 +161,8 @@ public sealed class RazorSourceFile
         if (entryId == -1) return BuildOverview(token);
         if (requests.TryGetValue(entryId, out var element)) return BuildRequestFlow(element, token);
         if (!Entries.Any(entry => entry.Id == entryId)) throw new ArgumentOutOfRangeException(nameof(entryId));
-        var flow = ConnectJavaScriptRequests(entryId, javaScript.AnalyzeRazor(entryId, token), omitBrowserDetails: true);
+        var (browser, expandedReadyCallbacks) = javaScript.AnalyzeRazor(entryId, token);
+        var flow = ConnectJavaScriptRequests(entryId, browser, omitBrowserDetails: true);
         if (javaScript.HasSourceOnlyDefinitions && IsInlineEvent(entryId))
         {
             var candidates = javaScript.CallSites(entryId, token).GroupBy(call => call.Source)
@@ -173,26 +174,26 @@ public sealed class RazorSourceFile
                         && candidates.TryGetValue(range, out var definition)
                         ? node with { TargetDeclaration = definition, IsDefinitionCandidate = true } : node).ToArray() };
         }
-        flow = IncludeScriptRendering(entryId, flow, token);
+        flow = IncludeScriptRendering(entryId, flow, expandedReadyCallbacks, token);
         return flow with { Notices = flow.Notices.Concat(Notices).Distinct(StringComparer.Ordinal).ToArray() };
     }
 
-    private FlowDiagram IncludeScriptRendering(int entryId, FlowDiagram flow, CancellationToken token)
+    private FlowDiagram IncludeScriptRendering(int entryId, FlowDiagram flow, IReadOnlySet<int> expandedReadyCallbacks,
+        CancellationToken token)
     {
-        if (javaScript.ScriptRenderingScope(entryId) is not { } scope) return flow;
+        if (javaScript.ScriptRenderingScope(entryId, expandedReadyCallbacks) is not { } scope) return flow;
         var controls = document.ControlsWithin(scope.Range);
         if (controls.Count == 0) return flow;
         var nodes = flow.Nodes.ToList();
         var edges = flow.Edges.ToList();
         var rendering = new RazorRenderProjector(document, markup.Scripts, javaScript, nodes, edges, token, scope.NestedFunctions);
-        var sharedStart = scope.IsFunction ? nodes.Single(node => node.Kind == NodeKind.Start).Id : null;
-        var browserEntry = sharedStart is null ? -1 : edges.FindIndex(edge => edge.From == sharedStart);
+        var sharedStart = nodes.Single(node => node.Kind == NodeKind.Start).Id;
+        var browserEntry = edges.FindIndex(edge => edge.From == sharedStart);
         if (rendering.Project(scope.Range, controls, sharedStart) is null) return flow;
         if (browserEntry >= 0)
             edges[browserEntry] = edges[browserEntry] with { Label = "ブラウザー側の実行候補" };
-        var notices = flow.Notices.Append(sharedStart is null
-            ? "Razorの生成フローとブラウザー側の実行候補は別々に表示します。"
-            : "同じ関数のサーバー側の生成とブラウザー側の実行候補を分けて表示します。接続は実行順序を表しません。").ToList();
+        var notices = flow.Notices.Append(
+            "サーバー側の生成とブラウザー側の実行候補は同じ開始点から分けて表示します。接続は実行順序を表しません。").ToList();
         if (rendering.IsTruncated)
             notices.Add("サーバー側の描画フローは最大100件の制御構文を表示しています。");
         return flow with { Nodes = nodes, Edges = edges, Notices = notices };

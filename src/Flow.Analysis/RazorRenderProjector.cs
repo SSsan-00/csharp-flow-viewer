@@ -33,7 +33,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         if (first == End) return null;
         var start = sharedStart ?? Start;
         if (sharedStart is null)
-            nodes.Add(new FlowNode(start, NodeKind.Start, selectedControls is null ? "サーバー側描画" : "Razor · JavaScriptの生成", pageSource));
+            nodes.Add(new FlowNode(start, NodeKind.Start, "サーバー側描画", pageSource));
         nodes.Add(new FlowNode(End, NodeKind.End, selectedControls is null ? "描画終了" : "Razor側の生成終了", pageSource));
         edges.Add(new FlowEdge(start, first, sharedStart is null ? null : "サーバー側の生成"));
         MarkDisconnectedPaths(start);

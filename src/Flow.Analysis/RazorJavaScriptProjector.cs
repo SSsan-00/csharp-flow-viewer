@@ -6,8 +6,7 @@ using JsProgram = Acornima.Ast.Program;
 namespace Flow.Analysis;
 
 /// <summary>
-/// JavaScriptの選択した本体を図へ投影する。関数宣言の本体や非同期コールバックは
-/// 呼び出し位置で実行されたものとして展開せず、別エントリーへの移動先にする。
+/// JavaScriptの選択した本体を図へ投影する。非同期コールバックは同期処理の続きにしない。
 /// </summary>
 internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaScript.EntryData entry,
     CancellationToken token, bool omitBrowserDetails,
@@ -17,10 +16,16 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
     private readonly List<FlowNode> nodes = [];
     private readonly List<FlowEdge> edges = [];
     private readonly List<string> notices = [];
+    private const int MaxNodes = 1500;
+    private int readyNodesRemaining = 200;
+    private int nodeLimit = MaxNodes;
+    private bool inReadyCallback;
     private string end = "";
+    private string nodePrefix = "js";
     private int nextId;
     private int depth;
     private bool partial;
+    public HashSet<int> ExpandedReadyCallbacks { get; } = [];
 
     public FlowDiagram Build()
     {
@@ -42,13 +47,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
             string first;
             try
             {
-                if (entry.Body is Expression expression)
-                {
-                    var returning = Add(NodeKind.Transfer, "return " + Text(expression), expression);
-                    Connect(returning, end);
-                    first = Expression(expression, returning);
-                }
-                else first = Statement(entry.Body, end, null, null);
+                first = Body(entry.Body);
             }
             catch (AnalysisLimitException)
             {
@@ -60,6 +59,14 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
             Connect(start, first);
         }
         return new FlowDiagram(nodes, edges, notices, partial);
+    }
+
+    private string Body(Node node)
+    {
+        if (node is not Expression expression) return Statement(node, end, null, null);
+        var returning = Add(NodeKind.Transfer, "return " + Text(expression), expression);
+        Connect(returning, end);
+        return Expression(expression, returning);
     }
 
     private string Statement(Node statement, string next, string? breakTarget, string? continueTarget)
@@ -233,10 +240,13 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     var callFirst = next;
                     if (!callInfo.Omit)
                     {
-                        var label = request is null ? CallLabel(call) : $"HTTP {request.HttpMethod} {request.Url}" +
+                        var label = callInfo.ReadyCallback is not null ? "jQuery ready を登録"
+                            : request is null ? CallLabel(call) : $"HTTP {request.HttpMethod} {request.Url}" +
                             (request.IsAsync ? "（非同期送信）" : "（同期送信）") + (request.IsResolved ? "" : " · 未解決");
                         callFirst = Add(request is null ? NodeKind.Call : NodeKind.Transfer, label, call, callInfo.Target);
                         Connect(callFirst, next);
+                        if (callInfo.ReadyCallback is { } ready && !inReadyCallback)
+                            AddReadyCallback(callFirst, ready);
                         if (call.Callee is Identifier { Name: "eval" }) MarkPartial("evalで生成される処理は解析しません。");
                     }
                     if (request is { IsResolved: false }) MarkPartial("XMLHttpRequestの送信内容に未解決の値があります。");
@@ -304,6 +314,42 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
         var unknown = Add(NodeKind.Exception, Text(node) + " · 詳細未解決", node);
         Connect(unknown, next, "継続候補");
         return unknown;
+    }
+
+    private void AddReadyCallback(string registration, RazorJavaScript.EntryData callback)
+    {
+        if (callback.Body is not { } body) return;
+        var firstNode = nodes.Count;
+        var firstEdge = edges.Count;
+        var synchronousEnd = end;
+        var synchronousNextId = nextId;
+        var synchronousDepth = depth;
+        nodePrefix = registration + "_ready_";
+        nextId = 0;
+        nodeLimit = Math.Min(MaxNodes, firstNode + readyNodesRemaining);
+        inReadyCallback = true;
+        try
+        {
+            end = Add(NodeKind.End, "ready コールバック終了", body);
+            Connect(registration, Body(body), "DOM 準備完了時");
+            readyNodesRemaining -= nodes.Count - firstNode;
+            ExpandedReadyCallbacks.Add(callback.Entry.Id);
+        }
+        catch (AnalysisLimitException)
+        {
+            nodes.RemoveRange(firstNode, nodes.Count - firstNode);
+            edges.RemoveRange(firstEdge, edges.Count - firstEdge);
+            MarkPartial("jQuery ready の詳細は展開上限のため、登録ノードから定義に移動して確認してください。");
+        }
+        finally
+        {
+            inReadyCallback = false;
+            nodeLimit = MaxNodes;
+            end = synchronousEnd;
+            nodePrefix = "js";
+            nextId = synchronousNextId;
+            depth = synchronousDepth;
+        }
     }
 
     private RazorJavaScript.CallProjection ProjectCall(CallExpression call) => describeGeneratedCall is null
@@ -380,8 +426,8 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
         SourceRange? source = null)
     {
         token.ThrowIfCancellationRequested();
-        if (!ignoreLimit && nodes.Count >= 1500) throw new AnalysisLimitException();
-        var id = "js" + nextId++;
+        if (!ignoreLimit && nodes.Count >= nodeLimit) throw new AnalysisLimitException();
+        var id = nodePrefix + nextId++;
         var navigation = owner.ResolveNavigationTarget(target);
         nodes.Add(new FlowNode(id, kind, label, source ?? (node is null ? entry.Entry.Source : owner.Range(entry.Unit, node)),
             TargetMethod: navigation.Method, TargetFilePath: navigation.Path));

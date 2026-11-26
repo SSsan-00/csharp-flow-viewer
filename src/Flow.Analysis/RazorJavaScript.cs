@@ -325,15 +325,19 @@ public sealed class RazorJavaScript
     }
 
     /// <summary>選択されたJS関数だけの制御フローを作り、大きなページの全展開を避ける。</summary>
-    public FlowDiagram Analyze(int entryId, CancellationToken token = default) => Analyze(entryId, false, token);
+    public FlowDiagram Analyze(int entryId, CancellationToken token = default) => Projector(entryId, false, token).Build();
 
-    internal FlowDiagram AnalyzeRazor(int entryId, CancellationToken token) => Analyze(entryId, true, token);
+    internal (FlowDiagram Flow, IReadOnlySet<int> ExpandedReadyCallbacks) AnalyzeRazor(int entryId, CancellationToken token)
+    {
+        var projector = Projector(entryId, true, token);
+        return (projector.Build(), projector.ExpandedReadyCallbacks);
+    }
 
-    private FlowDiagram Analyze(int entryId, bool omitBrowserDetails, CancellationToken token)
+    private RazorJavaScriptProjector Projector(int entryId, bool omitBrowserDetails, CancellationToken token)
     {
         if (!data.TryGetValue(entryId, out var entry))
             throw new ArgumentOutOfRangeException(nameof(entryId));
-        return new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails).Build();
+        return new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails);
     }
 
     internal sealed record GeneratedBranch(FlowDiagram? ClientFlow, string? Preview);
@@ -411,15 +415,17 @@ public sealed class RazorJavaScript
         }
     }
 
-    internal (SourceRange Range, IReadOnlyList<SourceRange> NestedFunctions, bool IsFunction)? ScriptRenderingScope(int entryId)
+    internal (SourceRange Range, IReadOnlyList<SourceRange> NestedFunctions)? ScriptRenderingScope(int entryId,
+        IReadOnlySet<int> expandedReadyCallbacks)
     {
         var entry = data[entryId];
         if (entry.Unit.RenderingSlots is not { Count: > 0 }) return null;
-        var isFunction = entry.Body is not (JsProgram or null);
-        var range = isFunction ? entry.Entry.Source : entry.Unit.Source;
+        var range = entry.Body is JsProgram or null ? entry.Unit.Source : entry.Entry.Source;
         var nested = entry.Body is null ? [] : Descendants(entry.Body)
-            .Where(node => node is IFunction).Select(node => Range(entry.Unit, node)).ToArray();
-        return (range, nested, isFunction);
+            .Where(node => node is IFunction && (!functions.TryGetValue(node, out var callback)
+                || !expandedReadyCallbacks.Contains(callback.Entry.Id)))
+            .Select(node => Range(entry.Unit, node)).ToArray();
+        return (range, nested);
     }
 
     private ScriptUnit? Parse(RazorJavaScriptFragment fragment, bool inline, CancellationToken token,
@@ -923,11 +929,16 @@ public sealed class RazorJavaScript
         };
     }
 
-    internal readonly record struct CallProjection(int? Target, bool Omit);
+    internal readonly record struct CallProjection(int? Target, bool Omit, EntryData? ReadyCallback = null);
 
     internal CallProjection ProjectCall(CallExpression call, EntryData entry, bool omitBrowserDetails)
     {
         var scope = scopes.GetValueOrDefault(call, entry.Scope);
+        if (call is { Optional: false, Callee: Identifier { Name: "$" or "jQuery" } jquery, Arguments: [IFunction] }
+            && entry.Unit.Recovery is null && !scope.HasDynamicBinding && IsJQuery(call, scope)
+            && isolatedClassicScopes.Keys.All(other => !other.Dynamic && !other.DeclaresHere(jquery.Name))
+            && functions.TryGetValue(call.Arguments[0], out var ready))
+            return new(ready.Entry.Id, false, ready);
         var target = ResolveFunctionReference(call.Callee, scope);
         return new(target, omitBrowserDetails && target is null
             && RazorBrowserCalls.IsRoutine(call, scope, isStandaloneFocus: standaloneFocus.Contains(call)));
