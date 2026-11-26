@@ -81,6 +81,49 @@ public sealed class SourceBracketTests
     }
 
     [TestMethod]
+    [DataRow("\n")]
+    [DataRow("\r\n")]
+    public void RazorStatementBlocksPairTheirOwnBraces(string newline)
+    {
+        var source = """
+            @{
+                var literal = "@{ ignored string }";
+                // @{ ignored C# comment }
+                if (Model.Visible)
+                {
+                    <section data-label="@@{ ignored attribute }">
+                        @{
+                            <p>@(Model.Values[0]) literal }</p>
+                        }
+                    </section>
+                }
+                @: line markup }
+                <text>literal brace }</text>
+            }
+            @{}
+            @* @{ ignored Razor comment } *@
+            <p>@@{ ignored escaped transition }</p>
+            @functions { string Format() { return "value"; } }
+            @{
+                var unfinished = "}";
+            """.ReplaceLineEndings(newline);
+        var brackets = new RazorSourceFile(source, Path.GetFullPath("RazorBlocks.cshtml")).Brackets;
+        Assert.IsTrue(AssertPair(source, brackets, "@{" + newline, 1,
+            "}" + newline + "@{}", 0).CanFold);
+        Assert.IsTrue(AssertPair(source, brackets, "            @{" + newline, 13,
+            "            }" + newline + "        </section>", 12).CanFold);
+        Assert.IsTrue(AssertPair(source, brackets, "Model.Visible)" + newline + "    {", 18 + newline.Length,
+            "    }" + newline + "    @:", 4).CanFold);
+        AssertPair(source, brackets, "[0]", 0, "[0]", 2);
+        AssertPair(source, brackets, "@{}", 1, "@{}", 2);
+
+        foreach (var ignored in new[] { "ignored string", "ignored C# comment", "ignored attribute", "ignored Razor comment", "ignored escaped transition" })
+            Assert.IsNull(SourceBracket.MatchAt(brackets, source.IndexOf(ignored, StringComparison.Ordinal) - 2), ignored);
+        Assert.IsNull(SourceBracket.MatchAt(brackets, source.IndexOf("@functions {", StringComparison.Ordinal) + 11));
+        Assert.IsNull(SourceBracket.MatchAt(brackets, source.LastIndexOf("@{", StringComparison.Ordinal) + 1));
+    }
+
+    [TestMethod]
     public void PiecesFromDifferentScriptsAndRecoveryDoNotPair()
     {
         const string source = """
