@@ -14,7 +14,8 @@ public sealed record FlowNode(string Id, NodeKind Kind, string Label, SourceRang
     int? TargetMethod = null, bool IsReachable = true, bool IsCaseTest = false,
     string? TargetFilePath = null, bool RequiresRuntimeDispatch = false, SourceRange? TargetDeclaration = null,
     IReadOnlyList<ImplementationCandidate>? ImplementationCandidates = null,
-    IReadOnlyList<FlowTarget>? CallTargets = null, bool IsDefinitionCandidate = false);
+    IReadOnlyList<FlowTarget>? CallTargets = null, bool IsDefinitionCandidate = false,
+    bool IsIndependentEntry = false);
 
 public sealed record FlowEdge(string From, string To, string? Label = null, bool IsReachable = true);
 

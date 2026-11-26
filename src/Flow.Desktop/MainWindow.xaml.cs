@@ -325,6 +325,7 @@ public partial class MainWindow : Window
         rendered = false;
         pendingNodeCenter = false;
         grayCalculation = null;
+        markCalculation = null;
         appliedGray = null;
         appliedMarks = null;
         editorAnnotations.Clear();

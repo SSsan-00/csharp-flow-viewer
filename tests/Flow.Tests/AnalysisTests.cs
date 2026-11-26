@@ -96,6 +96,29 @@ public sealed class AnalysisTests(TestContext testContext)
     }
 
     [TestMethod]
+    public void MarkingAfterCatchDoesNotPresentTheNormalEntryAsMandatory()
+    {
+        var graph = Diagram(File("""
+            class Demo
+            {
+                void Run()
+                {
+                    try { Work(); }
+                    catch (System.Exception) { Recover(); }
+                    Finish();
+                }
+                void Work() {}
+                void Recover() {}
+                void Finish() {}
+            }
+            """));
+        var finish = Single(graph, "Demo.Finish()");
+        var marks = new NodeAnnotations { Marked = [finish.Id] }.VisibleMarks(graph);
+        Assert.AreEqual(finish.Id, Assert.ContainsSingle(marks));
+        Assert.AreEqual(NodeKind.Exception, Assert.ContainsSingle(graph.Nodes.Where(node => node.IsIndependentEntry)).Kind);
+    }
+
+    [TestMethod]
     public void RuntimeDispatchShowsStaticBodiesAndOffersOnlyMatchingSourceImplementations()
     {
         var directory = Path.GetFullPath("FictionalProject");

@@ -136,7 +136,7 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
                 ControlFlowRegionKind.Finally => "finally · 例外の巻き戻しから",
                 _ => "catch · " + (region.ExceptionType?.ToDisplayString() ?? "例外")
             };
-            var from = Add(new Visible(NodeKind.Exception, label, BlockSource(block)), block.IsReachable);
+            var from = Add(new Visible(NodeKind.Exception, label, BlockSource(block)), block.IsReachable, independentEntry: true);
             var destination = region.Kind == ControlFlowRegionKind.Finally
                 ? RunFinally(region, Add(new Visible(NodeKind.Exception, "保留中の例外の巻き戻しを継続", null), block.IsReachable), context)
                 : GetBlock(new State(block.Ordinal, context));
@@ -894,10 +894,12 @@ internal sealed class DiagramProjector(ControlFlowGraph graph, TransferMarkers m
 
     private SourceRange? BlockSource(BasicBlock block) => OperationSource(block.Operations.FirstOrDefault() ?? block.BranchValue);
 
-    private string Add(Visible visible, bool reachable)
+    private string Add(Visible visible, bool reachable, bool independentEntry = false)
     {
         var id = "n" + nodes.Count;
-        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable, visible.IsCaseTest, visible.TargetFilePath, visible.RequiresRuntimeDispatch, visible.TargetDeclaration, visible.ImplementationCandidates));
+        nodes.Add(new FlowNode(id, visible.Kind, visible.Label, visible.Source, visible.Target, reachable,
+            visible.IsCaseTest, visible.TargetFilePath, visible.RequiresRuntimeDispatch, visible.TargetDeclaration,
+            visible.ImplementationCandidates, IsIndependentEntry: independentEntry));
         return id;
     }
 
