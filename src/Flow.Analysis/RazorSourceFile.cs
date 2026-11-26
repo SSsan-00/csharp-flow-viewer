@@ -118,7 +118,7 @@ public sealed class RazorSourceFile
         }
         entries.AddRange(javaScript.Entries.Where(entry => LocalJavaScriptFiles.PathComparer.Equals(entry.Source.FilePath, filePath))
             .Select(entry => namedAnchorEvents.Contains(entry.Id)
-                ? entry with { Signature = InlineLabel(entry.Id, javaScript.CallSites(entry.Id, token)) }
+                ? entry with { Signature = InlineLabel(entry.Id, javaScript.CallSites(entry.Id, token, omitRoutine: true)) }
                 : entry));
         Entries = entries;
     }
@@ -159,7 +159,7 @@ public sealed class RazorSourceFile
         if (entryId == -1) return BuildOverview(token);
         if (requests.TryGetValue(entryId, out var element)) return BuildRequestFlow(element, token);
         if (!Entries.Any(entry => entry.Id == entryId)) throw new ArgumentOutOfRangeException(nameof(entryId));
-        var flow = ConnectJavaScriptRequests(entryId, javaScript.Analyze(entryId, token));
+        var flow = ConnectJavaScriptRequests(entryId, javaScript.AnalyzeRazor(entryId, token));
         if (javaScript.HasSourceOnlyDefinitions && IsInlineEvent(entryId))
         {
             var candidates = javaScript.CallSites(entryId, token).GroupBy(call => call.Source)
@@ -281,7 +281,7 @@ public sealed class RazorSourceFile
             token.ThrowIfCancellationRequested();
             if (inlineLabels.TryGetValue(entry.Id, out var inline))
             {
-                var calls = javaScript.CallSites(entry.Id, token).ToArray();
+                var calls = javaScript.CallSites(entry.Id, token, omitRoutine: true).ToArray();
                 var destinations = calls.Select(call => call.Target).OfType<FlowTarget>().Distinct().ToArray();
                 var candidate = calls.Length == 1 ? calls[0].SourceOnlyDefinition : null;
                 int? link = anchorRequestByOnclick.TryGetValue(entry.Id, out var anchor) ? anchor : null;

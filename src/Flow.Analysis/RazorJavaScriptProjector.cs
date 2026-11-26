@@ -10,7 +10,8 @@ namespace Flow.Analysis;
 /// 呼び出し位置で実行されたものとして展開せず、別エントリーへの移動先にする。
 /// </summary>
 internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaScript.EntryData entry,
-    CancellationToken token, Func<CallExpression, int?>? resolveGeneratedCall = null)
+    CancellationToken token, bool simplifyRazor,
+    Func<CallExpression, RazorJavaScript.CallProjection>? describeGeneratedCall = null)
 {
     private readonly List<FlowNode> nodes = [];
     private readonly List<FlowEdge> edges = [];
@@ -93,8 +94,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     {
                         var variable = declaration.Declarations[i];
                         if (variable.Init is null or IFunction) continue;
-                        var set = Add(NodeKind.Transfer, Text(variable), variable);
-                        Connect(set, after);
+                        var set = simplifyRazor && variable.Id is Identifier ? after : AddTransfer(variable, after);
                         after = Expression(variable.Init, set);
                     }
                     return after;
@@ -229,20 +229,21 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     return Condition(ternary.Test, Expression(ternary.Consequent, next), Expression(ternary.Alternate, next));
                 case CallExpression call:
                     var request = owner.Request(call);
-                    var target = resolveGeneratedCall is null ? owner.ResolveCall(call, entry) : resolveGeneratedCall(call);
-                    var label = request is null ? Text(call) : $"HTTP {request.HttpMethod} {request.Url}" +
-                        (request.IsAsync ? "（非同期送信）" : "（同期送信）") + (request.IsResolved ? "" : " · 未解決");
-                    var callNode = Add(request is null ? NodeKind.Call : NodeKind.Transfer, label, call, target);
-                    Connect(callNode, next);
-                    if (request is { IsResolved: false }) MarkPartial("XMLHttpRequestの送信内容に未解決の値があります。");
-                    if (call.Callee is Identifier { Name: "eval" }) MarkPartial("evalで生成される処理は解析しません。");
-                    // コールバックの関数本体は引数評価に含めない。
-                    var callFirst = callNode;
+                    var callInfo = describeGeneratedCall is null ? owner.ProjectCall(call, entry, simplifyRazor) : describeGeneratedCall(call);
+                    var callFirst = next;
+                    if (!callInfo.Omit || request is not null)
+                    {
+                        var label = request is null ? Text(call) : $"HTTP {request.HttpMethod} {request.Url}" +
+                            (request.IsAsync ? "（非同期送信）" : "（同期送信）") + (request.IsResolved ? "" : " · 未解決");
+                        callFirst = Add(request is null ? NodeKind.Call : NodeKind.Transfer, label, call, callInfo.Target);
+                        Connect(callFirst, next);
+                        if (request is { IsResolved: false }) MarkPartial("XMLHttpRequestの送信内容に未解決の値があります。");
+                        if (call.Callee is Identifier { Name: "eval" }) MarkPartial("evalで生成される処理は解析しません。");
+                    }
                     for (var i = call.Arguments.Count - 1; i >= 0; --i) callFirst = Expression(call.Arguments[i], callFirst);
                     return Expression(call.Callee, callFirst);
                 case AssignmentExpression assignment:
-                    var assignmentNode = Add(NodeKind.Transfer, Text(assignment), assignment);
-                    Connect(assignmentNode, next);
+                    var assignmentNode = OmitWrite(assignment.Left) ? next : AddTransfer(assignment, next);
                     var right = Expression(assignment.Right, assignmentNode);
                     if (assignment.Left is Expression left)
                     {
@@ -268,8 +269,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     var memberNext = member.Computed ? Expression(member.Property, next) : next;
                     return Expression(member.Object, memberNext);
                 case UpdateExpression update:
-                    var updateNode = Add(NodeKind.Transfer, Text(update), update);
-                    Connect(updateNode, next);
+                    var updateNode = OmitWrite(update.Argument) ? next : AddTransfer(update, next);
                     return Expression(update.Argument, updateNode);
                 case NewExpression creation:
                     var createNode = Add(NodeKind.Call, Text(creation), creation);
@@ -308,6 +308,17 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
         var unknown = Add(NodeKind.Exception, Text(node) + " · 詳細未解決", node);
         Connect(unknown, next, "継続候補");
         return unknown;
+    }
+
+    private bool OmitWrite(Node target) => simplifyRazor && (target is Identifier
+        || target is MemberExpression member && RazorJavaScript.PropertyName(member) is { } name
+        && !name.StartsWith("on", StringComparison.Ordinal));
+
+    private string AddTransfer(Node node, string next)
+    {
+        var id = Add(NodeKind.Transfer, Text(node), node);
+        Connect(id, next);
+        return id;
     }
 
     private string Add(NodeKind kind, string label, Node? node, int? target = null, bool ignoreLimit = false,
