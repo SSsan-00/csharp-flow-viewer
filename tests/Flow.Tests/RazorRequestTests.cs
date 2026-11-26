@@ -28,30 +28,44 @@ public sealed class RazorRequestTests
             @model OrderModel
             <select onchange="save()"></select>
             <script>
-                function save() {
+                function header() { return 'application/json'; }
+                function payload() { return 'act=save'; }
+                function handleResponse() {
+                    if (this.readyState === 4) showResult(this.responseText);
+                }
+                function save(other) {
                     var xhr = new XMLHttpRequest();
-                    xhr.open("POST", "?handler=Save", true);
-                    xhr.onreadystatechange = function () {
-                        if (xhr.readyState === 4) showResult(xhr.responseText);
-                    };
-                    xhr.send("act=save");
+                    var transport = xhr;
+                    transport.open("POST", "?handler=Save", true);
+                    transport.setRequestHeader('Content-Type', header());
+                    transport.onreadystatechange = handleResponse;
+                    transport.addEventListener('readystatechange', handleResponse);
+                    transport.send(payload());
+                    other.open();
+                    other.send();
                     afterSend();
                 }
             </script>
             """);
         var entry = Assert.ContainsSingle(page.Entries.Where(item => item.Name == "save"));
         var flow = page.Analyze(entry.Id);
-        var request = Assert.ContainsSingle(flow.Nodes.Where(node => node.TargetFilePath == ModelPath));
+        var request = Assert.ContainsSingle(page.Analyze(-1).Nodes.Where(node => node.TargetFilePath == ModelPath));
         Assert.AreEqual(100, request.TargetMethod);
         StringAssert.Contains(request.Label, "POST");
         StringAssert.Contains(request.Label, "handler=Save");
         Assert.IsNotNull(request.Source);
-        Assert.AreEqual("xhr.send(\"act=save\")", page.Text.Substring(request.Source.Offset, request.Source.Length));
+        Assert.AreEqual("transport.send(payload())", page.Text.Substring(request.Source.Offset, request.Source.Length));
+        Assert.DoesNotContain(node => node.Label.StartsWith("transport.", StringComparison.Ordinal)
+            || node.Label.StartsWith("HTTP POST", StringComparison.Ordinal), flow.Nodes);
+        foreach (var label in new[] { "header()", "payload()", "other.open()", "other.send()", "afterSend()" })
+            Assert.Contains(node => node.Kind == NodeKind.Call && node.Label == label, flow.Nodes);
         var response = Assert.ContainsSingle(flow.Nodes.Where(node => node.Label.StartsWith("応答イベント候補:", StringComparison.Ordinal)));
-        Assert.IsTrue(response.TargetMethod < -1);
-        Assert.Contains(edge => edge.From == request.Id && edge.To == response.Id
+        var callback = Assert.ContainsSingle(page.Entries.Where(item => item.Name == "handleResponse"));
+        Assert.AreEqual(callback.Id, response.TargetMethod);
+        var start = Assert.ContainsSingle(flow.Nodes.Where(node => node.Kind == NodeKind.Start));
+        Assert.Contains(edge => edge.From == start.Id && edge.To == response.Id
             && edge.Label == "非同期の応答イベント候補", flow.Edges);
-        Assert.Contains(node => node.Label.Contains("afterSend()", StringComparison.Ordinal), flow.Nodes);
+        Assert.Contains(node => node.Kind == NodeKind.Condition && node.Label == "this.readyState === 4", page.Analyze(callback.Id).Nodes);
     }
 
     [TestMethod]

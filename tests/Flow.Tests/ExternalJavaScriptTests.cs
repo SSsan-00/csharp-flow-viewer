@@ -11,6 +11,46 @@ namespace Flow.Tests;
 public sealed class ExternalJavaScriptTests
 {
     [TestMethod]
+    public async Task DirectAndRazorLinkedScriptsOmitTheSameBookkeeping()
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Generated.cshtml", """
+            <script src="/js/actions.js"></script>
+            <button onclick="run()"></button>
+            """);
+        var scriptPath = tree.Add("wwwroot/js/actions.js", """
+            function done() {}
+            function run() {
+                let i = 0;
+                i++;
+                --i;
+                (i += 1, i--);
+                return done();
+            }
+            """);
+        using var session = tree.Open(pagePath, scriptPath);
+        var page = await ReadPage(session);
+        var jump = FindCall(page.Analyze(-1), "onclick → run()");
+        var file = session.Files.Single(item => item.Path == scriptPath);
+        var direct = await session.ReadJavaScriptAsync(file, CancellationToken.None);
+        var linked = await session.ReadJavaScriptAsync(file, CancellationToken.None, page);
+        Assert.AreNotSame(direct.NavigationContext, linked.NavigationContext);
+        Assert.AreEqual(scriptPath, jump.TargetFilePath);
+        foreach (var script in new[] { linked, direct })
+        {
+            var run = script.Entries.Single(entry => entry.Name == "run");
+            Assert.AreEqual(jump.TargetMethod, run.Id);
+            Assert.AreEqual(2, run.NavigationSource.Line);
+            var graph = script.Analyze(run.Id);
+            var transfer = Assert.ContainsSingle(graph.Nodes.Where(node => node.Kind == NodeKind.Transfer));
+            Assert.AreEqual("return done();", transfer.Label);
+            var call = FindCall(graph, "done()");
+            Assert.AreEqual(script.Entries.Single(entry => entry.Name == "done").Id, call.TargetMethod);
+            Assert.AreEqual(scriptPath, call.TargetFilePath);
+        }
+    }
+
+    [TestMethod]
     public async Task GeneratedRazorCallsFollowDefinitionsThroughTheProjectSession()
     {
         const string source = """

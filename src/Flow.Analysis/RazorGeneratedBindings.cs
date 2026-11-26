@@ -6,10 +6,17 @@ namespace Flow.Analysis;
 internal sealed class RazorGeneratedBindings
 {
     private readonly HashSet<string> blocked = new(StringComparer.Ordinal);
+    private readonly HashSet<string> changedReceivers = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, VariableDeclarator> staticInitializers = new(StringComparer.Ordinal);
 
     public static RazorGeneratedBindings? Changes(Node root, CancellationToken token)
     {
         var result = new RazorGeneratedBindings();
+        if (root is Acornima.Ast.Program program)
+            foreach (var declaration in program.Body.OfType<VariableDeclaration>())
+                foreach (var variable in declaration.Declarations)
+                    if (variable.Id is Identifier name && variable.Init is not null)
+                        result.staticInitializers.TryAdd(name.Name, variable);
         foreach (var node in RazorJavaScript.Descendants(root))
         {
             token.ThrowIfCancellationRequested();
@@ -28,23 +35,45 @@ internal sealed class RazorGeneratedBindings
                 _ => null
             };
             if (write is null) continue;
-            if (write is MemberExpression member)
+            foreach (var target in JavaScriptWriteTargets.Leaves(write))
             {
-                if (member.Object is Identifier { Name: "window" or "globalThis" or "self" })
+                if (target is Identifier identifier)
                 {
-                    if (RazorJavaScript.PropertyName(member) is not { } name) return null;
-                    result.blocked.Add(name);
-                }
-                else if (member.Object is Identifier receiver) result.blocked.Add(receiver.Name);
-            }
-            else
-                foreach (var identifier in RazorJavaScript.Descendants(write).OfType<Identifier>())
                     result.blocked.Add(identifier.Name);
+                    result.changedReceivers.Add(identifier.Name);
+                    if (result.staticInitializers.TryGetValue(identifier.Name, out var declaration) && !ReferenceEquals(node, declaration))
+                        result.staticInitializers.Remove(identifier.Name);
+                }
+                else if (target is MemberExpression member)
+                {
+                    if (member.Object is Identifier { Name: "window" or "globalThis" or "self" })
+                    {
+                        if (RazorJavaScript.PropertyName(member) is not { } name) return null;
+                        result.blocked.Add(name);
+                        result.changedReceivers.Add(name);
+                        result.staticInitializers.Remove(name);
+                    }
+                    else if (member.Object is Identifier receiver)
+                    {
+                        result.blocked.Add(receiver.Name);
+                        if (RazorBrowserCalls.CouldOverrideRoutineMethod(member))
+                        {
+                            result.changedReceivers.Add(receiver.Name);
+                            result.staticInitializers.Remove(receiver.Name);
+                        }
+                    }
+                }
+            }
         }
         return result;
     }
 
     public bool IsUnchanged(string name) => !blocked.Contains(name);
+
+    public bool IsReceiverUnchanged(string name) => !changedReceivers.Contains(name);
+
+    public Expression? InitializerAt(Identifier name) => staticInitializers.TryGetValue(name.Name, out var declaration)
+        && declaration.End <= name.Start ? declaration.Init : null;
 
     public bool Allows(Expression callee) => callee switch
     {

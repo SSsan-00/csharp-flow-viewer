@@ -99,17 +99,16 @@ public sealed class RazorRenderingFlowTests
         var loop = Condition(graph, "index < Model.Total");
         var skip = Condition(graph, "Model.Skip(index)");
         var stop = Condition(graph, "Model.Stop(index)");
-        var repeat = graph.Nodes.Single(node => node.Label == "更新して次の反復へ");
         var end = Next(graph, loop, "False");
         Assert.AreEqual(NodeKind.End, end.Kind);
         Assert.AreEqual(skip, Next(graph, Next(graph, loop, "True")));
         Assert.AreEqual(stop, Next(graph, Next(graph, skip, "False")));
-        Assert.AreEqual(repeat, Next(graph, Next(graph, Next(graph, skip, "True"))));
+        Assert.AreEqual(loop, Next(graph, Next(graph, Next(graph, skip, "True"))));
         Assert.AreEqual(end, Next(graph, Next(graph, Next(graph, stop, "True"))));
         var drawn = Next(graph, Next(graph, stop, "False"));
         StringAssert.Contains(drawn.Label, "<p>");
-        Assert.AreEqual(repeat, Next(graph, drawn));
-        Assert.AreEqual(loop, Next(graph, repeat));
+        Assert.AreEqual(loop, Next(graph, drawn));
+        Assert.DoesNotContain(node => node.Label == "更新して次の反復へ", graph.Nodes);
     }
 
     [TestMethod]
