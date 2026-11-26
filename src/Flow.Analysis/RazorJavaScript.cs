@@ -10,6 +10,7 @@ public sealed record RazorJavaScriptFragment(string Text, SourceRange Source, bo
     bool IsModule = false)
 {
     internal IReadOnlyDictionary<int, SourceRange>? RenderingSlots { get; init; }
+    internal IReadOnlyList<(int Slot, SourceRange Source, string Text)>? GeneratedStatements { get; init; }
     internal bool IsolatedClassic { get; init; }
     internal bool VisibleToInlineEvents { get; init; }
 }
@@ -168,6 +169,13 @@ public sealed class RazorJavaScript
             var entry = AddEntry(name, unit.Root, unit, scope);
             scope.OwnerEntryId = entry.Entry.Id;
             Index(unit.Root, unit, scope, token, 0, conditional: false);
+            if (fragment.GeneratedStatements is { } statements)
+                foreach (var (slot, source, text) in statements)
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (generatedStatementScopes.TryGetValue(slot, out var insertion) && insertion is not null)
+                        SaveGeneratedBrackets(source, text, data[insertion.OwnerEntryId].Body is not JsProgram, fragment.IsModule);
+                }
             if (!fragment.IsModule)
             {
                 // Only a classic script's top-level var (not let/const) creates a window property.
@@ -217,6 +225,18 @@ public sealed class RazorJavaScript
                 scope.RememberExplicitFocusReceiver(name);
             }
         }
+    }
+
+    private void SaveGeneratedBrackets(SourceRange source, string text, bool insideFunction, bool isModule)
+    {
+        var (parser, delimiters) = BracketParser(insideFunction);
+        try
+        {
+            if (isModule && !insideFunction) parser.ParseModule(text);
+            else parser.ParseScript(text);
+        }
+        catch (Exception failure) when (failure is ParseErrorException or InsufficientExecutionStackException) { return; }
+        SaveBrackets(delimiters, source, pageText.AsSpan(source.Offset, source.Length), null);
     }
 
     private static string? ModuleName(Expression expression) => expression switch
@@ -411,8 +431,7 @@ public sealed class RazorJavaScript
         }
         try
         {
-            var delimiters = new List<(int Offset, char Value, bool CanFold)>();
-            var parser = new Parser(new ParserOptions { AllowReturnOutsideFunction = inline, OnToken = TrackBracket });
+            var (parser, delimiters) = BracketParser(inline);
             var text = fragment.Text;
             var renderingSlots = fragment.RenderingSlots;
             var canOfferLocalDefinition = !fragment.IsModule && !fragment.IsolatedClassic
@@ -470,15 +489,6 @@ public sealed class RazorJavaScript
             return new ScriptUnit(text, original, fragment.Source, root, fragment.ContainsRazorCode,
                 renderingSlots, inlineText, recovery);
 
-            void TrackBracket(in Token current)
-            {
-                if (current.Kind != TokenKind.Punctuator || current.Value is not string value) return;
-                if (value == "${")
-                    delimiters.Add((current.Start + 1, '{', false));
-                else if (value is "(" or ")" or "[" or "]" or "{" or "}")
-                    delimiters.Add((current.Start, value[0], value == "{"));
-            }
-
             void IndexDefinitionCandidates(JsProgram candidate, IReadOnlyDictionary<int, SourceRange> candidateSlots,
                 IReadOnlySet<int> independent, IReadOnlySet<int>? generatedValues = null)
             {
@@ -507,8 +517,23 @@ public sealed class RazorJavaScript
         }
     }
 
+    private static (Parser Parser, List<(int Offset, char Value, bool CanFold)> Delimiters) BracketParser(bool allowReturn)
+    {
+        var delimiters = new List<(int Offset, char Value, bool CanFold)>();
+        return (new Parser(new ParserOptions { AllowReturnOutsideFunction = allowReturn, OnToken = TrackBracket }), delimiters);
+
+        void TrackBracket(in Token current)
+        {
+            if (current.Kind != TokenKind.Punctuator || current.Value is not string value) return;
+            if (value == "${")
+                delimiters.Add((current.Start + 1, '{', false));
+            else if (value is "(" or ")" or "[" or "]" or "{" or "}")
+                delimiters.Add((current.Start, value[0], value == "{"));
+        }
+    }
+
     private void SaveBrackets(IEnumerable<(int Offset, char Value, bool CanFold)> delimiters,
-        SourceRange range, string original, InlineScriptText? inlineText)
+        SourceRange range, ReadOnlySpan<char> original, InlineScriptText? inlineText)
     {
         var path = range.FilePath ?? pagePath;
         if (!sourceBrackets.TryGetValue(path, out var result)) sourceBrackets[path] = result = [];
