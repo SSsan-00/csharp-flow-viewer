@@ -32,6 +32,7 @@ public sealed class RazorJavaScript
     private readonly string pageText;
     private readonly string pagePath;
     private readonly List<MethodEntry> entries = [];
+    private readonly HashSet<int> generatedStatementStarts = [];
     private readonly List<string> notices = [];
     private readonly List<RazorJavaScriptBinding> bindings = [];
     private readonly List<RazorJavaScriptRequest> requests = [];
@@ -154,6 +155,8 @@ public sealed class RazorJavaScript
                 return;
             }
 
+            if (!external && unit.RenderingSlots is { } slots)
+                foreach (var slot in slots.Values) generatedStatementStarts.Add(slot.Offset);
             if (external) externalUnits.Add(path!, unit);
             if (external && fragment.IsModule) modules.Add(path!, (unit, scope));
             if (fragment.IsolatedClassic && !fragment.IsModule)
@@ -302,6 +305,19 @@ public sealed class RazorJavaScript
         if (!data.TryGetValue(entryId, out var entry))
             throw new ArgumentOutOfRangeException(nameof(entryId));
         return new RazorJavaScriptProjector(this, entry, token).Build();
+    }
+
+    internal FlowDiagram? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, CancellationToken token)
+    {
+        if (!generatedStatementStarts.Contains(controlStart)) return null;
+        JsProgram root;
+        try { root = new Parser(new ParserOptions { AllowReturnOutsideFunction = true }).ParseScript(text); }
+        catch (Exception failure) when (failure is ParseErrorException or InsufficientExecutionStackException) { return null; }
+        // A generated fragment is not an independently indexed script: never export its bindings or guess a target.
+        var unit = new ScriptUnit(text, text, source, root, false);
+        var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
+        var graph = new RazorJavaScriptProjector(this, entry, token).Build();
+        return graph.Nodes.Any(node => node.Kind == NodeKind.Condition) ? graph : null;
     }
 
     internal (SourceRange Range, IReadOnlyList<SourceRange> NestedFunctions, bool IsFunction)? ScriptRenderingScope(int entryId)
