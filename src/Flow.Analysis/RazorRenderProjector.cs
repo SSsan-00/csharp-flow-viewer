@@ -135,8 +135,8 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             var check = condition?.Span ?? keyword;
             var id = NodeAt("loop", NodeKind.Condition, kind == "foreach" ? $"次の要素: {condition}"
                 : $"描画条件: {kind} ({condition?.ToString() ?? "条件省略"})", check);
-            var repeatId = NodeAt("repeat", NodeKind.Junction, kind == "for" ? "更新して次の反復へ" : "次の反復へ", keyword);
-            edges.Add(new FlowEdge(repeatId, id));
+            var repeatId = kind == "for" ? id : NodeAt("repeat", NodeKind.Junction, "次の反復へ", keyword);
+            if (repeatId != id) edges.Add(new FlowEdge(repeatId, id));
             if (condition is not null)
                 edges.Add(new FlowEdge(id, next, kind == "foreach" ? "要素なし" : "False"));
             var entry = Branch(id, "body", kind == "foreach" ? "要素あり" : "True", "ループ本体を描画",
@@ -245,15 +245,22 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         var output = document.Html.AsSpan(offset, length);
         var script = scripts.Any(script => script.Source.Offset <= offset && end <= script.Source.Offset + script.Source.Length);
         source = document.Range(offset, length);
-        var prefix = dynamic ? document.SourcePreview(offset, Math.Min(180, length))
-            : output[..Math.Min(180, length)].ToString();
-        var preview = Regex.Replace(prefix, @"\s+", " ").Trim();
-        if (preview.Length > 90 || length > 180) preview = preview[..Math.Min(89, preview.Length)] + "…";
-        label += (script ? " · 生成JS" : "") + (dynamic ? "（Razor式を含む原文）" : "") + ": " + preview;
+        if (script) label += " · 生成JS";
+        string? analyzedPreview = null;
         if (script && !dynamic && controlStart is int start && length <= MaxGeneratedScriptLength
-            && outputNodes < MaxOutputNodes && javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, token) is { } graph
-            && graph.Nodes.Count <= MaxOutputNodes - outputNodes)
-            AddClientAlternative(id, graph);
+            && outputNodes < MaxOutputNodes && javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, token) is { } branch)
+        {
+            analyzedPreview = branch.Preview;
+            if (branch.ClientFlow is { } graph && graph.Nodes.Count <= MaxOutputNodes - outputNodes)
+                AddClientAlternative(id, graph);
+        }
+        if (analyzedPreview == "") return true;
+        var prefix = analyzedPreview ?? (dynamic ? document.SourcePreview(offset, Math.Min(180, length))
+            : output[..Math.Min(180, length)].ToString());
+        var preview = Regex.Replace(prefix, @"\s+", " ").Trim();
+        if (preview.Length > 90 || analyzedPreview is null && length > 180)
+            preview = preview[..Math.Min(89, preview.Length)] + "…";
+        label += (dynamic ? "（Razor式を含む原文）" : "") + ": " + preview;
         return true;
     }
 

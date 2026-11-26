@@ -274,7 +274,7 @@ public sealed class RazorScriptRenderingTests
         StringAssert.Contains(Slice(source, no.Source), "disable();");
         Assert.AreEqual(Next(graph, yes), Next(graph, no));
         Assert.AreEqual(loop, Next(graph, Next(graph, yes)));
-        Assert.AreEqual(loop, Next(graph, Next(graph, Next(graph, loop, "True"))));
+        Assert.AreEqual(loop, Next(graph, Next(graph, loop, "True")));
         Assert.AreEqual(NodeKind.End, Next(graph, loop, "False").Kind);
 
         Assert.IsTrue(Condition(graph, "window.confirmed").IsReachable);

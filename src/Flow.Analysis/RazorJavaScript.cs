@@ -304,14 +304,16 @@ public sealed class RazorJavaScript
 
     internal FlowDiagram AnalyzeRazor(int entryId, CancellationToken token) => Analyze(entryId, true, token);
 
-    private FlowDiagram Analyze(int entryId, bool simplifyRazor, CancellationToken token)
+    private FlowDiagram Analyze(int entryId, bool omitBrowserDetails, CancellationToken token)
     {
         if (!data.TryGetValue(entryId, out var entry))
             throw new ArgumentOutOfRangeException(nameof(entryId));
-        return new RazorJavaScriptProjector(this, entry, token, simplifyRazor).Build();
+        return new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails).Build();
     }
 
-    internal FlowDiagram? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, CancellationToken token)
+    internal sealed record GeneratedBranch(FlowDiagram? ClientFlow, string? Preview);
+
+    internal GeneratedBranch? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, CancellationToken token)
     {
         if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)) return null;
         JsProgram root;
@@ -321,15 +323,49 @@ public sealed class RazorJavaScript
         var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
         // Use the actual insertion scope without exporting declarations or modifying that scope.
         var blocked = scope is { HasDynamicBinding: false } ? RazorGeneratedBindings.Changes(root, token) : null;
-        var graph = new RazorJavaScriptProjector(this, entry, token, simplifyRazor: true, Describe).Build();
-        return graph.Nodes.Any(node => node.Kind == NodeKind.Condition) ? graph : null;
+        var graph = new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails: true, Describe, IsHiddenHandler).Build();
+        var conditions = graph.Nodes.Any(node => node.Kind == NodeKind.Condition);
+        return new(conditions ? graph : null, Preview());
+
+        string? Preview()
+        {
+            if (graph.IsPartial || root.Body.Any(DeclaresFunction)) return null;
+            var relevant = graph.Nodes.Where(node => node.Kind is not (NodeKind.Start or NodeKind.End or NodeKind.Junction)
+                    && node.Source is not null)
+                .OrderBy(node => node.Source!.Offset)
+                .Select(node => node.Kind == NodeKind.Condition ? $"条件: {node.Label}" : node.Label)
+                .Distinct(StringComparer.Ordinal).Take(4).ToArray();
+            if (relevant.Length > 0)
+                return string.Join(" · ", relevant.Take(3)) + (relevant.Length > 3 ? "…" : "");
+            return root.Body.All(IsBookkeeping) ? "" : null;
+        }
+
+        static bool DeclaresFunction(Statement node) => node is FunctionDeclaration
+            || node is VariableDeclaration declaration && declaration.Declarations.Any(variable => variable.Init is IFunction)
+            || node is ExpressionStatement { Expression: AssignmentExpression { Right: IFunction } };
+
+        bool IsBookkeeping(Node node) => node switch
+        {
+            EmptyStatement or UpdateExpression => true,
+            BlockStatement block => block.Body.All(IsBookkeeping),
+            VariableDeclaration declaration => declaration.Declarations.All(variable => variable.Init is not IFunction),
+            ExpressionStatement expression => IsBookkeeping(expression.Expression),
+            SequenceExpression sequence => sequence.Expressions.All(IsBookkeeping),
+            CallExpression call => Describe(call).Omit,
+            AssignmentExpression assignment => assignment.Right is not IFunction &&
+                (assignment.Right is not AssignmentExpression nested || IsBookkeeping(nested)),
+            _ => false
+        };
 
         CallProjection Describe(CallExpression call)
         {
             if (scope is null || blocked is null) return default;
             var target = Resolve(call.Callee, scope, blocked);
-            return new(target, target is null && RazorDomCalls.IsRoutine(call, scope, blocked));
+            return new(target, target is null && RazorBrowserCalls.IsRoutine(call, scope, blocked));
         }
+
+        bool IsHiddenHandler(MemberExpression member) => scope is not null && blocked is not null
+            && RazorBrowserCalls.IsReadyStateHandler(member, scope, blocked);
 
         int? Resolve(Expression callee, Scope context, RazorGeneratedBindings bindings)
         {
@@ -509,6 +545,13 @@ public sealed class RazorJavaScript
                     or ForInStatement or ForOfStatement or SwitchCase or TryStatement,
                 canTrackGeneratedScope && node is not (WithStatement or CatchClause));
 
+        if (node is AssignmentExpression { Left: MemberExpression changed } && RazorBrowserCalls.CouldOverrideRoutineMethod(changed))
+        {
+            if (changed.Object is Identifier receiver)
+                (scope.DeclarationScope(receiver.Name) ?? globals).BlockDomProof(receiver.Name);
+            else if (IsDocument(changed.Object, scope)) globals.BlockDomProof("document");
+        }
+
         if (node is VariableDeclarator { Id: Identifier variable } declarator)
         {
             scope.Declare(variable.Name, declarator.Init is { } initial && functions.TryGetValue(initial, out var initializerFunction)
@@ -523,16 +566,29 @@ public sealed class RazorJavaScript
             if (!conditional && declarator.Init is { } value)
             {
                 if (Selector(value, scope) is { } selector) scope.Selectors.TryAdd(variable.Name, selector);
-                if (RazorDomCalls.IsElement(value, scope)) scope.RememberDomElement(variable.Name);
+                if (RazorBrowserCalls.IsElement(value, scope)) scope.RememberDomElement(variable.Name);
                 if (IsJQuery(value, scope)) scope.JQueryVariables.Add(variable.Name);
                 if (IsXhrConstructor(value, scope, out var legacy)) scope.Xhrs.TryAdd(variable.Name, new XhrState(legacy));
+                else if (value is Identifier alias && scope.FindXhr(alias.Name) is { } client) scope.Xhrs.TryAdd(variable.Name, client);
             }
         }
         else if (node is VariableDeclarator { Id: var pattern })
         {
-            foreach (var identifier in Descendants(pattern).OfType<Identifier>())
+            foreach (var identifier in JavaScriptWriteTargets.Leaves(pattern).OfType<Identifier>())
                 scope.Declare(identifier.Name, null);
         }
+        else if (node is AssignmentExpression { Left: ArrayPattern or ObjectPattern } destructuring)
+        {
+            foreach (var target in JavaScriptWriteTargets.Leaves(destructuring.Left))
+            {
+                if (target is Identifier id) scope.Block(id.Name);
+                else if (target is MemberExpression { Object: Identifier { Name: "window" } } member
+                    && !scope.IsDeclared("window") && PropertyName(member) is { } property)
+                    (isolatedClassicScopes.ContainsKey(scope) ? scope : globals).Block(property);
+            }
+        }
+        else if (node is UpdateExpression { Argument: Identifier counter })
+            scope.Block(counter.Name);
         else if (node is ClassDeclaration { Id: { } declaredClass })
             scope.Declare(declaredClass.Name, null);
         else if (node is AssignmentExpression { Left: Identifier assigned } assignment)
@@ -720,7 +776,7 @@ public sealed class RazorJavaScript
         }
     }
 
-    private static bool IsXhrConstructor(Expression node, Scope scope, out bool legacy)
+    internal static bool IsXhrConstructor(Expression node, Scope scope, out bool legacy)
     {
         legacy = false;
         if (node is not NewExpression { Callee: Identifier identifier } creation || scope.IsDeclared(identifier.Name)) return false;
@@ -730,14 +786,17 @@ public sealed class RazorJavaScript
         return legacy;
     }
 
-    private static string? Selector(Expression expression, Scope scope)
+    private static string? Selector(Expression expression, Scope scope, int depth = 0)
     {
+        if (depth >= 16) return null;
         if (expression is Identifier identifier)
             return scope.FindXhr(identifier.Name) is not null ? "XMLHttpRequest: " + identifier.Name : scope.FindSelector(identifier.Name);
         if (expression is CallExpression call)
         {
             if (call.Callee is Identifier { Name: "$" or "jQuery" } jquery && !scope.IsDeclared(jquery.Name) && call.Arguments.Count > 0)
                 return StringValue(call.Arguments[0]);
+            if (JQueryChainReceiver(call) is { } jqueryReceiver)
+                return Selector(jqueryReceiver, scope, depth + 1);
             if (call.Callee is MemberExpression member && IsDocument(member.Object, scope)
                 && call.Arguments.Count > 0 && StringValue(call.Arguments[0]) is { } name)
             {
@@ -757,18 +816,43 @@ public sealed class RazorJavaScript
         || expression is MemberExpression { Object: Identifier { Name: "window" } } member
             && !scope.IsDeclared("window") && PropertyName(member) == "document";
 
-    private static bool IsJQuery(Expression expression, Scope scope) =>
-        expression is CallExpression { Callee: Identifier { Name: "$" or "jQuery" } jquery } && !scope.IsDeclared(jquery.Name)
-        || expression is Identifier identifier && scope.FindJQuery(identifier.Name);
+    internal static bool IsJQuery(Expression expression, Scope scope, RazorGeneratedBindings? generated = null, int depth = 0)
+    {
+        if (depth >= 16) return false;
+        if (expression is Identifier id)
+        {
+            if (generated?.InitializerAt(id) is { } initializer)
+                return IsJQuery(initializer, scope, generated, depth + 1);
+            return generated?.IsReceiverUnchanged(id.Name) != false && scope.FindJQuery(id.Name);
+        }
+        if (expression is not CallExpression call) return false;
+        if (call.Callee is Identifier { Name: "$" or "jQuery" } jquery)
+            return generated?.IsUnchanged(jquery.Name) != false && !scope.IsDeclared(jquery.Name);
+        return JQueryChainReceiver(call) is { } receiver && IsJQuery(receiver, scope, generated, depth + 1);
+    }
+
+    private static Expression? JQueryChainReceiver(CallExpression call)
+    {
+        if (call.Callee is not MemberExpression member) return null;
+        return PropertyName(member) switch
+        {
+            "off" or "removeAttr" or "on" or "bind" or "delegate" or "live" => member.Object,
+            "attr" when call.Arguments.Count >= 2 || call.Arguments is [ObjectExpression] => member.Object,
+            _ => null
+        };
+    }
 
     internal readonly record struct CallProjection(int? Target, bool Omit);
 
-    internal CallProjection ProjectCall(CallExpression call, EntryData entry, bool simplifyRazor)
+    internal CallProjection ProjectCall(CallExpression call, EntryData entry, bool omitBrowserDetails)
     {
         var scope = scopes.GetValueOrDefault(call, entry.Scope);
         var target = ResolveFunctionReference(call.Callee, scope);
-        return new(target, simplifyRazor && target is null && RazorDomCalls.IsRoutine(call, scope));
+        return new(target, omitBrowserDetails && target is null && RazorBrowserCalls.IsRoutine(call, scope));
     }
+
+    internal bool IsHiddenXhrHandler(MemberExpression member, EntryData entry) =>
+        RazorBrowserCalls.IsReadyStateHandler(member, scopes.GetValueOrDefault(member, entry.Scope));
 
     private int? ResolveFunctionReference(Expression reference, Scope scope)
     {
@@ -882,10 +966,10 @@ public sealed class RazorJavaScript
             unit.Source.FilePath ?? pagePath);
     }
 
-    internal static string Slice(ScriptUnit unit, Node node)
+    internal static string Slice(ScriptUnit unit, Node node, Node? last = null)
     {
         var start = EncodedOffset(unit, node.Start);
-        var end = Math.Clamp(MappedEnd(unit, node), start, unit.OriginalText.Length);
+        var end = Math.Clamp(MappedEnd(unit, last ?? node), start, unit.OriginalText.Length);
         var value = unit.OriginalText[start..end].Trim();
         return value.Length > 140 ? value[..139] + "…" : value;
     }
@@ -958,6 +1042,7 @@ public sealed class RazorJavaScript
     {
         private readonly Dictionary<string, List<int?>> names = new(StringComparer.Ordinal);
         private HashSet<string>? domElements;
+        private HashSet<string>? domOverrides;
         public Scope? Parent { get; } = parent;
         public bool InlineEvent { get; init; }
         public bool IsInInlineEvent => InlineEvent || Parent?.IsInInlineEvent == true;
@@ -1006,9 +1091,14 @@ public sealed class RazorJavaScript
         public Scope? DeclarationScope(string name) => names.ContainsKey(name) ? this : Parent?.DeclarationScope(name);
         public bool IsDeclared(string name) => names.ContainsKey(name) || Parent?.IsDeclared(name) == true;
         public void RememberDomElement(string name) => (domElements ??= new(StringComparer.Ordinal)).Add(name);
+        public void BlockDomProof(string name) => (domOverrides ??= new(StringComparer.Ordinal)).Add(name);
+        public bool HasDomOverride(string name) => domOverrides?.Contains(name) == true || Parent?.HasDomOverride(name) == true;
         public bool IsDomElement(string name) => names.TryGetValue(name, out var declared)
-            ? declared.Count == 1 && domElements?.Contains(name) == true : Parent?.IsDomElement(name) == true;
-        public bool FindJQuery(string name) => names.ContainsKey(name) ? JQueryVariables.Contains(name) : Parent?.FindJQuery(name) == true;
+            ? declared.Count == 1 && domElements?.Contains(name) == true && domOverrides?.Contains(name) != true
+            : Parent?.IsDomElement(name) == true;
+        public bool FindJQuery(string name) => names.TryGetValue(name, out var declared)
+            ? declared.Count == 1 && JQueryVariables.Contains(name) && domOverrides?.Contains(name) != true
+            : Parent?.FindJQuery(name) == true;
         public int? ResolveLocal(string name) => !Dynamic && names.TryGetValue(name, out var declared)
             && declared.Count == 1 ? declared[0] : null;
         public IReadOnlyDictionary<string, int?>? FindNamespace(string name) => Dynamic ? null

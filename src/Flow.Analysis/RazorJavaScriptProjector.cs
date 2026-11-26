@@ -10,8 +10,9 @@ namespace Flow.Analysis;
 /// 呼び出し位置で実行されたものとして展開せず、別エントリーへの移動先にする。
 /// </summary>
 internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaScript.EntryData entry,
-    CancellationToken token, bool simplifyRazor,
-    Func<CallExpression, RazorJavaScript.CallProjection>? describeGeneratedCall = null)
+    CancellationToken token, bool omitBrowserDetails,
+    Func<CallExpression, RazorJavaScript.CallProjection>? describeGeneratedCall = null,
+    Func<MemberExpression, bool>? isHiddenGeneratedHandler = null)
 {
     private readonly List<FlowNode> nodes = [];
     private readonly List<FlowEdge> edges = [];
@@ -94,8 +95,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     {
                         var variable = declaration.Declarations[i];
                         if (variable.Init is null or IFunction) continue;
-                        var set = simplifyRazor && variable.Id is Identifier ? after : AddTransfer(variable, after);
-                        after = Expression(variable.Init, set);
+                        after = Expression(variable.Init, Pattern(variable.Id, after));
                     }
                     return after;
                 case ExpressionStatement expression:
@@ -229,37 +229,34 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     return Condition(ternary.Test, Expression(ternary.Consequent, next), Expression(ternary.Alternate, next));
                 case CallExpression call:
                     var request = owner.Request(call);
-                    var callInfo = describeGeneratedCall is null ? owner.ProjectCall(call, entry, simplifyRazor) : describeGeneratedCall(call);
+                    var callInfo = ProjectCall(call);
                     var callFirst = next;
-                    if (!callInfo.Omit || request is not null)
+                    if (!callInfo.Omit)
                     {
-                        var label = request is null ? Text(call) : $"HTTP {request.HttpMethod} {request.Url}" +
+                        var label = request is null ? CallLabel(call) : $"HTTP {request.HttpMethod} {request.Url}" +
                             (request.IsAsync ? "（非同期送信）" : "（同期送信）") + (request.IsResolved ? "" : " · 未解決");
                         callFirst = Add(request is null ? NodeKind.Call : NodeKind.Transfer, label, call, callInfo.Target);
                         Connect(callFirst, next);
-                        if (request is { IsResolved: false }) MarkPartial("XMLHttpRequestの送信内容に未解決の値があります。");
                         if (call.Callee is Identifier { Name: "eval" }) MarkPartial("evalで生成される処理は解析しません。");
                     }
+                    if (request is { IsResolved: false }) MarkPartial("XMLHttpRequestの送信内容に未解決の値があります。");
                     for (var i = call.Arguments.Count - 1; i >= 0; --i) callFirst = Expression(call.Arguments[i], callFirst);
                     return Expression(call.Callee, callFirst);
                 case AssignmentExpression assignment:
-                    var assignmentNode = OmitWrite(assignment.Left) ? next : AddTransfer(assignment, next);
+                    if (assignment.Left is not Expression left)
+                        return Expression(assignment.Right, Pattern(assignment.Left, next));
+                    var assignmentNode = ShowEventWrite(left) ? AddTransfer(assignment, next) : next;
                     var right = Expression(assignment.Right, assignmentNode);
-                    if (assignment.Left is Expression left)
+                    if (assignment.Operator == Operator.LogicalAndAssignment) return Condition(left, right, next);
+                    if (assignment.Operator == Operator.LogicalOrAssignment) return Condition(left, next, right);
+                    if (assignment.Operator == Operator.NullishCoalescingAssignment)
                     {
-                        if (assignment.Operator == Operator.LogicalAndAssignment) return Condition(left, right, next);
-                        if (assignment.Operator == Operator.LogicalOrAssignment) return Condition(left, next, right);
-                        if (assignment.Operator == Operator.NullishCoalescingAssignment)
-                        {
-                            var nullishAssignment = Add(NodeKind.Condition, Text(left) + " is null / undefined", left);
-                            Connect(nullishAssignment, right, "True");
-                            Connect(nullishAssignment, next, "False");
-                            return Expression(left, nullishAssignment);
-                        }
-                        return Expression(left, right);
+                        var nullishAssignment = Add(NodeKind.Condition, Text(left) + " is null / undefined", left);
+                        Connect(nullishAssignment, right, "True");
+                        Connect(nullishAssignment, next, "False");
+                        return Expression(left, nullishAssignment);
                     }
-                    MarkPartial("分割代入の書き込み先の評価は詳細表示していません。");
-                    return right;
+                    return Expression(left, right);
                 case AwaitExpression awaiting:
                     var awaitNode = Add(NodeKind.Transfer, "await 完了後に継続", awaiting);
                     Connect(awaitNode, next);
@@ -269,8 +266,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     var memberNext = member.Computed ? Expression(member.Property, next) : next;
                     return Expression(member.Object, memberNext);
                 case UpdateExpression update:
-                    var updateNode = OmitWrite(update.Argument) ? next : AddTransfer(update, next);
-                    return Expression(update.Argument, updateNode);
+                    return Expression(update.Argument, next);
                 case NewExpression creation:
                     var createNode = Add(NodeKind.Call, Text(creation), creation);
                     Connect(createNode, next);
@@ -310,9 +306,68 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
         return unknown;
     }
 
-    private bool OmitWrite(Node target) => simplifyRazor && (target is Identifier
-        || target is MemberExpression member && RazorJavaScript.PropertyName(member) is { } name
-        && !name.StartsWith("on", StringComparison.Ordinal));
+    private RazorJavaScript.CallProjection ProjectCall(CallExpression call) => describeGeneratedCall is null
+        ? owner.ProjectCall(call, entry, omitBrowserDetails) : describeGeneratedCall(call);
+
+    private string CallLabel(CallExpression call)
+    {
+        if (omitBrowserDetails && call.Callee is MemberExpression { Object: CallExpression { Callee: MemberExpression previous } receiver } member
+            && RazorJavaScript.PropertyName(previous) is { } name && RazorBrowserCalls.IsJQueryRoutineMember(name)
+            && ProjectCall(receiver).Omit)
+            return "." + RazorJavaScript.Slice(entry.Unit, member.Property, call);
+        return Text(call);
+    }
+
+    private string Pattern(Node left, string next)
+    {
+        token.ThrowIfCancellationRequested();
+        if (++depth > 128) throw new AnalysisLimitException();
+        try
+        {
+            switch (left)
+            {
+                case Expression target:
+                    return Expression(target, EventWrite(target, next));
+                case ArrayPattern array:
+                    for (var i = array.Elements.Count - 1; i >= 0; i--)
+                        if (array.Elements[i] is { } element) next = Pattern(element, next);
+                    return next;
+                case ObjectPattern obj:
+                    for (var i = obj.Properties.Count - 1; i >= 0; i--) next = Pattern(obj.Properties[i], next);
+                    return next;
+                case AssignmentProperty property:
+                    var value = Pattern(property.Value, next);
+                    return property.Computed ? Expression(property.Key, value) : value;
+                case RestElement rest:
+                    return Pattern(rest.Argument, next);
+                case AssignmentPattern initializer when initializer.Left is Expression target:
+                    // A member reference is evaluated before its optional default value.
+                    return Expression(target, DefaultValue(initializer, EventWrite(target, next)));
+                case AssignmentPattern initializer:
+                    return DefaultValue(initializer, Pattern(initializer.Left, next));
+                default:
+                    return Unsupported(left, next, "分割代入の書き込み先を解析できません。");
+            }
+        }
+        finally { --depth; }
+    }
+
+    private string DefaultValue(AssignmentPattern initializer, string next)
+    {
+        var value = Expression(initializer.Right, next);
+        if (value == next) return next;
+        var condition = Add(NodeKind.Condition, "値が未定義", initializer.Left);
+        Connect(condition, value, "True");
+        Connect(condition, next, "False");
+        return condition;
+    }
+
+    private bool ShowEventWrite(Expression target) => target is MemberExpression member
+        && JavaScriptWriteTargets.IsEventTarget(target) && (!omitBrowserDetails
+            || !(isHiddenGeneratedHandler?.Invoke(member) ?? owner.IsHiddenXhrHandler(member, entry)));
+
+    private string EventWrite(Expression target, string next) => ShowEventWrite(target)
+        ? AddTransfer(target, next) : next;
 
     private string AddTransfer(Node node, string next)
     {

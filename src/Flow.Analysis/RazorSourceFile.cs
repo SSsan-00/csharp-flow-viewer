@@ -159,7 +159,7 @@ public sealed class RazorSourceFile
         if (entryId == -1) return BuildOverview(token);
         if (requests.TryGetValue(entryId, out var element)) return BuildRequestFlow(element, token);
         if (!Entries.Any(entry => entry.Id == entryId)) throw new ArgumentOutOfRangeException(nameof(entryId));
-        var flow = ConnectJavaScriptRequests(entryId, javaScript.AnalyzeRazor(entryId, token));
+        var flow = ConnectJavaScriptRequests(entryId, javaScript.AnalyzeRazor(entryId, token), omitBrowserDetails: true);
         if (javaScript.HasSourceOnlyDefinitions && IsInlineEvent(entryId))
         {
             var candidates = javaScript.CallSites(entryId, token).GroupBy(call => call.Source)
@@ -200,7 +200,7 @@ public sealed class RazorSourceFile
     /// Attach project-resolved server targets to actual JS request nodes. Response
     /// handlers are separate event candidates, never the next synchronous statement.
     /// </summary>
-    private FlowDiagram ConnectJavaScriptRequests(int entryId, FlowDiagram flow)
+    private FlowDiagram ConnectJavaScriptRequests(int entryId, FlowDiagram flow, bool omitBrowserDetails = false)
     {
         var nodes = flow.Nodes.ToList();
         var edges = flow.Edges.ToList();
@@ -214,22 +214,27 @@ public sealed class RazorSourceFile
         foreach (var request in entryRequests)
             if (!seenRanges.Add(request.Source)) ambiguousRanges.Add(request.Source);
         var requestNodes = new Dictionary<SourceRange, int>();
+        var detachedCallbacks = new HashSet<(int Handler, bool Asynchronous)>();
+        var start = flow.Nodes.FirstOrDefault(node => node.Kind == NodeKind.Start);
         for (var i = 0; i < nodes.Count; ++i)
             if (nodes[i] is { Kind: NodeKind.Transfer, Source: { } source }) requestNodes.TryAdd(source, i);
         foreach (var request in entryRequests)
         {
             // Entity decoding can map several expressions to the same source range.
-            if (ambiguousRanges.Contains(request.Source) || !requestNodes.TryGetValue(request.Source, out var nodeIndex)) continue;
-            var requestNode = nodes[nodeIndex];
+            if (ambiguousRanges.Contains(request.Source)) continue;
+            var visible = requestNodes.TryGetValue(request.Source, out var nodeIndex);
+            var requestNode = visible ? nodes[nodeIndex] : omitBrowserDetails ? start : null;
+            if (requestNode is null) continue;
             var handler = ResolveJavaScriptHandler(request);
-            if (handler is not null)
+            if (visible && handler is not null)
                 nodes[nodeIndex] = requestNode with { TargetMethod = handler.MethodId, TargetFilePath = handler.FilePath };
-            else if (request.IsResolved && IsCurrentUrl(request.Url))
+            else if (handler is null && request.IsResolved && IsCurrentUrl(request.Url))
                 noticeList.Add($"L{request.Source.Line}: HTTP送信先のPageModelハンドラーを一意に解決できません。");
 
             foreach (var callbackId in request.CallbackEntryIds.Distinct())
             {
                 if (!callbackEntries.TryGetValue(callbackId, out var callback)) continue;
+                if (!visible && !detachedCallbacks.Add((callbackId, request.IsAsync))) continue;
                 var id = $"responseCandidate{callbackIndex++}";
                 var target = javaScript.ResolveNavigationTarget(callback.Id);
                 nodes.Add(new FlowNode(id, NodeKind.Call, $"応答イベント候補: {callback.Signature}",

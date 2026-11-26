@@ -186,7 +186,7 @@ public sealed class RazorJavaScriptTests
     [TestMethod]
     public void RazorProjectionRetainsStaticFunctionsButMarksGeneratedValuesAsUnresolved()
     {
-        const string original = "function changed() { var id = @Model.Id; send(id); }";
+        const string original = "function changed() { var id = fromModel(@Model.Id); send(id); }";
         var projected = original.Replace("@Model.Id", "0        ", StringComparison.Ordinal);
         Assert.AreEqual(original.Length, projected.Length);
         var source = new RazorJavaScript(original, PagePath,
@@ -195,7 +195,8 @@ public sealed class RazorJavaScriptTests
         var graph = source.Analyze(handler.Id);
         Assert.IsTrue(graph.IsPartial);
         Assert.Contains(node => node.Label == "send(id)", graph.Nodes);
-        Assert.Contains(node => node.Label.Contains("@Model.Id", StringComparison.Ordinal), graph.Nodes);
+        var initializer = Assert.ContainsSingle(graph.Nodes.Where(node => node.Label == "fromModel(@Model.Id)"));
+        Assert.AreEqual(original.IndexOf(initializer.Label, StringComparison.Ordinal), initializer.Source?.Offset);
     }
 
     [TestMethod]
