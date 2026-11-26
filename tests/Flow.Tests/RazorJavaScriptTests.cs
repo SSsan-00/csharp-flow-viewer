@@ -61,6 +61,27 @@ public sealed class RazorJavaScriptTests
     }
 
     [TestMethod]
+    [DataRow("\n")]
+    [DataRow("\r\n")]
+    public void LongScriptPreservesRenamedDefinitionsAndRangesAtLineBoundaries(string newline)
+    {
+        var code = string.Join(newline, Enumerable.Repeat("// long script padding", 300).Concat(
+            ["var destination = function () {", "    return true;", "};",
+                "window.caller = function () {", "    destination();", "};"]));
+        var source = Parse(code, "@page" + newline + "<script>" + newline);
+        var destination = Assert.ContainsSingle(source.Entries.Where(entry => entry.Name == "destination"));
+        var caller = Assert.ContainsSingle(source.Entries.Where(entry => entry.Name == "caller"));
+        var span = caller.NavigationSource!;
+        Assert.AreEqual(306, span.Line);
+        Assert.AreEqual(303, destination.NavigationSource!.Line);
+        var call = Assert.ContainsSingle(source.Analyze(caller.Id).Nodes.Where(node => node.TargetMethod == destination.Id));
+        Assert.AreEqual(307, call.Source!.Line);
+        var prefixLength = "@page<script>".Length + 2 * newline.Length;
+        Assert.AreEqual(prefixLength + code.IndexOf("destination();", StringComparison.Ordinal), call.Source.Offset);
+        Assert.AreEqual(PagePath, call.TargetFilePath);
+    }
+
+    [TestMethod]
     public void JavaScriptStringsCommentsAndShadowedNamesDoNotCreateFalseBindingsOrTargets()
     {
         var source = Parse("""

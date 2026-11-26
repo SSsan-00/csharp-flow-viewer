@@ -39,6 +39,14 @@ public sealed partial class ProjectSession(MSBuildWorkspace workspace, Project p
         .OrderBy(file => file.Label, StringComparer.OrdinalIgnoreCase).ToArray();
 
     private IReadOnlySet<string>? navigableCSharpPaths;
+    private IReadOnlySet<string>? javaScriptPaths;
+    private IReadOnlyDictionary<string, ProjectFile>? filesByPath;
+
+    private IReadOnlyDictionary<string, ProjectFile> FilesByPath =>
+        filesByPath ??= Files.ToDictionary(file => file.Path, LocalJavaScriptFiles.PathComparer);
+
+    private LocalJavaScriptFiles LocalScripts() => new(project.FilePath!,
+        javaScriptPaths ??= Files.Where(file => file.IsJavaScript).Select(file => file.Path).ToHashSet(LocalJavaScriptFiles.PathComparer));
 
     private IReadOnlySet<string> NavigableCSharpPaths => navigableCSharpPaths ??= Files
         .Where(file => file.Id is not null).Select(file => file.Path)
@@ -85,20 +93,24 @@ public sealed partial class ProjectSession(MSBuildWorkspace workspace, Project p
 
     /// <summary>Reads a Razor document without executing it, then resolves its PageModel using the loaded compilation.</summary>
     public Task<RazorSourceFile> ReadRazorAsync(ProjectFile file, CancellationToken token) =>
-        PageModelResolver.ReadAsync(project, file, Files, token);
+        PageModelResolver.ReadAsync(project, file, Files, LocalScripts(), token);
 
     public Task<JavaScriptSourceFile> ReadJavaScriptAsync(ProjectFile file, CancellationToken token,
-        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null)
+        RazorSourceFile? razorContext = null, JavaScriptSourceFile? jsContext = null) =>
+        ReadJavaScriptAsync(file, token, razorContext, jsContext, collectSourceBrackets: true);
+
+    private Task<JavaScriptSourceFile> ReadJavaScriptAsync(ProjectFile file, CancellationToken token,
+        RazorSourceFile? razorContext, JavaScriptSourceFile? jsContext, bool collectSourceBrackets)
     {
         token.ThrowIfCancellationRequested();
         if (!file.IsJavaScript || !Files.Contains(file))
             throw new ProjectLoadException("対象の JavaScript ファイルが見つかりません。");
         if ((razorContext?.OpenScript(file.Path) ?? jsContext?.OpenScript(file.Path)) is { } existing)
             return Task.FromResult(existing);
-        var local = new LocalJavaScriptFiles(project.FilePath!, Files);
+        var local = LocalScripts();
         var fragment = local.Read(file.Path, module: false, token)
             ?? throw new ProjectLoadException("JavaScript ファイルを読み込めません。サイズまたはファイルの場所を確認してください。");
-        return Task.FromResult(JavaScriptSourceFile.Open(fragment, local, token));
+        return Task.FromResult(JavaScriptSourceFile.Open(fragment, local, token, collectSourceBrackets));
     }
 
     public void Dispose() => workspace.Dispose();

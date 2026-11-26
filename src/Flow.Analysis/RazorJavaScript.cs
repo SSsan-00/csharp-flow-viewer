@@ -32,6 +32,7 @@ public sealed class RazorJavaScript
 {
     private readonly string pageText;
     private readonly string pagePath;
+    private readonly bool collectSourceBrackets;
     private readonly List<MethodEntry> entries = [];
     private readonly Dictionary<int, Scope?> generatedStatementScopes = [];
     private readonly List<string> notices = [];
@@ -80,10 +81,11 @@ public sealed class RazorJavaScript
 
     internal RazorJavaScript(string pageText, string pagePath, IEnumerable<RazorJavaScriptFragment> fragments,
         Func<string, string, RazorJavaScriptFragment?>? loadImport, CancellationToken token,
-        bool standalone = false)
+        bool standalone = false, bool collectSourceBrackets = true)
     {
         this.pageText = pageText;
         this.pagePath = pagePath;
+        this.collectSourceBrackets = collectSourceBrackets;
         var parsed = new List<(ScriptUnit Unit, Scope Scope)>();
         foreach (var fragment in fragments) IndexFragment(fragment);
         // Drop only known no-ops on an otherwise unique, hoisted function in the same classic script.
@@ -236,7 +238,8 @@ public sealed class RazorJavaScript
             else parser.ParseScript(text);
         }
         catch (Exception failure) when (failure is ParseErrorException or InsufficientExecutionStackException) { return; }
-        SaveBrackets(delimiters, source, pageText.AsSpan(source.Offset, source.Length), null);
+        if (delimiters is { Count: > 0 })
+            SaveBrackets(delimiters, source, pageText.AsSpan(source.Offset, source.Length), null);
     }
 
     private static string? ModuleName(Expression expression) => expression switch
@@ -437,7 +440,7 @@ public sealed class RazorJavaScript
         }
         try
         {
-            var (parser, delimiters) = BracketParser(inline);
+            var (parser, delimiters) = BracketParser(inline, collectSourceBrackets);
             var text = fragment.Text;
             var renderingSlots = fragment.RenderingSlots;
             var canOfferLocalDefinition = !fragment.IsModule && !fragment.IsolatedClassic
@@ -490,7 +493,7 @@ public sealed class RazorJavaScript
             var original = fragment.Source.Offset >= 0 && fragment.Source.Offset + projected.Length <= pageText.Length
                 && (fragment.Source.FilePath is null || fragment.Source.FilePath == pagePath)
                 ? pageText.Substring(fragment.Source.Offset, projected.Length) : projected;
-            if (recovery is null && delimiters.Count != 0)
+            if (recovery is null && delimiters is { Count: > 0 })
                 SaveBrackets(delimiters, fragment.Source, original, inlineText);
             return new ScriptUnit(text, original, fragment.Source, root, fragment.ContainsRazorCode,
                 renderingSlots, inlineText, recovery);
@@ -508,7 +511,7 @@ public sealed class RazorJavaScript
                 token.ThrowIfCancellationRequested();
                 try
                 {
-                    delimiters.Clear();
+                    delimiters?.Clear();
                     var parsed = parser.ParseScript(candidate);
                     var independent = RazorScriptBoundaries.IndependentSlots(parsed);
                     return candidateSlots.Keys.All(independent.Contains) ? parsed : null;
@@ -523,8 +526,10 @@ public sealed class RazorJavaScript
         }
     }
 
-    private static (Parser Parser, List<(int Offset, char Value, bool CanFold)> Delimiters) BracketParser(bool allowReturn)
+    private static (Parser Parser, List<(int Offset, char Value, bool CanFold)>? Delimiters) BracketParser(
+        bool allowReturn, bool collect = true)
     {
+        if (!collect) return (new Parser(new ParserOptions { AllowReturnOutsideFunction = allowReturn }), null);
         var delimiters = new List<(int Offset, char Value, bool CanFold)>();
         return (new Parser(new ParserOptions { AllowReturnOutsideFunction = allowReturn, OnToken = TrackBracket }), delimiters);
 
@@ -571,10 +576,13 @@ public sealed class RazorJavaScript
             NavigationSource = declaration is null ? source : Range(unit, declaration)
         };
         entries.Add(entry);
-        var detail = new EntryData(entry, body, unit, scope);
+        var detail = new EntryData(entry, body, unit, scope, entries.Count - 1);
         data.Add(entry.Id, detail);
         return detail;
     }
+
+    private void RenameEntry(EntryData entry, string name) =>
+        entries[entry.Index] = entry.Entry = entry.Entry with { Name = name, Signature = name };
 
     private void NoteUnchangedClassicBinding(Scope scope, string name, ScriptUnit unit, bool requiresWindow)
     {
@@ -638,11 +646,7 @@ public sealed class RazorJavaScript
                 && !conditional ? initializerFunction.Entry.Id : null);
             if (declarator.Init is { } functionValue && functions.TryGetValue(functionValue, out var namedFunction)
                 && functionValue is IFunction { Id: null })
-            {
-                var renamed = namedFunction.Entry with { Name = variable.Name, Signature = variable.Name };
-                entries[entries.FindIndex(item => item.Id == renamed.Id)] = renamed;
-                namedFunction.Entry = renamed;
-            }
+                RenameEntry(namedFunction, variable.Name);
             if (declarator.Init is { } initialValue && RazorBrowserCalls.IsExplicitFocusReceiver(initialValue, scope))
                 scope.RememberExplicitFocusReceiver(variable.Name);
             if (!conditional && declarator.Init is { } value)
@@ -706,11 +710,7 @@ public sealed class RazorJavaScript
                 windowFunctions.Add(assignedFunction.Entry.Id);
                 explicitWindowFunctions.Add(assignedFunction.Entry.Id);
                 if (windowAssignment.Right is IFunction { Id: null })
-                {
-                    var renamed = assignedFunction.Entry with { Name = name, Signature = name };
-                    entries[entries.FindIndex(item => item.Id == renamed.Id)] = renamed;
-                    assignedFunction.Entry = renamed;
-                }
+                    RenameEntry(assignedFunction, name);
             }
             else
             {
@@ -1054,8 +1054,7 @@ public sealed class RazorJavaScript
     internal SourceRange Range(ScriptUnit unit, Node node)
     {
         var start = EncodedOffset(unit, node.Start);
-        var line = unit.Source.Line + unit.OriginalText.AsSpan(0, start).Count('\n');
-        return new SourceRange(unit.Source.Offset + start, Math.Max(0, MappedEnd(unit, node) - start), line,
+        return new SourceRange(unit.Source.Offset + start, Math.Max(0, MappedEnd(unit, node) - start), unit.LineAt(start),
             unit.Source.FilePath ?? pagePath);
     }
 
@@ -1109,21 +1108,48 @@ public sealed class RazorJavaScript
 
     internal static IEnumerable<Node> Descendants(Node root)
     {
-        var pending = new Stack<Node>();
-        pending.Push(root);
-        while (pending.TryPop(out var node))
+        yield return root;
+        var pending = new Stack<ChildNodes.Enumerator>();
+        var children = root.ChildNodes.GetEnumerator();
+        while (true)
         {
+            if (!children.MoveNext())
+            {
+                if (!pending.TryPop(out children)) yield break;
+                continue;
+            }
+            var node = children.Current;
             yield return node;
-            var children = node.ChildNodes.ToArray();
-            for (var i = children.Length - 1; i >= 0; --i) pending.Push(children[i]);
+            pending.Push(children);
+            children = node.ChildNodes.GetEnumerator();
         }
     }
 
     internal sealed record ScriptUnit(string Text, string OriginalText, SourceRange Source, JsProgram Root,
         bool ContainsRazor, IReadOnlyDictionary<int, SourceRange>? RenderingSlots = null,
-        InlineScriptText? InlineText = null, JavaScriptRecovery? Recovery = null);
-    internal sealed class EntryData(MethodEntry entry, Node? body, ScriptUnit unit, Scope scope)
+        InlineScriptText? InlineText = null, JavaScriptRecovery? Recovery = null)
     {
+        private readonly int[]? lineStarts = OriginalText.Length < 4096 ? null : ReadLineStarts(OriginalText);
+
+        public int LineAt(int offset)
+        {
+            if (lineStarts is null) return Source.Line + OriginalText.AsSpan(0, offset).Count('\n');
+            var index = Array.BinarySearch(lineStarts, offset);
+            return Source.Line + (index < 0 ? ~index : index + 1);
+        }
+
+        private static int[] ReadLineStarts(string text)
+        {
+            var starts = new int[text.AsSpan().Count('\n')];
+            var start = 0;
+            for (var i = 0; i < starts.Length; i++)
+                starts[i] = start = text.IndexOf('\n', start) + 1;
+            return starts;
+        }
+    }
+    internal sealed class EntryData(MethodEntry entry, Node? body, ScriptUnit unit, Scope scope, int index = -1)
+    {
+        public int Index { get; } = index;
         public MethodEntry Entry { get; set; } = entry;
         public Node? Body { get; } = body;
         public ScriptUnit Unit { get; } = unit;

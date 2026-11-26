@@ -21,18 +21,20 @@ internal sealed class RazorMarkupDocument
 {
     private readonly SourceText source;
     private readonly string filePath;
+    private readonly bool collectSourceBrackets;
     private readonly bool[] dynamicCharacters;
     private readonly SourceBracket[] statementBrackets;
     private readonly List<RazorGuard> guards = [];
     private readonly List<TextSpan> expressions = [];
     private static readonly IComparer<TextSpan> ByStart = Comparer<TextSpan>.Create((a, b) => a.Start.CompareTo(b.Start));
-    private readonly IReadOnlyList<StatementSyntax> renderControls;
+    private readonly (TextSpan Span, StatementSyntax Statement)[] renderControls;
 
     public RazorMarkupDocument(string text, string filePath, IReadOnlyList<RazorImport>? imports,
-        CancellationToken token)
+        CancellationToken token, bool collectSourceBrackets)
     {
         source = SourceText.From(text);
         this.filePath = filePath;
+        this.collectSourceBrackets = collectSourceBrackets;
         dynamicCharacters = new bool[text.Length];
         var markup = Blank(text);
         var code = Blank(text);
@@ -50,7 +52,7 @@ internal sealed class RazorMarkupDocument
         var document = engine.Process(RazorSourceDocument.ReadFrom(new MemoryProjectItem(text, filePath)), FileKinds.Legacy,
             (imports ?? []).Select(import => RazorSourceDocument.ReadFrom(new MemoryProjectItem(import.Text, import.Path))).ToImmutableArray(), []);
         token.ThrowIfCancellationRequested();
-        statementBrackets = text.Contains("@{", StringComparison.Ordinal)
+        statementBrackets = collectSourceBrackets && text.Contains("@{", StringComparison.Ordinal)
             ? RazorStatementBrackets.Read(document.GetSyntaxTree(), text, token).ToArray() : [];
         var intermediate = document.GetDocumentIntermediateNode();
         Project(intermediate, false);
@@ -72,7 +74,7 @@ internal sealed class RazorMarkupDocument
         renderControls = ServerCode.DescendantNodes(static node =>
                 node is not (LocalFunctionStatementSyntax or AnonymousFunctionExpressionSyntax))
             .OfType<StatementSyntax>().Where(statement => RazorRenderProjector.IsControl(statement)
-                || statement is TryStatementSyntax).ToArray();
+                || statement is TryStatementSyntax).Select(statement => (OriginalSpan(statement.Span), statement)).ToArray();
         BuildGuards();
 
         void Project(IntermediateNode node, bool htmlContext)
@@ -220,6 +222,7 @@ internal sealed class RazorMarkupDocument
             projected[span.Start - offset] = ';';
             slots.Add(span.Start - offset, Range(span.Start, span.Length));
             previousEnd = span.End;
+            if (!collectSourceBrackets) continue;
             foreach (var node in control.DescendantNodes())
             {
                 token.ThrowIfCancellationRequested();
@@ -260,7 +263,21 @@ internal sealed class RazorMarkupDocument
     internal IReadOnlyList<StatementSyntax> ControlsWithin(SourceRange range)
     {
         var selected = new TextSpan(range.Offset, range.Length);
-        return renderControls.Where(control => selected.Contains(OriginalSpan(control.Span))).ToArray();
+        var first = 0;
+        var last = renderControls.Length;
+        while (first < last)
+        {
+            var middle = first + (last - first) / 2;
+            if (renderControls[middle].Span.Start < selected.Start) first = middle + 1;
+            else last = middle;
+        }
+        List<StatementSyntax>? matches = null;
+        for (var i = first; i < renderControls.Length && renderControls[i].Span.Start <= selected.End; i++)
+        {
+            var (span, statement) = renderControls[i];
+            if (selected.Contains(span)) (matches ??= []).Add(statement);
+        }
+        return matches ?? [];
     }
 
     public IReadOnlyList<RazorGuard> GuardsAt(int offset) => guards
@@ -317,7 +334,13 @@ internal sealed class RazorMarkupDocument
         return TextSpan.FromBounds(start, end);
     }
 
-    private static char[] Blank(string text) => text.Select(character => character is '\r' or '\n' ? character : ' ').ToArray();
+    private static char[] Blank(string text)
+    {
+        var blank = text.ToCharArray();
+        for (var i = 0; i < blank.Length; i++)
+            if (blank[i] is not ('\r' or '\n')) blank[i] = ' ';
+        return blank;
+    }
 
     private static void Copy(string text, char[] output, TextSpan span) => text.CopyTo(span.Start, output, span.Start, span.Length);
 

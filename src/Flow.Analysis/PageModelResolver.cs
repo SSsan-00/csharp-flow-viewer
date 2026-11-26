@@ -10,7 +10,7 @@ namespace Flow.Analysis;
 internal static class PageModelResolver
 {
     public static async Task<RazorSourceFile> ReadAsync(Project project, ProjectFile file,
-        IReadOnlyList<ProjectFile> files, CancellationToken token, bool bindHandlers = true)
+        IReadOnlyList<ProjectFile> files, LocalJavaScriptFiles local, CancellationToken token, bool bindHandlers = true)
     {
         if (!file.IsRazor || !files.Contains(file))
             throw new ProjectLoadException("対象の Razor ファイルが見つかりません。");
@@ -21,7 +21,8 @@ internal static class PageModelResolver
             notices.Add("解析は部分的 · プロジェクト外のリンクされた Razor ファイルでは、論理パスに基づく _ViewImports を解決していません。ページ内のディレクティブを基に解析します。");
         var text = await File.ReadAllTextAsync(file.Path, token).ConfigureAwait(false);
         var imports = await ReadImportsAsync(project, file.Path, token).ConfigureAwait(false);
-        var page = new RazorSourceFile(text, file.Path, imports, token, new LocalJavaScriptFiles(project.FilePath!, files));
+        // Caller indexing has no source pane, and needs neither brackets nor the server-side bindings.
+        var page = new RazorSourceFile(text, file.Path, imports, token, local, collectSourceBrackets: bindHandlers);
         if (!bindHandlers || !page.IsPage)
         {
             page.BindHandlers([], notices);
