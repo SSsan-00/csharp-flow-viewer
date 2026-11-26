@@ -9,6 +9,84 @@ namespace Flow.Tests;
 public sealed class RazorScriptRenderingTests
 {
     [TestMethod]
+    public void UnverifiedJavaScriptContextAndOversizedBranchesStayPreviews()
+    {
+        foreach (var (setup, finish, padding) in new[] { ("const markup = `", "`;", ""), ("", "", new string(' ', 10000)) })
+        {
+            var source = "<script>\n" + setup + "\n@if (Model.Ready) {\n    @:if (browser) {" + padding + " hit(); }\n}\n" + finish + "\n</script>";
+            var page = new RazorSourceFile(source, Path.GetFullPath("Bounded.cshtml"));
+            var graph = page.Analyze(-1);
+            var branch = Next(graph, Condition(graph, "Model.Ready"), "True");
+            Assert.IsLessThan(150, branch.Label.Length);
+            StringAssert.Contains(branch.Label, "if (browser)");
+            Assert.DoesNotContain(node => node.Kind == NodeKind.Condition && node.Label == "browser", graph.Nodes);
+        }
+    }
+
+    [TestMethod]
+    [DataRow("\n")]
+    [DataRow("\r\n")]
+    public void TextBlockAndConsecutiveRazorLinesExposeTheGeneratedClientAlternatives(string newline)
+    {
+        var source = """
+            <select onchange="reload()"></select>
+            <script>
+            function reload() {
+                @if (Model.Ready) {
+                    <text>
+                        if (clientReady) { first(); } else { second(); }
+                    </text>
+                } else if (Model.Other) {
+                    @:if (isOther) {
+                    @:  third();
+                    @:} else { fourth(); }
+                }
+                finish();
+            }
+            </script>
+            """.ReplaceLineEndings(newline);
+        var page = new RazorSourceFile(source, Path.GetFullPath("GeneratedBranches.cshtml"));
+        var handler = page.Analyze(-1).Nodes.Single(node => node.Label == "onchange → reload()");
+        Assert.IsNotNull(handler.TargetMethod);
+        var graph = page.Analyze(handler.TargetMethod.Value);
+        foreach (var (guard, predicate, yes, no, line) in new[]
+        {
+            ("Model.Ready", "clientReady", "first()", "second()", 6),
+            ("Model.Other", "isOther", "third()", "fourth()", 9)
+        })
+        {
+            var render = Next(graph, Condition(graph, guard), "True");
+            StringAssert.Contains(render.Label, predicate);
+            var client = Next(graph, render, "生成後、このJSが実行される場合");
+            Assert.AreEqual(NodeKind.Condition, client.Kind);
+            Assert.AreEqual(predicate, Slice(source, client.Source!));
+            Assert.AreEqual(line, client.Source!.Line);
+            var first = Next(graph, client, "True");
+            var second = Next(graph, client, "False");
+            Assert.AreEqual(yes, Slice(source, first.Source!));
+            Assert.AreEqual(no, Slice(source, second.Source!));
+            Assert.AreEqual(Next(graph, first), Next(graph, second));
+            Assert.AreEqual("JS断片の終了", Next(graph, first).Label);
+            Assert.AreEqual("合流", Next(graph, render).Label);
+        }
+        Assert.AreEqual(1, graph.Nodes.Count(node => node.Kind == NodeKind.Start));
+        Assert.Contains(node => node.Label == "finish()", graph.Nodes);
+    }
+
+    [TestMethod]
+    [DataRow("if (@Model.Value) ok();")]
+    [DataRow("if (incomplete) {")]
+    public void DynamicOrIncompleteOutputHasOnlyAPreview(string emitted)
+    {
+        var source = "<script>function reload() {\n@if (Model.Ready) {\n    @:" + emitted + "\n}\n}</script>";
+        var page = new RazorSourceFile(source, Path.GetFullPath("NonStatic.cshtml"));
+        var graph = Analyze(page, "reload");
+        var branch = Next(graph, Condition(graph, "Model.Ready"), "True");
+        StringAssert.Contains(branch.Label, "生成JS");
+        Assert.DoesNotContain(edge => edge.From == branch.Id && edge.Label is not null, graph.Edges);
+    }
+
+    [TestMethod]
     [DataRow("\n", "")]
     [DataRow("\r\n", "")]
     [DataRow("\n", ";")]

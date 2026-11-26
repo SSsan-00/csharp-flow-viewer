@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Flow.Model;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -5,7 +6,8 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace Flow.Analysis;
 
-internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<FlowNode> nodes,
+internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOnlyList<RazorJavaScriptFragment> scripts,
+    RazorJavaScript javaScript, List<FlowNode> nodes,
     List<FlowEdge> edges, CancellationToken token, IReadOnlyList<SourceRange>? excluded = null)
 {
     private const string Start = "render_start";
@@ -13,6 +15,9 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<Fl
     private const int MaxConditions = 100;
     private readonly List<(TextSpan Body, string Id)> bodies = [];
     private int conditionCount;
+    private const int MaxOutputNodes = 200;
+    private const int MaxGeneratedScriptLength = 8192;
+    private int outputNodes;
 
     public bool IsTruncated { get; private set; }
 
@@ -185,11 +190,84 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, List<Fl
     {
         var span = document.OriginalSpan(body.Span);
         var id = from + "_" + suffix;
-        nodes.Add(new FlowNode(id, NodeKind.Junction, label, document.Range(span.Start, span.Length)));
+        var source = document.Range(span.Start, span.Length);
+        if (body is BlockSyntax block && !block.OpenBraceToken.IsMissing && !block.CloseBraceToken.IsMissing)
+        {
+            var interior = document.OriginalSpan(TextSpan.FromBounds(block.OpenBraceToken.Span.End, block.CloseBraceToken.SpanStart));
+            var statements = block.Statements.Where(statement => statement is not EmptyStatementSyntax).ToArray();
+            if (statements.Length == 0)
+            {
+                var control = (body.Parent is ElseClauseSyntax ? body.Parent.Parent : body.Parent) as StatementSyntax;
+                while (control?.Parent is ElseClauseSyntax { Parent: IfStatementSyntax outer }) control = outer;
+                DescribeOutput(interior, id, ref label, ref source, control is null ? null : document.OriginalSpan(control.Span).Start);
+            }
+            else
+            {
+                var end = interior.End;
+                for (var index = statements.Length - 1; index >= 0; index--)
+                {
+                    var statement = statements[index];
+                    var child = document.OriginalSpan(statement.Span);
+                    next = OutputNode(TextSpan.FromBounds(child.End, end), next);
+                    next = Visit(statement, next, breakTo, continueTo);
+                    end = child.Start;
+                }
+                next = OutputNode(TextSpan.FromBounds(interior.Start, end), next);
+            }
+        }
+        else next = Visit(body, next, breakTo, continueTo);
+        nodes.Add(new FlowNode(id, NodeKind.Junction, label, source));
         bodies.Add((span, id));
         edges.Add(new FlowEdge(from, id, outcome));
-        edges.Add(new FlowEdge(id, Visit(body, next, breakTo, continueTo)));
+        edges.Add(new FlowEdge(id, next));
         return id;
+    }
+
+    private string OutputNode(TextSpan span, string next)
+    {
+        if (outputNodes >= MaxOutputNodes) return next;
+        var id = $"render_output{span.Start}";
+        var label = "描画";
+        var source = document.Range(span.Start, span.Length);
+        if (!DescribeOutput(span, id, ref label, ref source)) return next;
+        outputNodes++;
+        nodes.Add(new FlowNode(id, NodeKind.Transfer, label, source));
+        edges.Add(new FlowEdge(id, next));
+        return id;
+    }
+
+    private bool DescribeOutput(TextSpan span, string id, ref string label, ref SourceRange source, int? controlStart = null)
+    {
+        if (document.RenderedOutput(span) is not { } rendered) return false;
+        var (range, dynamic) = rendered;
+        var (offset, end) = (range.Start, range.End);
+        var length = range.Length;
+        var output = document.Html.AsSpan(offset, length);
+        var script = scripts.Any(script => script.Source.Offset <= offset && end <= script.Source.Offset + script.Source.Length);
+        source = document.Range(offset, length);
+        var prefix = dynamic ? document.SourcePreview(offset, Math.Min(180, length))
+            : output[..Math.Min(180, length)].ToString();
+        var preview = Regex.Replace(prefix, @"\s+", " ").Trim();
+        if (preview.Length > 90 || length > 180) preview = preview[..Math.Min(89, preview.Length)] + "…";
+        label += (script ? " · 生成JS" : "") + (dynamic ? "（Razor式を含む原文）" : "") + ": " + preview;
+        if (script && !dynamic && controlStart is int start && length <= MaxGeneratedScriptLength
+            && outputNodes < MaxOutputNodes && javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, token) is { } graph
+            && graph.Nodes.Count <= MaxOutputNodes - outputNodes)
+            AddClientAlternative(id, graph);
+        return true;
+    }
+
+    private void AddClientAlternative(string id, FlowDiagram graph)
+    {
+        var start = graph.Nodes.Single(node => node.Kind == NodeKind.Start);
+        var prefix = id + "_candidate_";
+        outputNodes += graph.Nodes.Count;
+        foreach (var node in graph.Nodes.Where(node => node != start))
+            nodes.Add(node with { Id = prefix + node.Id, Label = node.Kind == NodeKind.End ? "JS断片の終了" : node.Label });
+        foreach (var edge in graph.Edges)
+            edges.Add(edge.From == start.Id
+                ? new FlowEdge(id, prefix + edge.To, "生成後、このJSが実行される場合")
+                : edge with { From = prefix + edge.From, To = prefix + edge.To });
     }
 
     private string Node(string prefix, NodeKind kind, string label, SyntaxNode node) =>

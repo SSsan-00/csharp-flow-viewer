@@ -8,6 +8,34 @@ namespace Flow.Tests;
 public sealed class RazorRenderingFlowTests
 {
     [TestMethod]
+    public void ConsecutiveMarkupIsGroupedWithinItsOwnRazorBranchInSourceOrder()
+    {
+        var source = """
+            @if (Model.Ready) {
+                <text><span>first</span></text>
+                @: <b>second</b>
+                @if (Model.Special) { <i>special</i> }
+                @: <u>last</u>
+            } else {
+                <p>other</p>
+            }
+            """;
+        var page = new RazorSourceFile(source, Path.GetFullPath("Display.cshtml"));
+        var graph = page.Analyze(-1);
+        var ready = Condition(graph, "Model.Ready");
+        var before = Next(graph, Next(graph, ready, "True"));
+        StringAssert.Contains(before.Label, "<span>first</span> <b>second</b>");
+        Assert.AreEqual(2, before.Source!.Line);
+        var special = Next(graph, before);
+        Assert.AreEqual(Condition(graph, "Model.Special"), special);
+        StringAssert.Contains(Next(graph, special, "True").Label, "<i>special</i>");
+        var last = Next(graph, Next(graph, special, "False"));
+        StringAssert.Contains(last.Label, "<u>last</u>");
+        Assert.AreEqual(5, last.Source!.Line);
+        StringAssert.Contains(Next(graph, ready, "False").Label, "<p>other</p>");
+    }
+
+    [TestMethod]
     [DataRow("\n")]
     [DataRow("\r\n")]
     public void MarkupOnlyIfAndElseIfShowBothOutcomesAndJoin(string newline)
@@ -78,7 +106,9 @@ public sealed class RazorRenderingFlowTests
         Assert.AreEqual(stop, Next(graph, Next(graph, skip, "False")));
         Assert.AreEqual(repeat, Next(graph, Next(graph, Next(graph, skip, "True"))));
         Assert.AreEqual(end, Next(graph, Next(graph, Next(graph, stop, "True"))));
-        Assert.AreEqual(repeat, Next(graph, Next(graph, stop, "False")));
+        var drawn = Next(graph, Next(graph, stop, "False"));
+        StringAssert.Contains(drawn.Label, "<p>");
+        Assert.AreEqual(repeat, Next(graph, drawn));
         Assert.AreEqual(loop, Next(graph, repeat));
     }
 

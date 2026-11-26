@@ -182,7 +182,7 @@ public sealed class RazorSourceFile
         if (controls.Count == 0) return flow;
         var nodes = flow.Nodes.ToList();
         var edges = flow.Edges.ToList();
-        var rendering = new RazorRenderProjector(document, nodes, edges, token, scope.NestedFunctions);
+        var rendering = new RazorRenderProjector(document, markup.Scripts, javaScript, nodes, edges, token, scope.NestedFunctions);
         var sharedStart = scope.IsFunction ? nodes.Single(node => node.Kind == NodeKind.Start).Id : null;
         var browserEntry = sharedStart is null ? -1 : edges.FindIndex(edge => edge.From == sharedStart);
         if (rendering.Project(scope.Range, controls, sharedStart) is null) return flow;
@@ -257,7 +257,7 @@ public sealed class RazorSourceFile
         var edges = new List<FlowEdge>();
         var notices = Notices.ToList();
         notices.Add("イベントとHTTP送信は静的な候補です。描画時の条件、JavaScriptによる取消・変更、外部スクリプトによって実際の動作は変わります。");
-        var rendering = new RazorRenderProjector(document, nodes, edges, token);
+        var rendering = new RazorRenderProjector(document, markup.Scripts, javaScript, nodes, edges, token);
         if (rendering.Project(pageSource) is { } renderStart)
             edges.Add(new FlowEdge("page", renderStart, "サーバー側の描画フロー"));
         if (rendering.IsTruncated)

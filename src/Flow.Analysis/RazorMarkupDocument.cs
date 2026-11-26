@@ -24,6 +24,7 @@ internal sealed class RazorMarkupDocument
     private readonly bool[] dynamicCharacters;
     private readonly List<RazorGuard> guards = [];
     private readonly List<TextSpan> expressions = [];
+    private static readonly IComparer<TextSpan> ByStart = Comparer<TextSpan>.Create((a, b) => a.Start.CompareTo(b.Start));
     private readonly IReadOnlyList<StatementSyntax> renderControls;
 
     public RazorMarkupDocument(string text, string filePath, IReadOnlyList<RazorImport>? imports,
@@ -50,6 +51,7 @@ internal sealed class RazorMarkupDocument
         token.ThrowIfCancellationRequested();
         var intermediate = document.GetDocumentIntermediateNode();
         Project(intermediate, false);
+        expressions.Sort(ByStart);
         Html = new string(markup);
         ModelName = directives.ModelName;
         IsPage = directives.IsPage;
@@ -119,6 +121,29 @@ internal sealed class RazorMarkupDocument
 
     public SourceRange Range(int offset, int length) => new(offset, length,
         source.Lines.GetLineFromPosition(Math.Min(offset, source.Length)).LineNumber + 1, filePath);
+
+    internal (TextSpan Span, bool Dynamic)? RenderedOutput(TextSpan scope)
+    {
+        var html = Html.AsSpan(scope.Start, scope.Length);
+        var start = scope.Start + html.Length - html.TrimStart().Length;
+        var end = scope.Start + html.TrimEnd().Length;
+        var dynamic = IsDynamic(scope.Start, scope.Length);
+        if (dynamic)
+        {
+            var index = expressions.BinarySearch(scope, ByStart);
+            for (var i = index < 0 ? ~index : index; i < expressions.Count && expressions[i].Start < scope.End; i++)
+            {
+                var expression = expressions[i];
+                if (!scope.Contains(expression)) continue;
+                var at = expression.Start > scope.Start && source[expression.Start - 1] == '@';
+                start = Math.Min(start, expression.Start - (at ? 1 : 0));
+                end = Math.Max(end, expression.End);
+            }
+        }
+        return start >= end ? null : (TextSpan.FromBounds(start, end), dynamic);
+    }
+
+    internal string SourcePreview(int offset, int length) => source.ToString(new TextSpan(offset, length));
 
     public bool IsDynamic(int offset, int length)
     {
