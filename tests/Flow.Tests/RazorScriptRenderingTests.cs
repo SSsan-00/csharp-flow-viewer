@@ -432,12 +432,94 @@ public sealed class RazorScriptRenderingTests
         Assert.DoesNotContain(notice => notice.Contains("JavaScript構文エラー", StringComparison.Ordinal), graph.Notices);
 
         var initial = Analyze(page, "JavaScript 初期化");
-        Assert.Contains(node => node.Kind == NodeKind.Start && node.Label == "Razor · JavaScriptの生成", initial.Nodes);
-        Assert.DoesNotContain(edge => IsRender(edge.From) != IsRender(edge.To), initial.Edges);
-        Condition(initial, "Model.ScriptReady");
+        var start = Assert.ContainsSingle(initial.Nodes.Where(node => node.Kind == NodeKind.Start));
+        StringAssert.StartsWith(start.Label, "JavaScript 初期化");
+        Assert.AreEqual(Condition(initial, "Model.ScriptReady"), Next(initial, start, "サーバー側の生成"));
+        Assert.IsFalse(IsRender(Next(initial, start, "ブラウザー側の実行候補").Id));
+        Assert.DoesNotContain(edge => edge.From != start.Id && IsRender(edge.From) != IsRender(edge.To), initial.Edges);
         Assert.AreEqual(1, initial.Nodes.Count(node => node.Kind == NodeKind.Condition && IsRender(node.Id)));
         Condition(Analyze(page, "sibling"), "Model.SiblingReady");
         Condition(page.Analyze(-1), "Model.Enabled");
+    }
+
+    [TestMethod]
+    public void JQueryReadyBodyHasASeparateDeferredBranchAndPreservesRazorGeneration()
+    {
+        const string source = """
+            <script>
+            before();
+            $(function () {
+                @if (Model.Server)
+                {
+                    <text>generatedStep();</text>
+                }
+                if (browserReady) {
+                    run();
+                    return;
+                }
+                fallback();
+            });
+            after();
+            function run() {}
+            function fallback() {}
+            function generatedStep() {}
+            function custom($) {
+                $(function () { unrelated(); });
+            }
+            </script>
+            <script>jQuery(() => announce());</script>
+            """;
+        var page = new RazorSourceFile(source, Path.GetFullPath("JQueryReady.cshtml"));
+        var initializers = page.Entries.Where(entry => entry.Name.StartsWith("JavaScript 初期化 ", StringComparison.Ordinal)).ToArray();
+        Assert.HasCount(2, initializers);
+        var flow = page.Analyze(initializers[0].Id);
+        var start = Assert.ContainsSingle(flow.Nodes.Where(node => node.Kind == NodeKind.Start));
+        var generate = Condition(flow, "Model.Server");
+        Assert.AreEqual(generate, Next(flow, start, "サーバー側の生成"));
+        Assert.AreEqual("generatedStep()", Next(flow, Next(flow, generate, "True"), "生成後、このJSが実行される場合").Label);
+        var before = Next(flow, start, "ブラウザー側の実行候補");
+        Assert.AreEqual("before()", before.Label);
+        var registration = Next(flow, before);
+        Assert.AreEqual("jQuery ready を登録", registration.Label);
+        var ready = Condition(flow, "browserReady");
+        Assert.AreEqual(NodeKind.Condition, ready.Kind);
+        Assert.AreEqual("after()", Next(flow, registration).Label);
+        Assert.Contains(edge => edge.From == registration.Id && edge.Label == "DOM 準備完了時", flow.Edges);
+        var run = Next(flow, ready, "True");
+        Assert.AreEqual("run()", run.Label);
+        Assert.AreEqual("run()", Slice(source, run.Source!));
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "run").Id, run.TargetMethod);
+        Assert.AreEqual("ready コールバック終了", Next(flow, Next(flow, run)).Label);
+        Assert.AreEqual("fallback()", Next(flow, ready, "False").Label);
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name.StartsWith("無名関数 L3", StringComparison.Ordinal)).Id,
+            registration.TargetMethod);
+        Assert.DoesNotContain(node => node.Label == "unrelated()", flow.Nodes);
+
+        var custom = Analyze(page, "custom");
+        Assert.DoesNotContain(edge => edge.Label == "DOM 準備完了時", custom.Edges);
+        Assert.Contains(node => node.Kind == NodeKind.Call && node.Label.StartsWith("$(function", StringComparison.Ordinal), custom.Nodes);
+        var other = page.Analyze(initializers[1].Id);
+        Assert.AreEqual("announce()", Next(other, other.Nodes.Single(node => node.Label == "jQuery ready を登録"), "DOM 準備完了時").Label);
+        Assert.DoesNotContain(node => node.Label == "run()", other.Nodes);
+    }
+
+    [TestMethod]
+    public void LargeReadyBodyKeepsTheRegistrationAndSurroundingInitialization()
+    {
+        var script = "before();\n$(function() {\n" + string.Concat(Enumerable.Repeat("work();\n", 205))
+            + "});\nafter();";
+        var path = Path.GetFullPath("ReadyLimit.js");
+        var js = new RazorJavaScript(script, path, [new RazorJavaScriptFragment(script, new SourceRange(0, script.Length, 1, path))]);
+        var flow = js.Analyze(js.Entries[0].Id);
+        var before = Next(flow, Assert.ContainsSingle(flow.Nodes.Where(node => node.Kind == NodeKind.Start)));
+        var ready = Next(flow, before);
+        Assert.AreEqual("before()", before.Label);
+        Assert.AreEqual("jQuery ready を登録", ready.Label);
+        Assert.AreEqual("after()", Next(flow, ready).Label);
+        Assert.AreEqual(4, flow.Edges.Count);
+        Assert.IsTrue(flow.IsPartial);
+        Assert.IsNotNull(ready.TargetMethod);
+        Assert.AreEqual(205, js.Analyze(ready.TargetMethod.Value).Nodes.Count(node => node.Label == "work()"));
     }
 
     [TestMethod]
@@ -510,11 +592,15 @@ public sealed class RazorScriptRenderingTests
             """, Path.GetFullPath("ScriptExpression.cshtml"));
         var graph = Analyze(page, "JavaScript 初期化");
         var condition = Condition(graph, "Model.Enabled");
+        var start = Assert.ContainsSingle(graph.Nodes.Where(node => node.Kind == NodeKind.Start));
+        Assert.AreEqual(condition, Next(graph, start, "サーバー側の生成"));
         Assert.AreEqual(Next(graph, Next(graph, condition, "True")), Next(graph, Next(graph, condition, "False")));
         Assert.IsTrue(graph.IsPartial);
-        Assert.Contains(node => node.Kind == NodeKind.Exception && !IsRender(node.Id), graph.Nodes);
+        var browser = Next(graph, start, "ブラウザー側の実行候補");
+        Assert.AreEqual(NodeKind.Exception, browser.Kind);
+        Assert.IsFalse(IsRender(browser.Id));
         Assert.Contains(notice => notice.Contains("JavaScript構文エラー", StringComparison.Ordinal), graph.Notices);
-        Assert.DoesNotContain(edge => IsRender(edge.From) != IsRender(edge.To), graph.Edges);
+        Assert.DoesNotContain(edge => edge.From != start.Id && IsRender(edge.From) != IsRender(edge.To), graph.Edges);
     }
 
     [TestMethod]
