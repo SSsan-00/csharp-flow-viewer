@@ -1293,6 +1293,43 @@ public sealed class ExternalJavaScriptTests
     }
 
     [TestMethod]
+    public async Task CallerIndexDoesNotReplaceNavigationBracketsOrCacheEditedSources()
+    {
+        using var tree = new Files();
+        var pagePath = tree.Add("Pages/Index.cshtml", """
+            @page
+            <script src="/js/app.js"></script>
+            <select onchange="update()"></select>
+            """);
+        var imports = tree.Add("Pages/_ViewImports.cshtml", "@using Synthetic.OldNamespace");
+        var script = tree.Add("wwwroot/js/app.js", """
+            function update() {
+                return true;
+            }
+            """);
+        using var session = tree.Open(pagePath, script);
+        var scriptFile = session.Files.Single(file => file.Path == script);
+        var initial = await session.ReadJavaScriptAsync(scriptFile, CancellationToken.None);
+        var target = Assert.ContainsSingle(initial.Entries.Where(entry => entry.Name == "update"));
+        var callers = await session.FindCallersAsync(scriptFile, target.Id, CancellationToken.None);
+        Assert.AreEqual(3, Assert.ContainsSingle(callers.Locations).Source.Line);
+
+        var page = await ReadPage(session);
+        Assert.Contains("Synthetic.OldNamespace", page.Usings.Select(value => value.TrimEnd(';')));
+        Assert.IsTrue(page.Brackets.Count > 0);
+        var contextual = await session.ReadJavaScriptAsync(scriptFile, CancellationToken.None, page);
+        Assert.IsTrue(contextual.Brackets.Any(bracket => bracket.CanFold));
+
+        await File.WriteAllTextAsync(imports, "@using Synthetic.NewNamespace");
+        await File.WriteAllTextAsync(script, "\n\nfunction update() { return true; }");
+        var reloaded = await ReadPage(session);
+        Assert.Contains("Synthetic.NewNamespace", reloaded.Usings.Select(value => value.TrimEnd(';')));
+        Assert.DoesNotContain("Synthetic.OldNamespace", reloaded.Usings.Select(value => value.TrimEnd(';')));
+        var reopened = await session.ReadJavaScriptAsync(scriptFile, CancellationToken.None, reloaded);
+        Assert.AreEqual(3, Assert.ContainsSingle(reopened.Entries.Where(entry => entry.Name == "update")).Source.Line);
+    }
+
+    [TestMethod]
     public async Task CancelledCallerSearchCanRetryAndWarmSearchPreservesPerTargetSourceLines()
     {
         using var tree = new Files();

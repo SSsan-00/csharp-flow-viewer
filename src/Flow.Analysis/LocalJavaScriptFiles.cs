@@ -12,15 +12,15 @@ internal sealed class LocalJavaScriptFiles
         ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
     private readonly string root;
     private readonly string webRoot;
-    private readonly HashSet<string> files;
+    private readonly IReadOnlySet<string> files;
     private readonly Dictionary<string, string?> cache = new(PathComparer);
     private long bytesRead;
 
-    public LocalJavaScriptFiles(string projectPath, IEnumerable<ProjectFile> projectFiles)
+    public LocalJavaScriptFiles(string projectPath, IReadOnlySet<string> files)
     {
         root = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
         webRoot = Path.Combine(root, "wwwroot");
-        files = projectFiles.Where(file => file.IsJavaScript).Select(file => file.Path).ToHashSet(PathComparer);
+        this.files = files;
     }
 
     public string? ResolveTag(string url, string pagePath, string? route, bool hasBaseHref)

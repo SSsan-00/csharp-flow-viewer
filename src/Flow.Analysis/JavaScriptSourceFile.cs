@@ -41,12 +41,13 @@ public sealed class JavaScriptSourceFile
     internal JavaScriptSourceFile? OpenScript(string path) => analyzer.OpenScript(path, projectFlow);
 
     internal static JavaScriptSourceFile Open(RazorJavaScriptFragment fragment, LocalJavaScriptFiles local,
-        CancellationToken token)
+        CancellationToken token, bool collectSourceBrackets)
     {
         var path = fragment.Source.FilePath!;
         var analyzer = new RazorJavaScript(fragment.Text, path, [fragment], (specifier, origin) =>
             local.ResolveImport(specifier, origin, "", null, false) is { } dependency
-                ? local.Read(dependency, module: true, token) : null, token, standalone: true);
+                ? local.Read(dependency, module: true, token) : null, token, standalone: true,
+            collectSourceBrackets: collectSourceBrackets);
         return analyzer.OpenScript(path)!;
     }
 }

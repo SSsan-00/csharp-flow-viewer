@@ -48,7 +48,7 @@ public sealed partial class ProjectSession
     private async Task<CallerSearch> FindJavaScriptCallersAsync(ProjectFile targetFile, int targetId, CancellationToken token)
     {
         var locations = new Dictionary<(string Path, int Offset, int Length), CallerLocation>();
-        var filesByPath = Files.ToDictionary(file => file.Path, LocalJavaScriptFiles.PathComparer);
+        var filesByPath = FilesByPath;
         var candidates = Files.Where(file => file.IsRazor || file.IsJavaScript)
             .Where(file => !targetFile.IsRazor || file == targetFile)
             .OrderByDescending(file => file == targetFile).Take(JavaScriptFileLimit + 1).ToArray();
@@ -88,8 +88,8 @@ public sealed partial class ProjectSession
 
         // Browser call sites don't depend on Razor's server-side PageModel binding.
         var sites = file.IsRazor
-            ? (await PageModelResolver.ReadAsync(project, file, Files, token, bindHandlers: false).ConfigureAwait(false)).CallSites(token)
-            : (await ReadJavaScriptAsync(file, token).ConfigureAwait(false)).CallSites(token);
+            ? (await PageModelResolver.ReadAsync(project, file, Files, LocalScripts(), token, bindHandlers: false).ConfigureAwait(false)).CallSites(token)
+            : (await ReadJavaScriptAsync(file, token, null, null, collectSourceBrackets: false).ConfigureAwait(false)).CallSites(token);
         var index = new Dictionary<(ProjectFile, int), List<CallerLocation>>();
         var count = 0;
         var cacheable = true;

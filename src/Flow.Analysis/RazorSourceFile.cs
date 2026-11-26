@@ -32,11 +32,11 @@ public sealed class RazorSourceFile
         CancellationToken token = default) : this(text, filePath, imports, token, null) { }
 
     internal RazorSourceFile(string text, string filePath, IReadOnlyList<RazorImport>? imports,
-        CancellationToken token, LocalJavaScriptFiles? local)
+        CancellationToken token, LocalJavaScriptFiles? local, bool collectSourceBrackets = true)
     {
         Text = text;
         this.filePath = filePath;
-        document = new RazorMarkupDocument(text, filePath, imports, token);
+        document = new RazorMarkupDocument(text, filePath, imports, token, collectSourceBrackets);
         markup = new RazorMarkupReader(document, text, token);
         hasBaseHref = markup.Elements.Any(element => element.TagName == "base" && element.Attribute("href") is not null);
         var scripts = markup.Scripts.Select(script => (script.Source.Offset, script)).ToList();
@@ -62,7 +62,7 @@ public sealed class RazorSourceFile
         javaScript = new RazorJavaScript(text, filePath,
             scripts.OrderBy(item => item.Offset).Select(item => item.script),
             (specifier, origin) => local?.ResolveImport(specifier, origin, filePath, RouteTemplate, hasBaseHref) is { } path
-                ? local.Read(path, module: true, token) : null, token);
+                ? local.Read(path, module: true, token) : null, token, collectSourceBrackets: collectSourceBrackets);
         var entries = new List<MethodEntry>
         {
             new(-1, "ページ全体", "ページ全体", document.Range(0, text.Length))
@@ -121,7 +121,8 @@ public sealed class RazorSourceFile
                 ? entry with { Signature = InlineLabel(entry.Id, javaScript.CallSites(entry.Id, token, omitRoutine: true)) }
                 : entry));
         Entries = entries;
-        Brackets = document.Brackets(token).Concat(javaScript.GetBrackets(filePath)).Distinct().ToArray();
+        Brackets = collectSourceBrackets
+            ? document.Brackets(token).Concat(javaScript.GetBrackets(filePath)).Distinct().ToArray() : [];
     }
 
     public string Text { get; }
@@ -160,7 +161,9 @@ public sealed class RazorSourceFile
         token.ThrowIfCancellationRequested();
         if (entryId == -1) return BuildOverview(token);
         if (requests.TryGetValue(entryId, out var element)) return BuildRequestFlow(element, token);
-        if (!Entries.Any(entry => entry.Id == entryId)) throw new ArgumentOutOfRangeException(nameof(entryId));
+        if (javaScript.GetEntry(entryId) is not { } entry
+            || !LocalJavaScriptFiles.PathComparer.Equals(entry.Source.FilePath, filePath))
+            throw new ArgumentOutOfRangeException(nameof(entryId));
         var (browser, expandedReadyCallbacks) = javaScript.AnalyzeRazor(entryId, token);
         var flow = ConnectJavaScriptRequests(entryId, browser, omitBrowserDetails: true);
         if (javaScript.HasSourceOnlyDefinitions && IsInlineEvent(entryId))
@@ -205,12 +208,12 @@ public sealed class RazorSourceFile
     /// </summary>
     private FlowDiagram ConnectJavaScriptRequests(int entryId, FlowDiagram flow, bool omitBrowserDetails = false)
     {
+        var entryRequests = javaScript.Requests.Where(request => request.OwnerEntryId == entryId).ToArray();
+        if (entryRequests.Length == 0) return flow;
         var nodes = flow.Nodes.ToList();
         var edges = flow.Edges.ToList();
         var noticeList = flow.Notices.ToList();
         var callbackIndex = 0;
-        var entryRequests = javaScript.Requests.Where(request => request.OwnerEntryId == entryId).ToArray();
-        if (entryRequests.Length == 0) return flow;
         var callbackEntries = javaScript.Entries.ToDictionary(entry => entry.Id);
         var ambiguousRanges = new HashSet<SourceRange>();
         var seenRanges = new HashSet<SourceRange>();
