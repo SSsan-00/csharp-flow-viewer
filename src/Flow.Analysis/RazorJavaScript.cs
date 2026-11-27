@@ -347,7 +347,7 @@ public sealed class RazorJavaScript
 
     internal GeneratedBranch? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, int maxNodes,
         CancellationToken token, RazorMarkupDocument? dynamicOutput = null, bool unfoldMixedLoop = false,
-        bool hasIterationLineBreak = false)
+        bool hasIterationLineBreak = false, bool allowConditionalData = false)
     {
         if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)
             || unfoldMixedLoop && scope is null) return null;
@@ -381,7 +381,7 @@ public sealed class RazorJavaScript
         var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
         const string fixedEvent = "change 発生時（候補）";
         const string dynamicEvent = "change 発生時（候補・対象要素未確定）";
-        var quotedValues = unfoldMixedLoop && dynamicOutput is not null
+        var quotedValues = (unfoldMixedLoop || allowConditionalData) && dynamicOutput is not null
             ? Descendants(root).OfType<StringLiteral>().Where(ContainsRazor).OrderBy(literal => literal.Start)
                 .Where(literal =>
                 {
@@ -397,9 +397,11 @@ public sealed class RazorJavaScript
         var graph = new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails: true, Describe, IsHiddenHandler,
             unfoldMixedLoop ? OpaqueExpression : null, unresolvedTail).Build();
         if (changeHandlers.Count > 0) graph = WithChangeCallbacks(graph);
-        if (dynamicOutput is not null && !unfoldMixedLoop && !graph.Edges.Any(edge => edge.Label == dynamicEvent))
-            return null;
         var conditions = graph.Nodes.Any(node => node.Kind == NodeKind.Condition);
+        var conditionalData = allowConditionalData && conditions && scope is not null && OnlyQuotedValues(root);
+        if (dynamicOutput is not null && !unfoldMixedLoop && !conditionalData
+            && !graph.Edges.Any(edge => edge.Label == dynamicEvent))
+            return null;
         var standalone = (!graph.IsPartial || unfoldMixedLoop) && root.Body is { Count: > 0 } statements
             && (text[statements[^1].End - 1] == ';' || hasIterationLineBreak && CanEndAtOwningScriptBoundary(owner, controlStart))
             && text[statements[0].Start] is not ('(' or '[' or '`' or '/' or '+' or '-' or '.')
