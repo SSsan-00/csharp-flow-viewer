@@ -346,28 +346,66 @@ public sealed class RazorJavaScript
     internal sealed record GeneratedBranch(FlowDiagram? ClientFlow, string? Preview);
 
     internal GeneratedBranch? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, int maxNodes,
-        CancellationToken token, (string Original, Func<SourceRange, bool> IsSelector)? dynamicId = null)
+        CancellationToken token, RazorMarkupDocument? dynamicOutput = null, bool unfoldMixedLoop = false)
     {
-        if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)) return null;
+        if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)
+            || unfoldMixedLoop && scope is null) return null;
         JsProgram root;
         var insideFunction = scope is not null && data[scope.OwnerEntryId].Body is not JsProgram;
         try { root = new Parser(new ParserOptions { AllowReturnOutsideFunction = insideFunction }).ParseScript(text); }
         catch (Exception failure) when (failure is ParseErrorException or InsufficientExecutionStackException) { return null; }
-        var unit = new ScriptUnit(text, dynamicId?.Original ?? text, source, root, false);
+        var unit = new ScriptUnit(text, dynamicOutput?.SourcePreview(source.Offset, source.Length) ?? text, source, root, unfoldMixedLoop);
         var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
-        var eventLabel = dynamicId is null ? "change 発生時（候補）" : "change 発生時（候補・対象要素未確定）";
-        // Use the actual insertion scope without exporting declarations or modifying that scope.
-        var blocked = scope is { HasDynamicBinding: false } ? RazorGeneratedBindings.Changes(root, token) : null;
-        var changeHandlers = new Dictionary<SourceRange, Expression>();
-        var graph = new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails: true, Describe, IsHiddenHandler).Build();
+        const string fixedEvent = "change 発生時（候補）";
+        const string dynamicEvent = "change 発生時（候補・対象要素未確定）";
+        var quotedValues = unfoldMixedLoop && dynamicOutput is not null
+            ? Descendants(root).OfType<StringLiteral>().Where(ContainsRazor).OrderBy(literal => literal.Start)
+                .Where(literal =>
+                {
+                    var range = Range(unit, literal);
+                    return dynamicOutput.HasOnlyQuotedReferences(range, range);
+                }).ToArray()
+            : [];
+        // Opaque generated code can change the outer bindings even when the surrounding JS parses.
+        var blocked = scope is { HasDynamicBinding: false } && (!unfoldMixedLoop || OnlyQuotedValues(root))
+            ? RazorGeneratedBindings.Changes(root, token) : null;
+        var changeHandlers = new Dictionary<SourceRange, (Expression Handler, bool DynamicSelector)>();
+        var graph = new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails: true, Describe, IsHiddenHandler,
+            unfoldMixedLoop ? OpaqueExpression : null).Build();
         if (changeHandlers.Count > 0) graph = WithChangeCallbacks(graph);
-        if (dynamicId is not null && !graph.Edges.Any(edge => edge.Label == eventLabel)) return null;
+        if (dynamicOutput is not null && !unfoldMixedLoop && !graph.Edges.Any(edge => edge.Label == dynamicEvent))
+            return null;
         var conditions = graph.Nodes.Any(node => node.Kind == NodeKind.Condition);
-        var standalone = !graph.IsPartial && root.Body is { Count: > 0 } statements
+        var standalone = (!graph.IsPartial || unfoldMixedLoop) && root.Body is { Count: > 0 } statements
             && text[statements[^1].End - 1] == ';'
             && text[statements[0].Start] is not ('(' or '[' or '`' or '/' or '+' or '-' or '.')
             && graph.Nodes.Any(node => node.Kind is NodeKind.Call or NodeKind.Transfer);
         return new(conditions || standalone ? graph : null, Preview());
+
+        bool ContainsRazor(Node node) => dynamicOutput?.IsDynamic(source.Offset + node.Start, node.End - node.Start) == true;
+
+        bool OnlyQuotedValues(Node node)
+        {
+            if (dynamicOutput is null) return true;
+            var cursor = node.Start;
+            foreach (var value in quotedValues)
+            {
+                if (value.Start < cursor) continue;
+                if (value.End > node.End) break;
+                if (dynamicOutput.IsDynamic(source.Offset + cursor, value.Start - cursor)) return false;
+                cursor = value.End;
+            }
+            return !dynamicOutput.IsDynamic(source.Offset + cursor, node.End - cursor);
+        }
+
+        SourceRange? OpaqueExpression(Expression expression)
+        {
+            if (!ContainsRazor(expression)) return null;
+            if (OnlyQuotedValues(expression) && (expression is not CallExpression call || !ContainsRazor(call.Callee)
+                || scope is not null && blocked is not null && GeneratedChangeHandler(call, scope, blocked) is not null))
+                return null;
+            return dynamicOutput!.CoverGeneratedExpressions(Range(unit, expression));
+        }
 
         string? Preview()
         {
@@ -409,12 +447,13 @@ public sealed class RazorJavaScript
 
         CallProjection DescribeCall(CallExpression call)
         {
-            if (scope is null || blocked is null) return default;
+            if (scope is null || blocked is null || ContainsRazor(call.Callee)) return default;
             var target = Resolve(call.Callee, scope, blocked);
             return new(target, target is null && RazorBrowserCalls.IsRoutine(call, scope, blocked, blocked.IsStandaloneFocus(call)));
         }
 
-        Expression? GeneratedChangeHandler(CallExpression call, Scope context, RazorGeneratedBindings bindings)
+        (Expression Handler, bool DynamicSelector)? GeneratedChangeHandler(CallExpression call, Scope context,
+            RazorGeneratedBindings bindings)
         {
             if (call is not { Optional: false, Callee: MemberExpression { Optional: false, Object: CallExpression
                 { Optional: false, Callee: Identifier { Name: "$" or "jQuery" } jquery, Arguments: [StringLiteral selector] } } member }
@@ -425,9 +464,14 @@ public sealed class RazorJavaScript
                 || StringValue(call.Arguments[0]) is not { } events
                 || !events.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Any(name => name.Split('.')[0] == "change"))
                 return null;
-            if (dynamicId is { } generated && (!selector.Value.StartsWith('#') || !generated.IsSelector(Range(unit, selector))))
+            var dynamicSelector = ContainsRazor(selector);
+            if (dynamicOutput is not null
+                && (dynamicSelector
+                    ? !selector.Value.StartsWith('#') || !dynamicOutput.HasOnlyQuotedReferences(
+                        unfoldMixedLoop ? Range(unit, call) : source, Range(unit, selector))
+                    : !unfoldMixedLoop || ContainsRazor(call)))
                 return null;
-            return call.Arguments[^1];
+            return (call.Arguments[^1], dynamicSelector);
         }
 
         FlowDiagram WithChangeCallbacks(FlowDiagram flow)
@@ -439,7 +483,9 @@ public sealed class RazorJavaScript
                 token.ThrowIfCancellationRequested();
                 if (nodes.Count >= maxNodes) break;
                 if (registration is not { Kind: NodeKind.Call, Source: { } range }
-                    || !changeHandlers.TryGetValue(range, out var handler)) continue;
+                    || !changeHandlers.TryGetValue(range, out var callbackInfo)) continue;
+                var (handler, dynamicSelector) = callbackInfo;
+                var eventLabel = dynamicSelector ? dynamicEvent : fixedEvent;
                 var prefix = registration.Id + "_change_";
                 if (handler is IFunction callback)
                 {
@@ -449,7 +495,8 @@ public sealed class RazorJavaScript
                     var body = new EntryData(entry.Entry, callback.Body, unit, entry.Scope);
                     var projected = new RazorJavaScriptProjector(this, body, token, omitBrowserDetails: true,
                         call => MentionsLocal(call.Callee) ? default : DescribeCall(call),
-                        member => !MentionsLocal(member) && IsHiddenHandler(member)).Build();
+                        member => !MentionsLocal(member) && IsHiddenHandler(member),
+                        unfoldMixedLoop ? OpaqueExpression : null).Build();
                     if (nodes.Count + projected.Nodes.Count - 1 > maxNodes) continue;
                     var start = projected.Nodes.Single(node => node.Kind == NodeKind.Start).Id;
                     nodes.AddRange(projected.Nodes.Where(node => node.Id != start).Select(node => node with { Id = prefix + node.Id }));
