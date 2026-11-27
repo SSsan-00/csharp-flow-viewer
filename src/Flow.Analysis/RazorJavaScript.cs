@@ -1080,6 +1080,7 @@ public sealed class RazorJavaScript
         return PropertyName(member) switch
         {
             "off" or "removeAttr" or "on" or "bind" or "delegate" or "live" => member.Object,
+            var name when RazorBrowserCalls.IsJQueryClassChange(name) => member.Object,
             "attr" when call.Arguments.Count >= 2 || call.Arguments is [ObjectExpression] => member.Object,
             _ => null
         };
@@ -1096,8 +1097,9 @@ public sealed class RazorJavaScript
             && functions.TryGetValue(call.Arguments[0], out var ready))
             return new(ready.Entry.Id, false, ready);
         var target = ResolveFunctionReference(call.Callee, scope);
-        return new(target, omitBrowserDetails && target is null
-            && RazorBrowserCalls.IsRoutine(call, scope, isStandaloneFocus: standaloneFocus.Contains(call)));
+        return new(target, target is null && (omitBrowserDetails
+            ? RazorBrowserCalls.IsRoutine(call, scope, isStandaloneFocus: standaloneFocus.Contains(call))
+            : RazorBrowserCalls.IsJQueryClassChange(call, scope)));
     }
 
     internal bool IsHiddenXhrHandler(MemberExpression member, EntryData entry) =>

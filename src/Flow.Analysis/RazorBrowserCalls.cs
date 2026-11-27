@@ -84,7 +84,14 @@ internal static class RazorBrowserCalls
             && generated?.IsUnchanged(constructor.Name) != false && RazorJavaScript.IsXhrConstructor(expression, scope, out _);
     }
 
-    public static bool IsJQueryRoutineMember(string name) => name is "off" or "removeAttr" or "attr";
+    public static bool IsJQueryRoutineMember(string name) => name is "off" or "removeAttr" or "attr" || IsJQueryClassChange(name);
+
+    public static bool IsJQueryClassChange(string? name) => name is "addClass" or "removeClass";
+
+    public static bool IsJQueryClassChange(CallExpression call, Scope scope) =>
+        call.Callee is MemberExpression member
+        && IsJQueryClassChange(RazorJavaScript.PropertyName(member))
+        && !scope.HasDynamicBinding && RazorJavaScript.IsJQuery(member.Object, scope);
 
     private static bool IsXhrMethod(string name) => name is "open" or "send" or "setRequestHeader" or "abort"
         or "getAllResponseHeaders" or "getResponseHeader" or "overrideMimeType";

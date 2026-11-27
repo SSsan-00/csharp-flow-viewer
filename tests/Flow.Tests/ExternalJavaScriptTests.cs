@@ -25,6 +25,8 @@ public sealed class ExternalJavaScriptTests
                 i++;
                 --i;
                 (i += 1, i--);
+                const links = $("a");
+                links.addClass("visible").removeClass("pending");
                 return done();
             }
             """);
@@ -44,6 +46,8 @@ public sealed class ExternalJavaScriptTests
             var graph = script.Analyze(run.Id);
             var transfer = Assert.ContainsSingle(graph.Nodes.Where(node => node.Kind == NodeKind.Transfer));
             Assert.AreEqual("return done();", transfer.Label);
+            Assert.DoesNotContain(node => node.Label.Contains("addClass", StringComparison.Ordinal)
+                || node.Label.Contains("removeClass", StringComparison.Ordinal), graph.Nodes);
             var call = FindCall(graph, "done()");
             Assert.AreEqual(script.Entries.Single(entry => entry.Name == "done").Id, call.TargetMethod);
             Assert.AreEqual(scriptPath, call.TargetFilePath);

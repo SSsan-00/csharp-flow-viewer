@@ -272,6 +272,10 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     }
                     if (request is { IsResolved: false }) MarkPartial("XMLHttpRequestの送信内容に未解決の値があります。");
                     for (var i = call.Arguments.Count - 1; i >= 0; --i) callFirst = Expression(call.Arguments[i], callFirst);
+                    if (!omitBrowserDetails && callInfo.Omit && call.Callee is MemberExpression
+                        { Object: CallExpression { Callee: Identifier { Name: "$" or "jQuery" }, Arguments: [StringLiteral selector] } }
+                        && !selector.Value.TrimStart().StartsWith('<'))
+                        return callFirst;
                     return Expression(call.Callee, callFirst);
                 case AssignmentExpression assignment:
                     if (assignment.Left is not Expression left)
@@ -378,7 +382,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
 
     private string CallLabel(CallExpression call)
     {
-        if (omitBrowserDetails && call.Callee is MemberExpression { Object: CallExpression { Callee: MemberExpression previous } receiver } member
+        if (call.Callee is MemberExpression { Object: CallExpression { Callee: MemberExpression previous } receiver } member
             && RazorJavaScript.PropertyName(previous) is { } name && RazorBrowserCalls.IsJQueryRoutineMember(name)
             && ProjectCall(receiver).Omit)
             return "." + RazorJavaScript.Slice(entry.Unit, member.Property, call);
