@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Data;
 using Flow.Analysis;
+using Flow.Model;
 
 namespace Flow.Desktop;
 
@@ -58,8 +59,10 @@ public partial class MainWindow
             state is { Configuration: { } configuration } ? new(configuration, state.TargetFramework) : null,
             state?.File);
 
-    private async Task ChangeProjectAsync(string projectPath, ProjectOptions? requested, string? previousFile, bool inspect = true)
+    private async Task ChangeProjectAsync(string projectPath, ProjectOptions? requested, string? previousFile,
+        bool inspect = true, bool reload = false)
     {
+        var view = reload && HasSource ? CaptureFileState() with { Annotations = new(annotationHistory) } : null;
         ProjectSession? pending = null;
         try
         {
@@ -69,7 +72,16 @@ public partial class MainWindow
                 var options = settings is null ? requested! : settings.Options.FirstOrDefault(item => item == requested) ?? settings.Options[0];
                 SetStatus(options + " の設計時ビルドを読み込み中…");
                 pending = await ProjectLoader.OpenAsync(projectPath, options, token);
-                return (settings, options, session: pending);
+                var file = reload && previousFile is not null
+                    ? pending.Files.FirstOrDefault(item => string.Equals(item.Path, previousFile, StringComparison.OrdinalIgnoreCase))
+                    : null;
+                PreparedNavigation? prepared = null;
+                if (file is not null)
+                {
+                    SetStatus("再読み込みするソースとフローを解析中…");
+                    prepared = await PrepareReloadedFileAsync(pending, file, view, token);
+                }
+                return (settings, options, session: pending, file, prepared);
             }, result =>
             {
                 ResetProject();
@@ -96,7 +108,16 @@ public partial class MainWindow
                 SetStatus(project.Files.Count == 0 ? "選択できるソースファイルがありません。"
                     : project.Notices.Count == 0 ? "対象ファイルを選択してください。" : "MSBuild 診断があります。対象ファイルを選択できます。",
                     attention: project.Files.Count == 0 || project.Notices.Count != 0);
-            }, "プロジェクトを読み込めません。", "project");
+                if (result.file is { } file && result.prepared is { } prepared)
+                {
+                    if (!FilesBox.Items.Contains(file)) FileFilter.Clear();
+                    ApplySelectedFile(file, prepared, GetFileStatePath(file), view);
+                    FilesBox.ScrollIntoView(file);
+                }
+                else if (reload && previousFile is not null)
+                    SetStatus("再読み込みしましたが、以前のファイルは解析対象にありません。", attention: true);
+            }, reload ? "再読み込みを完了できませんでした。" : "プロジェクトを読み込めません。",
+                reload ? "reload" : "project", view is null ? "" : " ソースとフローは前回の表示のままです。");
             if (closed) return;
             if (!applied)
             {
@@ -104,7 +125,7 @@ public partial class MainWindow
                 return;
             }
             SaveProjectState();
-            if (previousFile is not null && project?.Files.FirstOrDefault(file =>
+            if (!reload && previousFile is not null && project?.Files.FirstOrDefault(file =>
                 string.Equals(file.Path, previousFile, StringComparison.OrdinalIgnoreCase)) is { } previous)
             {
                 if (!FilesBox.Items.Contains(previous)) FileFilter.Clear();
@@ -112,5 +133,39 @@ public partial class MainWindow
             }
         }
         finally { pending?.Dispose(); }
+    }
+
+    private async Task<PreparedNavigation> PrepareReloadedFileAsync(ProjectSession session, ProjectFile file,
+        FileViewState? view, CancellationToken token)
+    {
+        var loaded = await ReadReloadedSourceAsync(session, file, token);
+        var entry = view is null ? null : FindSavedMethod(loaded.Entries, view);
+        entry ??= file.IsRazor || file.IsJavaScript ? loaded.Entries.FirstOrDefault() : null;
+        var flow = entry is null ? null : await PrepareFlowAsync(loaded, entry.Id, token);
+        return new(loaded, entry, flow);
+    }
+
+    private static async Task<LoadedSource> ReadReloadedSourceAsync(ProjectSession session, ProjectFile file, CancellationToken token)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            try
+            {
+                return await Task.Run(async () =>
+                {
+                    // Roslyn can return an empty document after an unreadable source file.
+                    // Check the current file before applying any new view.
+                    using (File.OpenRead(file.Path)) { }
+                    return file.IsRazor ? new LoadedSource(null, await session.ReadRazorAsync(file, token), null)
+                        : file.IsJavaScript ? new(null, null, await session.ReadJavaScriptAsync(file, token))
+                        : new(await session.ReadAsync(file, token), null, null);
+                }, token);
+            }
+            catch (IOException error) when (attempt < 4 && (error.HResult & 0xffff) is 32 or 33)
+            {
+                await Task.Delay(150, token);
+            }
+        }
     }
 }
