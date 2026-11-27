@@ -43,11 +43,11 @@ public sealed class RazorGeneratedIfTests
             node.Source is { } span && source.Substring(span.Offset, span.Length) == "Model.ShowActions"));
         if (nested)
         {
-            var outer = Assert.ContainsSingle(graph.Nodes.Where(node => node.Label == "描画条件: Model.HasPage"));
-            Assert.AreEqual(server, Next(graph, Next(graph, outer, "True"), null));
+            var outer = Assert.ContainsSingle(graph.Nodes.Where(node => node.Label == "Model.HasPage"));
+            Assert.AreEqual(server, Next(graph, outer, "True"));
         }
         var rendered = Next(graph, server, "True");
-        var condition = Next(graph, rendered, "生成後、このJSが実行される場合");
+        var condition = Next(graph, rendered, "生成JS（候補）");
         Assert.AreEqual((NodeKind.Condition, "clientReady"), (condition.Kind, condition.Label));
         Assert.AreEqual(source.IndexOf("clientReady", StringComparison.Ordinal), condition.Source!.Offset);
         foreach (var (outcome, name) in new[] { ("True", "apply"), ("False", "revert") })
@@ -58,7 +58,7 @@ public sealed class RazorGeneratedIfTests
             Assert.AreEqual(page.Entries.Single(entry => entry.Name == name).Id, call.TargetMethod);
             Assert.AreEqual(path, call.TargetFilePath);
         }
-        Assert.AreEqual("cancel()", Next(graph, Next(graph, server, "False"), "生成後、このJSが実行される場合").Label);
+        Assert.AreEqual("cancel()", Next(graph, Next(graph, server, "False"), "生成JS（候補）").Label);
     }
 
     [TestMethod]
@@ -78,10 +78,10 @@ public sealed class RazorGeneratedIfTests
             </script>
             """, Path.GetFullPath("UnknownIf.cshtml"));
         var graph = page.Analyze(page.Entries.Single(entry => entry.Name == "run").Id);
-        var server = Assert.ContainsSingle(graph.Nodes.Where(node => node.Label == "描画条件: Model.ShowActions"));
+        var server = Assert.ContainsSingle(graph.Nodes.Where(node => node.Label == "Model.ShowActions"));
         var rendered = Next(graph, server, "True");
         StringAssert.Contains(rendered.Label, "生成JS");
-        Assert.DoesNotContain(edge => edge.From == rendered.Id && edge.Label == "生成後、このJSが実行される場合", graph.Edges);
+        Assert.DoesNotContain(edge => edge.From == rendered.Id && edge.Label == "生成JS（候補）", graph.Edges);
         Assert.DoesNotContain(node => node.Label is "apply()" or "clientReady" or "null", graph.Nodes);
         Assert.IsTrue(graph.IsPartial);
     }

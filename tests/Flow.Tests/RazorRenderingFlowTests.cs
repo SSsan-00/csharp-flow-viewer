@@ -23,7 +23,7 @@ public sealed class RazorRenderingFlowTests
         var page = new RazorSourceFile(source, Path.GetFullPath("Display.cshtml"));
         var graph = page.Analyze(-1);
         var ready = Condition(graph, "Model.Ready");
-        var before = Next(graph, Next(graph, ready, "True"));
+        var before = Next(graph, ready, "True");
         StringAssert.Contains(before.Label, "<span>first</span> <b>second</b>");
         Assert.AreEqual(2, before.Source!.Line);
         var special = Next(graph, before);
@@ -69,7 +69,7 @@ public sealed class RazorRenderingFlowTests
 
         var whenTrue = Next(graph, first, "True");
         var whenFalse = Next(graph, first, "False");
-        Assert.AreEqual(second, Next(graph, whenFalse));
+        Assert.AreEqual(second, whenFalse);
         var end = Next(graph, whenTrue);
         Assert.AreEqual("描画終了", end.Label);
         Assert.AreEqual(end, Next(graph, Next(graph, second, "True")));
@@ -100,7 +100,7 @@ public sealed class RazorRenderingFlowTests
         Assert.AreEqual(more, Next(graph, draw));
         foreach (var condition in new[] { abort, fail })
         {
-            var transfer = Next(graph, Next(graph, condition, "True"));
+            var transfer = Next(graph, condition, "True");
             Assert.AreEqual(NodeKind.Transfer, transfer.Kind);
             Assert.AreEqual("描画終了", Next(graph, transfer).Label);
         }
@@ -131,14 +131,62 @@ public sealed class RazorRenderingFlowTests
         var stop = Condition(graph, "Model.Stop(index)");
         var end = Next(graph, loop, "False");
         Assert.AreEqual(NodeKind.End, end.Kind);
-        Assert.AreEqual(skip, Next(graph, Next(graph, loop, "True")));
+        Assert.AreEqual(skip, Next(graph, loop, "True"));
         Assert.AreEqual(stop, Next(graph, skip, "False"));
-        Assert.AreEqual(loop, Next(graph, Next(graph, Next(graph, skip, "True"))));
-        Assert.AreEqual(end, Next(graph, Next(graph, Next(graph, stop, "True"))));
+        Assert.AreEqual(loop, Next(graph, Next(graph, skip, "True")));
+        Assert.AreEqual(end, Next(graph, Next(graph, stop, "True")));
         var drawn = Next(graph, stop, "False");
         StringAssert.Contains(drawn.Label, "<p>");
         Assert.AreEqual(loop, Next(graph, drawn));
         Assert.DoesNotContain(node => node.Label == "更新して次の反復へ", graph.Nodes);
+    }
+
+    [TestMethod]
+    public void ForHeaderCallsKeepTheirSourcesAndExecutionOrder()
+    {
+        const string source = """
+            @for (var i = GetStart(), j = PickStart(); i < Model.Total; i = Next(i), Touch(j))
+            {
+                if (Model.Skip(i)) { continue; }
+                if (Model.Stop(i)) { break; }
+                <button type="button" onclick="go()">View</button>
+            }
+            <script>function go() {}</script>
+            """;
+        var page = new RazorSourceFile(source, Path.GetFullPath("LoopCalls.cshtml"));
+        var graph = page.Analyze(-1);
+        var first = Next(graph, graph.Nodes.Single(node => node.Label == "サーバー側描画"));
+        var second = Next(graph, first);
+        var loop = Next(graph, second);
+        Assert.AreEqual(("GetStart()", "PickStart()", "i < Model.Total"), (first.Label, second.Label, loop.Label));
+        var skip = Next(graph, loop, "True");
+        Assert.AreEqual("Model.Skip(i)", skip.Label);
+        var stop = Next(graph, skip, "False");
+        var increment = Next(graph, Next(graph, skip, "True"));
+        var touch = Next(graph, increment);
+        Assert.AreEqual(("Next(i)", "Touch(j)"), (increment.Label, touch.Label));
+        Assert.AreEqual(loop, Next(graph, touch));
+        Assert.AreEqual(Next(graph, loop, "False"), Next(graph, Next(graph, stop, "True")));
+        var draw = Next(graph, stop, "False");
+        Assert.AreEqual(increment, Next(graph, draw));
+        var browser = Next(graph, draw, "この描画経路のイベント候補");
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "go").Id, browser.TargetMethod);
+        foreach (var call in new[] { first, second, increment, touch })
+        {
+            Assert.AreEqual(NodeKind.Call, call.Kind);
+            Assert.AreEqual(call.Label, source.Substring(call.Source!.Offset, call.Source.Length));
+            Assert.AreEqual(page.FilePath, call.Source.FilePath);
+        }
+    }
+
+    [TestMethod]
+    public void EmptyForHasAnExplicitBackEdgeButNoFalseExit()
+    {
+        var graph = new RazorSourceFile("@for (;;){ }", Path.GetFullPath("Infinite.cshtml")).Analyze(-1);
+        var condition = Condition(graph, "for（条件なし）");
+        Assert.AreEqual(condition, Next(graph, condition, "True"));
+        Assert.DoesNotContain(edge => edge.From == condition.Id && edge.Label == "False", graph.Edges);
+        Assert.DoesNotContain(node => node.Kind == NodeKind.Junction, graph.Nodes);
     }
 
     [TestMethod]
@@ -189,8 +237,8 @@ public sealed class RazorRenderingFlowTests
         var items = Condition(graph, "Model.Items");
         var more = Condition(graph, "Model.More()");
         Assert.AreEqual(more, Next(graph, items, "要素なし"));
-        Assert.AreEqual(items, Next(graph, Next(graph, Next(graph, items, "要素あり"))));
-        Assert.AreEqual(more, Next(graph, Next(graph, Next(graph, more, "True"))));
+        Assert.AreEqual(items, Next(graph, Next(graph, items, "要素あり")));
+        Assert.AreEqual(more, Next(graph, Next(graph, more, "True")));
         Assert.AreEqual(NodeKind.End, Next(graph, more, "False").Kind);
     }
 
@@ -215,7 +263,7 @@ public sealed class RazorRenderingFlowTests
         var check = Condition(graph, "Model.Visible");
         var choice = Condition(graph, "switch (Model.State)");
         Assert.AreEqual(choice, Next(graph, check, "False"));
-        Assert.AreEqual(choice, Next(graph, Next(graph, check, "True")));
+        Assert.AreEqual(choice, Next(graph, check, "True"));
         var boundary = Next(graph, Next(graph, choice, "case 1"));
         StringAssert.Contains(boundary.Label, "goto");
         Assert.DoesNotContain(edge => edge.From == boundary.Id, graph.Edges);

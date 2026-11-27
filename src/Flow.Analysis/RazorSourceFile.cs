@@ -393,7 +393,7 @@ public sealed class RazorSourceFile
         foreach (var guard in document.GuardsAt(element.Start))
         {
             var id = "guard" + index++;
-            nodes.Add(new FlowNode(id, NodeKind.Condition, $"描画条件: {guard.Label}", guard.Source));
+            nodes.Add(new FlowNode(id, NodeKind.Condition, guard.Label, guard.Source));
             edges.Add(new FlowEdge(previous, id));
             previous = id;
         }
