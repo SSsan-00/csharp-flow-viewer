@@ -129,7 +129,7 @@ public partial class MainWindow : Window
     private async void ReloadProject(object sender, RoutedEventArgs args)
     {
         if (busy || path is null) return;
-        await ChangeProjectAsync(path, project?.Options, currentFile?.Path);
+        await ChangeProjectAsync(path, project?.Options, currentFile?.Path, reload: true);
     }
 
     private async void ProjectOptionsChanged(object sender, SelectionChangedEventArgs args)
@@ -157,20 +157,11 @@ public partial class MainWindow : Window
             var entry = state is null ? null : FindSavedMethod(loaded.Entries, state);
             entry ??= file.IsRazor || file.IsJavaScript ? loaded.Entries.FirstOrDefault() : null;
             var flow = entry is null ? null : await PrepareFlowAsync(loaded, entry.Id, token);
-            return (loaded, entry, flow, state);
+            return (Prepared: new PreparedNavigation(loaded, entry, flow), State: state);
         }, result =>
         {
             ResetFile();
-            FilesBox.SelectedItem = file;
-            ApplyLoadedFile(file, result.loaded, statePath, result.state);
-            if (result.entry is { } entry && result.flow is { } flow)
-            {
-                MethodsBox.SelectedItem = entry;
-                MethodsBox.ScrollIntoView(entry);
-                ApplyFlow(entry, flow, restored: result.state);
-            }
-            else if (result.state is { } state)
-                RestoreFileState(state);
+            ApplySelectedFile(file, result.Prepared, statePath, result.State);
             SaveProjectState();
         }, "ソースを解析できません。", "file");
         if (!applied && !closed)
@@ -184,6 +175,20 @@ public partial class MainWindow : Window
         busy = true;
         try { restore(); }
         finally { busy = wasBusy; }
+    }
+
+    private void ApplySelectedFile(ProjectFile file, PreparedNavigation prepared, string statePath, FileViewState? state)
+    {
+        FilesBox.SelectedItem = file;
+        ApplyLoadedFile(file, prepared.Source, statePath, state);
+        if (prepared.Entry is { } entry && prepared.Flow is { } flow)
+        {
+            MethodsBox.SelectedItem = entry;
+            MethodsBox.ScrollIntoView(entry);
+            ApplyFlow(entry, flow, restored: state);
+        }
+        else if (state is not null)
+            RestoreFileState(state);
     }
 
     private void ApplyLoadedFile(ProjectFile file, LoadedSource loaded, string statePath, FileViewState? state)

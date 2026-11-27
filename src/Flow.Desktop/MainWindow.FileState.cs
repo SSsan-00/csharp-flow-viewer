@@ -44,18 +44,22 @@ public partial class MainWindow
     private void SaveFileState()
     {
         if (fileStatePath is null || !HasSource) return;
+        try { CaptureFileState().Write(fileStatePath); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            SetStatus("ファイルの表示状態を保存できません。", attention: true);
+        }
+    }
+
+    private FileViewState CaptureFileState()
+    {
         var caret = Editor.TextArea.Caret;
-        var state = new FileViewState(1, method is { } entry ? FileViewState.Key(entry.Signature) : null,
+        return new FileViewState(1, method is { } entry ? FileViewState.Key(entry.Signature) : null,
             method?.Source.Line ?? 0, caret.Line, caret.Column, Editor.VerticalOffset,
             AnnotationKey, selectedNode?.Id, viewport, annotationHistory)
         {
             SourceFolds = SavedSourceFolds()
         };
-        try { state.Write(fileStatePath); }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            SetStatus("ファイルの表示状態を保存できません。", attention: true);
-        }
     }
 
     private static MethodEntry? FindSavedMethod(IReadOnlyList<MethodEntry> methods, FileViewState state)

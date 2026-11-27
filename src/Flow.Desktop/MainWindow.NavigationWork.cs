@@ -31,12 +31,14 @@ public partial class MainWindow
     }
 
     // Commit changes to the displayed view only after preparation succeeds.
-    private async Task<bool> RunOperationAsync<T>(string status, Func<CancellationToken, Task<T>> prepare, Action<T> apply, string failure = "ナビゲーションを完了できませんでした。", string timing = "navigation")
+    private async Task<bool> RunOperationAsync<T>(string status, Func<CancellationToken, Task<T>> prepare, Action<T> apply,
+        string failure = "ナビゲーションを完了できませんでした。", string timing = "navigation", string failureNote = "")
     {
         if (busy || closed) return false;
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         operationCancellation = cancellation;
         var started = Stopwatch.GetTimestamp();
+        var applying = false;
         SetBusy(true);
         SetStatus(status);
         try
@@ -45,6 +47,7 @@ public partial class MainWindow
             cancellation.Token.ThrowIfCancellationRequested();
             if (closed) return false;
             operationCancellation = null;
+            applying = true;
             apply(result);
             FlowTiming.Log.Record(timing, started, version);
             return true;
@@ -57,7 +60,7 @@ public partial class MainWindow
         catch (Exception exception) when (!closed)
         {
             var message = exception is ProjectLoadException ? exception.Message : failure;
-            SetStatus(message, attention: true);
+            SetStatus(message + (applying ? "" : failureNote), attention: true);
             return false;
         }
         catch (Exception) when (closed) { return false; }
