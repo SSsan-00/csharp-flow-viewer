@@ -378,7 +378,7 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
 
     private string CallLabel(CallExpression call)
     {
-        if (omitBrowserDetails && call.Callee is MemberExpression { Object: CallExpression { Callee: MemberExpression previous } receiver } member
+        if (call.Callee is MemberExpression { Object: CallExpression { Callee: MemberExpression previous } receiver } member
             && RazorJavaScript.PropertyName(previous) is { } name && RazorBrowserCalls.IsJQueryRoutineMember(name)
             && ProjectCall(receiver).Omit)
             return "." + RazorJavaScript.Slice(entry.Unit, member.Property, call);

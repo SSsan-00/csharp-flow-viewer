@@ -384,13 +384,87 @@ public sealed class RazorGraphClutterTests
     }
 
     [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public void JQueryClassChangesKeepConditionsArgumentsAndBusinessMethods(bool generated)
+    {
+        const string browserCode = """
+            $('a').addClass(ready() ? activeClass() : idleClass()).removeClass(oldClass()).on('click', clicked);
+            box.addClass('business');
+            box.removeClass('business');
+            addClass();
+            """;
+        var body = generated ? "@if (Model.Ready) { <text>\n" + browserCode + "\n</text> }" : browserCode;
+        var page = Page($$"""
+            <script>
+            function ready() {}
+            function activeClass() {}
+            function idleClass() {}
+            function oldClass() {}
+            function clicked() {}
+            function addClass() {}
+            function run(box) {
+                {{body}}
+            }
+            function custom($) {
+                $('a').addClass('custom').removeClass('custom');
+            }
+            function pure() {
+                before();
+                $("a").addClass("ready").removeAttr("disabled").removeClass("waiting").off("change");
+                after();
+            }
+            function overridden() {
+                const links = $('a');
+                links.removeClass = oldClass;
+                links.removeClass('custom');
+            }
+            </script>
+            """);
+        var graph = Analyze(page, "run");
+        var condition = Assert.ContainsSingle(graph.Nodes.Where(node => node.Kind == NodeKind.Condition && node.Label == "ready()"));
+        Assert.AreEqual(NodeKind.Condition, condition.Kind);
+        Assert.AreEqual("activeClass()", Next(graph, condition, "True").Label);
+        Assert.AreEqual("idleClass()", Next(graph, condition, "False").Label);
+        var oldClass = ByLabel(graph, "oldClass()");
+        Assert.AreEqual(".on('click', clicked)", Next(graph, oldClass).Label);
+        Assert.AreEqual("box.addClass('business')", Next(graph, Next(graph, oldClass)).Label);
+        foreach (var label in new[] { "box.addClass('business')", "box.removeClass('business')", "addClass()" })
+            Assert.AreEqual(NodeKind.Call, ByLabel(graph, label).Kind);
+        Assert.DoesNotContain(node => node.Kind == NodeKind.Call &&
+            (node.Label.StartsWith("$('a')", StringComparison.Ordinal) || node.Label.StartsWith(".addClass(", StringComparison.Ordinal)
+                || node.Label.StartsWith(".removeClass(", StringComparison.Ordinal)), graph.Nodes);
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "addClass").Id,
+            ByLabel(graph, "addClass()").TargetMethod);
+        Assert.AreEqual(NodeKind.Call,
+            ByLabel(Analyze(page, "custom"), "$('a').addClass('custom').removeClass('custom')").Kind);
+        Assert.AreEqual(NodeKind.Call, ByLabel(Analyze(page, "overridden"), "links.removeClass('custom')").Kind);
+        var pure = Analyze(page, "pure");
+        Assert.AreEqual("after()", Next(pure, ByLabel(pure, "before()")).Label);
+        Assert.HasCount(2, pure.Nodes.Where(node => node.Kind == NodeKind.Call));
+        if (!generated)
+        {
+            var clicked = page.Entries.Single(entry => entry.Name == "clicked");
+            Assert.AreEqual(clicked.Id, ByLabel(page.Analyze(-1), "click → clicked() · a").TargetMethod);
+        }
+    }
+    [TestMethod]
     public void StandaloneJavaScriptOmitsAssignmentsButKeepsTheExistingDomCalls()
     {
-        const string text = "const element = document.getElementById('target');";
+        const string text = """
+            const element = document.getElementById('target');
+            const links = $("a");
+            before();
+            links.addClass("ready").removeClass("waiting");
+            after();
+            """;
         var path = Path.GetFullPath("Sample.js");
         var javascript = new RazorJavaScript(text, path, [new(text, new SourceRange(0, text.Length, 1, path))]);
         var graph = javascript.Analyze(javascript.Entries.Single().Id);
         Assert.AreEqual(NodeKind.Call, ByLabel(graph, "document.getElementById('target')").Kind);
+        Assert.AreEqual("after()", Next(graph, ByLabel(graph, "before()")).Label);
+        Assert.DoesNotContain(node => node.Label.Contains("addClass", StringComparison.Ordinal)
+            || node.Label.Contains("removeClass", StringComparison.Ordinal), graph.Nodes);
         Assert.DoesNotContain(node => node.Kind == NodeKind.Transfer, graph.Nodes);
     }
 
