@@ -346,14 +346,37 @@ public sealed class RazorJavaScript
     internal sealed record GeneratedBranch(FlowDiagram? ClientFlow, string? Preview);
 
     internal GeneratedBranch? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, int maxNodes,
-        CancellationToken token, RazorMarkupDocument? dynamicOutput = null, bool unfoldMixedLoop = false)
+        CancellationToken token, RazorMarkupDocument? dynamicOutput = null, bool unfoldMixedLoop = false,
+        bool hasIterationLineBreak = false)
     {
         if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)
             || unfoldMixedLoop && scope is null) return null;
-        JsProgram root;
-        var insideFunction = scope is not null && data[scope.OwnerEntryId].Body is not JsProgram;
-        try { root = new Parser(new ParserOptions { AllowReturnOutsideFunction = insideFunction }).ParseScript(text); }
-        catch (Exception failure) when (failure is ParseErrorException or InsufficientExecutionStackException) { return null; }
+        var owner = scope is not null ? data[scope.OwnerEntryId] : null;
+        var insideFunction = owner is not null && owner.Body is not JsProgram;
+        JsProgram? parsed = null;
+        SourceRange? unresolvedTail = null;
+        try
+        {
+            if (text.Length == source.Length)
+            {
+                try { parsed = new Parser(new ParserOptions { AllowReturnOutsideFunction = insideFunction }).ParseScript(text); }
+                catch (ParseErrorException) { }
+            }
+            if (parsed is null)
+            {
+                if (!unfoldMixedLoop || dynamicOutput is null
+                    || RazorScriptBoundaries.ReadExplicitPrefix(text, insideFunction, token) is not { } partial)
+                    return null;
+                var remainder = source.Length - partial.End;
+                if (remainder <= 0) return null;
+                unresolvedTail = dynamicOutput.Range(source.Offset + partial.End, remainder);
+                source = source with { Length = partial.End };
+                text = text[..partial.End];
+                parsed = partial.Root;
+            }
+        }
+        catch (InsufficientExecutionStackException) { return null; }
+        var root = parsed;
         var unit = new ScriptUnit(text, dynamicOutput?.SourcePreview(source.Offset, source.Length) ?? text, source, root, unfoldMixedLoop);
         var entry = new EntryData(new MethodEntry(0, "", "", source), root, unit, new Scope(null));
         const string fixedEvent = "change 発生時（候補）";
@@ -367,20 +390,34 @@ public sealed class RazorJavaScript
                 }).ToArray()
             : [];
         // Opaque generated code can change the outer bindings even when the surrounding JS parses.
-        var blocked = scope is { HasDynamicBinding: false } && (!unfoldMixedLoop || OnlyQuotedValues(root))
+        var blocked = unresolvedTail is null && scope is { HasDynamicBinding: false }
+            && (!unfoldMixedLoop || OnlyQuotedValues(root))
             ? RazorGeneratedBindings.Changes(root, token) : null;
         var changeHandlers = new Dictionary<SourceRange, (Expression Handler, bool DynamicSelector)>();
         var graph = new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails: true, Describe, IsHiddenHandler,
-            unfoldMixedLoop ? OpaqueExpression : null).Build();
+            unfoldMixedLoop ? OpaqueExpression : null, unresolvedTail).Build();
         if (changeHandlers.Count > 0) graph = WithChangeCallbacks(graph);
         if (dynamicOutput is not null && !unfoldMixedLoop && !graph.Edges.Any(edge => edge.Label == dynamicEvent))
             return null;
         var conditions = graph.Nodes.Any(node => node.Kind == NodeKind.Condition);
         var standalone = (!graph.IsPartial || unfoldMixedLoop) && root.Body is { Count: > 0 } statements
-            && text[statements[^1].End - 1] == ';'
+            && (text[statements[^1].End - 1] == ';' || hasIterationLineBreak && CanEndAtOwningScriptBoundary(owner, controlStart))
             && text[statements[0].Start] is not ('(' or '[' or '`' or '/' or '+' or '-' or '.')
             && graph.Nodes.Any(node => node.Kind is NodeKind.Call or NodeKind.Transfer);
-        return new(conditions || standalone ? graph : null, Preview());
+        return new((conditions && unresolvedTail is null || standalone) ? graph : null, Preview());
+
+        static bool CanEndAtOwningScriptBoundary(EntryData? owner, int start)
+        {
+            if (owner?.Unit.RenderingSlots is not { } slots) return false;
+            var unit = owner.Unit;
+            foreach (var slot in slots.Values)
+            {
+                if (slot.Offset != start) continue;
+                var rest = unit.OriginalText.AsSpan(slot.Offset + slot.Length - unit.Source.Offset).TrimStart();
+                return rest.IsEmpty || rest[0] is '}' or ';';
+            }
+            return false;
+        }
 
         bool ContainsRazor(Node node) => dynamicOutput?.IsDynamic(source.Offset + node.Start, node.End - node.Start) == true;
 

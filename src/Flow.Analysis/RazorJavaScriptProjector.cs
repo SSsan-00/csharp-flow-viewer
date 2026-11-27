@@ -12,7 +12,8 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
     CancellationToken token, bool omitBrowserDetails,
     Func<CallExpression, RazorJavaScript.CallProjection>? describeGeneratedCall = null,
     Func<MemberExpression, bool>? isHiddenGeneratedHandler = null,
-    Func<Expression, SourceRange?>? opaqueGeneratedExpression = null)
+    Func<Expression, SourceRange?>? opaqueGeneratedExpression = null,
+    SourceRange? unresolvedGeneratedTail = null)
 {
     private readonly List<FlowNode> nodes = [];
     private readonly List<FlowEdge> edges = [];
@@ -48,7 +49,13 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
             string first;
             try
             {
-                first = Body(entry.Body);
+                if (unresolvedGeneratedTail is { } tail)
+                {
+                    var boundary = Add(NodeKind.Exception, "残りの生成JS（未確定）", null, source: tail);
+                    Connect(boundary, end, "続行する場合");
+                    first = Statement(entry.Body, boundary, null, null);
+                }
+                else first = Body(entry.Body);
             }
             catch (AnalysisLimitException)
             {

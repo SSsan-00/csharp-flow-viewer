@@ -26,6 +26,7 @@ internal sealed class RazorMarkupDocument
     private readonly SourceBracket[] statementBrackets;
     private readonly List<RazorGuard> guards = [];
     private readonly List<TextSpan> expressions = [];
+    private readonly List<int> renderedLineBreaks = [];
     private static readonly IComparer<TextSpan> ByStart = Comparer<TextSpan>.Create((a, b) => a.Start.CompareTo(b.Start));
     private readonly (TextSpan Span, StatementSyntax Statement)[] renderControls;
 
@@ -57,6 +58,7 @@ internal sealed class RazorMarkupDocument
         var intermediate = document.GetDocumentIntermediateNode();
         Project(intermediate, false);
         expressions.Sort(ByStart);
+        renderedLineBreaks.Sort();
         Html = new string(markup);
         ModelName = directives.ModelName;
         IsPage = directives.IsPage;
@@ -103,6 +105,12 @@ internal sealed class RazorMarkupDocument
             if (node is IntermediateToken && childHtmlContext && OwnSpan(node.Source, out var htmlSpan))
             {
                 Copy(text, markup, htmlSpan);
+                var remaining = text.AsSpan(htmlSpan.Start, htmlSpan.Length);
+                while (remaining.IndexOfAny('\r', '\n') is var lineBreak && lineBreak >= 0)
+                {
+                    remaining = remaining[(lineBreak + 1)..];
+                    renderedLineBreaks.Add(htmlSpan.End - remaining.Length - 1);
+                }
                 // Empty statements make HTML locations belong to their surrounding
                 // if/else/loop body when Roslyn reads the server-code projection.
                 if (htmlSpan.Length > 0 && !char.IsWhiteSpace(text[htmlSpan.Start])) code[htmlSpan.Start] = ';';
@@ -165,6 +173,13 @@ internal sealed class RazorMarkupDocument
     }
 
     internal string SourcePreview(int offset, int length) => source.ToString(new TextSpan(offset, length));
+
+    internal bool HasRenderedLineBreak(int start, int end)
+    {
+        var index = renderedLineBreaks.BinarySearch(start);
+        if (index < 0) index = ~index;
+        return index < renderedLineBreaks.Count && renderedLineBreaks[index] < end;
+    }
 
     internal bool HasOnlyQuotedReferences(SourceRange output, SourceRange literal)
     {
