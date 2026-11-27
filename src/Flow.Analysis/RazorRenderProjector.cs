@@ -97,9 +97,9 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             {
                 var id = Node("if", NodeKind.Condition, $"描画条件: {conditional.Condition}", conditional.Condition);
                 scriptSlot ??= document.OriginalSpan(conditional.Span).Start;
-                Branch(id, "true", "True", "条件成立時に描画", conditional.Statement, next, breakTo, continueTo, scriptSlot.Value);
+                Branch(id, "true", "True", "条件成立時に描画", conditional.Statement, next, breakTo, continueTo, scriptSlot.Value, allowConditionalData: true);
                 if (conditional.Else is { } alternative)
-                    Branch(id, "false", "False", "条件不成立時に描画", alternative.Statement, next, breakTo, continueTo, scriptSlot.Value);
+                    Branch(id, "false", "False", "条件不成立時に描画", alternative.Statement, next, breakTo, continueTo, scriptSlot.Value, allowConditionalData: true);
                 else
                     edges.Add(new FlowEdge(id, next, "False"));
                 return id;
@@ -186,7 +186,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
     }
 
     private string Branch(string from, string suffix, string outcome, string label, StatementSyntax body,
-        string next, string? breakTo, string? continueTo, int scriptSlot, bool unfoldMixedLoop = false)
+        string next, string? breakTo, string? continueTo, int scriptSlot, bool unfoldMixedLoop = false, bool allowConditionalData = false)
     {
         var span = document.OriginalSpan(body.Span);
         var id = from + "_" + suffix;
@@ -196,7 +196,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             var interior = document.OriginalSpan(TextSpan.FromBounds(block.OpenBraceToken.Span.End, block.CloseBraceToken.SpanStart));
             var statements = block.Statements.Where(statement => statement is not EmptyStatementSyntax).ToArray();
             if (statements.Length == 0)
-                DescribeOutput(interior, id, ref label, ref source, scriptSlot, unfoldMixedLoop);
+                DescribeOutput(interior, id, ref label, ref source, scriptSlot, unfoldMixedLoop, allowConditionalData);
             else
             {
                 // Sibling output may alter the JavaScript scope or the statement around a nested control.
@@ -243,7 +243,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
     }
 
     private bool DescribeOutput(TextSpan span, string id, ref string label, ref SourceRange source, int? controlStart = null,
-        bool unfoldMixedLoop = false)
+        bool unfoldMixedLoop = false, bool allowConditionalData = false)
     {
         if (document.RenderedOutput(span) is not { } rendered) return false;
         var (range, dynamic) = rendered;
@@ -256,7 +256,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         string? analyzedPreview = null;
         if (script && controlStart is int start && outputNodes < MaxOutputNodes
             && (length <= MaxGeneratedScriptLength || dynamic && unfoldMixedLoop)
-            && (!dynamic || unfoldMixedLoop || output.Contains("bind", StringComparison.Ordinal)))
+            && (!dynamic || unfoldMixedLoop || allowConditionalData || output.Contains("bind", StringComparison.Ordinal)))
         {
             var remaining = MaxOutputNodes - outputNodes;
             var hasIterationLineBreak = unfoldMixedLoop
@@ -264,7 +264,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             var branch = dynamic
                 ? javaScript.AnalyzeGeneratedBranch(start,
                     document.ProjectJavaScript(offset, Math.Min(length, MaxGeneratedScriptLength)), source, remaining,
-                    token, document, unfoldMixedLoop, hasIterationLineBreak)
+                    token, document, unfoldMixedLoop, hasIterationLineBreak, allowConditionalData)
                 : javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, remaining, token);
             analyzedPreview = branch?.Preview;
             if (branch?.ClientFlow is { } graph && graph.Nodes.Count <= remaining)
