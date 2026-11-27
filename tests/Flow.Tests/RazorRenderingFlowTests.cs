@@ -158,7 +158,7 @@ public sealed class RazorRenderingFlowTests
         var first = Next(graph, graph.Nodes.Single(node => node.Label == "サーバー側描画"));
         var second = Next(graph, first);
         var loop = Next(graph, second);
-        Assert.AreEqual(("GetStart()", "PickStart()", "for (i < Model.Total)"), (first.Label, second.Label, loop.Label));
+        Assert.AreEqual(("GetStart()", "PickStart()", "i < Model.Total"), (first.Label, second.Label, loop.Label));
         var skip = Next(graph, loop, "True");
         Assert.AreEqual("Model.Skip(i)", skip.Label);
         var stop = Next(graph, skip, "False");

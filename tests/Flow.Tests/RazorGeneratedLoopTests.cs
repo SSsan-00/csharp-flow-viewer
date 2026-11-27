@@ -24,7 +24,7 @@ public sealed class RazorGeneratedLoopTests
             : "<text>\n" + string.Join("\n", statements) + "\n</text>";
         var page = Page(emitted, newline);
         var graph = Ready(page);
-        var loop = graph.Nodes.Single(node => node.Label == "for (i < 3)");
+        var loop = graph.Nodes.Single(node => node.Label == "i < 3");
         var render = Next(graph, loop, "True");
         Assert.AreEqual("生成JS（未確定）", render.Label);
         Assert.AreEqual(loop, Next(graph, render));
@@ -193,7 +193,7 @@ public sealed class RazorGeneratedLoopTests
             }
             """);
         var graph = Ready(page);
-        var inner = graph.Nodes.Single(node => node.Label == "for (j < 2)");
+        var inner = graph.Nodes.Single(node => node.Label == "j < 2");
         var output = Next(graph, inner, "True");
         Assert.AreEqual(inner, Next(graph, output));
         if (!hasSiblingOutput)
@@ -243,12 +243,38 @@ public sealed class RazorGeneratedLoopTests
         StringAssert.Contains(page.Text.Substring(output.Source!.Offset, output.Source.Length), "if (ready) {");
     }
 
+    [TestMethod]
+    public void CompleteCallsBeforeNestedRazorAreSeparateNodes()
+    {
+        var page = Page("<text>prepare(); apply();</text>\n@if (Model.Other) { <text>finish();</text> }");
+        var graph = Ready(page);
+        var output = LoopBody(graph);
+        var prepare = Next(graph, output, Execute);
+        var apply = Next(graph, prepare);
+        Assert.AreEqual(("prepare()", "apply()"), (prepare.Label, apply.Label));
+        Assert.AreEqual("JS断片の終了", Next(graph, apply).Label);
+        Assert.AreEqual("Model.Other", Next(graph, output).Label);
+    }
+
+    [TestMethod]
+    public void StaticCallsCanUseALineBreakAtTheReadyBoundary()
+    {
+        var page = Page("<text>\nprepare()\nfinish()\n</text>");
+        var graph = Ready(page);
+        var prepare = CandidateStart(graph);
+        Assert.AreEqual("prepare()", prepare.Label);
+        Assert.AreEqual("finish()", Next(graph, prepare).Label);
+
+        var unsafeGraph = Ready(Page("<text>\nprepare()\nfinish()\n</text>", continuation: "(apply());"));
+        Assert.DoesNotContain(edge => edge.Label == Execute, unsafeGraph.Edges);
+    }
+
     private static void AssertPrefixAndTail(RazorSourceFile page, string label)
     {
         var graph = Ready(page);
         var body = LoopBody(graph);
         Assert.AreEqual("生成JS（未確定）", body.Label);
-        Assert.AreEqual("for (i < 3)", Next(graph, body).Label);
+        Assert.AreEqual("i < 3", Next(graph, body).Label);
         var first = CandidateStart(graph);
         Assert.AreEqual(label, first.Label);
         Assert.IsNull(first.TargetMethod);
@@ -262,7 +288,7 @@ public sealed class RazorGeneratedLoopTests
     }
 
     private static FlowNode LoopBody(FlowDiagram graph) =>
-        Next(graph, graph.Nodes.Single(node => node.Label == "for (i < 3)"), "True");
+        Next(graph, graph.Nodes.Single(node => node.Label == "i < 3"), "True");
 
     private static FlowNode CandidateStart(FlowDiagram graph) => Next(graph, LoopBody(graph), Execute);
 

@@ -135,7 +135,8 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             bool firstBody = false, ForStatementSyntax? counted = null)
         {
             var check = condition?.Span ?? keyword;
-            var id = NodeAt("loop", NodeKind.Condition, condition is null ? $"{kind}（条件なし）" : $"{kind} ({condition})", check);
+            var label = condition is null ? $"{kind}（条件なし）" : kind == "for" ? condition.ToString() : $"{kind} ({condition})";
+            var id = NodeAt("loop", NodeKind.Condition, label, check);
             var repeat = counted is null ? id : ProjectForHeader(counted.Incrementors, id, "更新");
             if (condition is not null)
                 edges.Add(new FlowEdge(id, next, kind == "foreach" ? "要素なし" : "False"));
@@ -178,7 +179,8 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             edges.Add(new FlowEdge(id, next));
             next = id;
         }
-        return next;    }
+        return next;
+    }
 
     private void MarkDisconnectedPaths(string start)
     {
@@ -294,7 +296,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
                     document.ProjectJavaScript(range.Start, Math.Min(range.Length, MaxGeneratedScriptLength)), source,
                     remaining, token, document, unfoldMixedLoop, hasIterationLineBreak, allowConditionalData)
                 : javaScript.AnalyzeGeneratedBranch(start, document.Html.Substring(range.Start, range.Length), source,
-                    remaining, token, splitPrefix: splitPrefix);
+                    remaining, token, hasIterationLineBreak: hasIterationLineBreak, splitPrefix: splitPrefix);
             if (branch?.ClientFlow is { } graph && graph.Nodes.Count <= remaining)
             {
                 AddClientAlternative(id, graph);
