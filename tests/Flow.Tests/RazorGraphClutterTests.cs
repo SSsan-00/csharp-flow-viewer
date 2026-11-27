@@ -449,20 +449,27 @@ public sealed class RazorGraphClutterTests
         }
     }
     [TestMethod]
-    public void StandaloneJavaScriptOmitsAssignmentsButKeepsTheExistingDomCalls()
+    public void StandaloneJavaScriptHidesPureClassChainsButPreservesUnrelatedDomCalls()
     {
         const string text = """
             const element = document.getElementById('target');
             const links = $("a");
             before();
             links.addClass("ready").removeClass("waiting");
+            $("b").addClass("ready").removeClass("waiting");
             after();
+            $("c");
+            $("d", businessScope()).addClass("ready");
             """;
         var path = Path.GetFullPath("Sample.js");
         var javascript = new RazorJavaScript(text, path, [new(text, new SourceRange(0, text.Length, 1, path))]);
         var graph = javascript.Analyze(javascript.Entries.Single().Id);
         Assert.AreEqual(NodeKind.Call, ByLabel(graph, "document.getElementById('target')").Kind);
-        Assert.AreEqual("after()", Next(graph, ByLabel(graph, "before()")).Label);
+        var after = Next(graph, ByLabel(graph, "before()"));
+        Assert.AreEqual("after()", after.Label);
+        var ordinarySelector = Next(graph, after);
+        Assert.AreEqual("$(\"c\")", ordinarySelector.Label);
+        Assert.AreEqual("businessScope()", Next(graph, ordinarySelector).Label);
         Assert.DoesNotContain(node => node.Label.Contains("addClass", StringComparison.Ordinal)
             || node.Label.Contains("removeClass", StringComparison.Ordinal), graph.Nodes);
         Assert.DoesNotContain(node => node.Kind == NodeKind.Transfer, graph.Nodes);

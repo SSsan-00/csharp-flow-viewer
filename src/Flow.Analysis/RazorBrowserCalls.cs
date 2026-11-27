@@ -89,9 +89,9 @@ internal static class RazorBrowserCalls
     public static bool IsJQueryClassChange(string? name) => name is "addClass" or "removeClass";
 
     public static bool IsJQueryClassChange(CallExpression call, Scope scope) =>
-        !scope.HasDynamicBinding && call.Callee is MemberExpression member
+        call.Callee is MemberExpression member
         && IsJQueryClassChange(RazorJavaScript.PropertyName(member))
-        && RazorJavaScript.IsJQuery(member.Object, scope);
+        && !scope.HasDynamicBinding && RazorJavaScript.IsJQuery(member.Object, scope);
 
     private static bool IsXhrMethod(string name) => name is "open" or "send" or "setRequestHeader" or "abort"
         or "getAllResponseHeaders" or "getResponseHeader" or "overrideMimeType";

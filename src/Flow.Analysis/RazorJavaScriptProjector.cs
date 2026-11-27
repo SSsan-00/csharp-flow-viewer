@@ -272,6 +272,10 @@ internal sealed class RazorJavaScriptProjector(RazorJavaScript owner, RazorJavaS
                     }
                     if (request is { IsResolved: false }) MarkPartial("XMLHttpRequestの送信内容に未解決の値があります。");
                     for (var i = call.Arguments.Count - 1; i >= 0; --i) callFirst = Expression(call.Arguments[i], callFirst);
+                    if (!omitBrowserDetails && callInfo.Omit && call.Callee is MemberExpression
+                        { Object: CallExpression { Callee: Identifier { Name: "$" or "jQuery" }, Arguments: [StringLiteral selector] } }
+                        && !selector.Value.TrimStart().StartsWith('<'))
+                        return callFirst;
                     return Expression(call.Callee, callFirst);
                 case AssignmentExpression assignment:
                     if (assignment.Left is not Expression left)
