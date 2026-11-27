@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using Flow.Model;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 
@@ -95,17 +96,17 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         {
             case IfStatementSyntax conditional:
             {
-                var id = Node("if", NodeKind.Condition, $"描画条件: {conditional.Condition}", conditional.Condition);
+                var id = Node("if", NodeKind.Condition, conditional.Condition.ToString(), conditional.Condition);
                 scriptSlot ??= document.OriginalSpan(conditional.Span).Start;
-                Branch(id, "true", "True", "条件成立時に描画", conditional.Statement, next, breakTo, continueTo, scriptSlot.Value, allowConditionalData: true);
+                Branch(id, "true", "True", conditional.Statement, next, breakTo, continueTo, scriptSlot.Value, allowConditionalData: true);
                 if (conditional.Else is { } alternative)
-                    Branch(id, "false", "False", "条件不成立時に描画", alternative.Statement, next, breakTo, continueTo, scriptSlot.Value, allowConditionalData: true);
+                    Branch(id, "false", "False", alternative.Statement, next, breakTo, continueTo, scriptSlot.Value, allowConditionalData: true);
                 else
                     edges.Add(new FlowEdge(id, next, "False"));
                 return id;
             }
             case ForStatementSyntax loop:
-                return Loop(loop.Statement, "for", loop.Condition, loop.ForKeyword.Span);
+                return Loop(loop.Statement, "for", loop.Condition, loop.ForKeyword.Span, counted: loop);
             case WhileStatementSyntax loop:
                 return Loop(loop.Statement, "while", loop.Condition, loop.WhileKeyword.Span);
             case DoStatementSyntax loop:
@@ -114,10 +115,10 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
                 return Loop(loop.Statement, "foreach", loop.Expression, loop.ForEachKeyword.Span);
             case SwitchStatementSyntax choice:
             {
-                var id = Node("switch", NodeKind.Condition, $"描画分岐: switch ({choice.Expression})", choice.Expression);
+                var id = Node("switch", NodeKind.Condition, $"switch ({choice.Expression})", choice.Expression);
                 foreach (var section in choice.Sections)
                 {
-                    var sectionId = Node("case", NodeKind.Junction, "選択された分岐を描画", section);
+                    var sectionId = Node("case", NodeKind.Junction, "描画", section);
                     bodies.Add((document.OriginalSpan(section.Span), sectionId));
                     edges.Add(new FlowEdge(id, sectionId, string.Join(" / ", section.Labels.Select(label => label.ToString().TrimEnd(':')))));
                     edges.Add(new FlowEdge(sectionId, Sequence(section.Statements, next, next, continueTo)));
@@ -130,18 +131,20 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
 
         return next;
 
-        string Loop(StatementSyntax body, string kind, ExpressionSyntax? condition, TextSpan keyword, bool firstBody = false)
+        string Loop(StatementSyntax body, string kind, ExpressionSyntax? condition, TextSpan keyword,
+            bool firstBody = false, ForStatementSyntax? counted = null)
         {
             var check = condition?.Span ?? keyword;
-            var id = NodeAt("loop", NodeKind.Condition, kind == "foreach" ? $"次の要素: {condition}"
-                : $"描画条件: {kind} ({condition?.ToString() ?? "条件省略"})", check);
-            var repeatId = kind == "for" ? id : NodeAt("repeat", NodeKind.Junction, "次の反復へ", keyword);
-            if (repeatId != id) edges.Add(new FlowEdge(repeatId, id));
+            var id = NodeAt("loop", NodeKind.Condition, condition is null ? $"{kind}（条件なし）" : $"{kind} ({condition})", check);
+            var repeat = counted is null ? id : ProjectForHeader(counted.Incrementors, id, "更新");
             if (condition is not null)
                 edges.Add(new FlowEdge(id, next, kind == "foreach" ? "要素なし" : "False"));
-            var entry = Branch(id, "body", kind == "foreach" ? "要素あり" : "True", "ループ本体を描画",
-                body, repeatId, next, repeatId, scriptSlot ?? document.OriginalSpan(statement.Span).Start, unfoldMixedLoop: true);
-            return firstBody ? entry : id;
+            var entry = Branch(id, "body", kind == "foreach" ? "要素あり" : "True",
+                body, repeat, next, repeat, scriptSlot ?? document.OriginalSpan(statement.Span).Start, unfoldMixedLoop: true);
+            if (firstBody) return entry;
+            return counted is null ? id : ProjectForHeader(counted.Declaration is { } declaration
+                ? declaration.Variables.Select(variable => variable.Initializer?.Value).OfType<ExpressionSyntax>()
+                : counted.Initializers, id, "初期化");
         }
 
         string Transfer(string label, string target)
@@ -151,6 +154,31 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             return id;
         }
     }
+
+    private string ProjectForHeader(IEnumerable<ExpressionSyntax> expressions, string next, string phase)
+    {
+        foreach (var expression in expressions.Reverse())
+        {
+            token.ThrowIfCancellationRequested();
+            if (expression.ContainsDiagnostics) continue;
+            var call = expression switch
+            {
+                InvocationExpressionSyntax direct => direct,
+                AssignmentExpressionSyntax { Left: IdentifierNameSyntax, Right: InvocationExpressionSyntax assigned }
+                    when expression.IsKind(SyntaxKind.SimpleAssignmentExpression) => assigned,
+                _ => null
+            };
+            string id;
+            if (call is not null && !call.DescendantNodes().OfType<InvocationExpressionSyntax>().Any())
+                id = Node("for_call", NodeKind.Call, call.ToString(), call);
+            else if (expression.DescendantNodesAndSelf(node => node is not AnonymousFunctionExpressionSyntax)
+                .OfType<InvocationExpressionSyntax>().Any())
+                id = Node("for_header", NodeKind.Transfer, phase, expression);
+            else continue;
+            edges.Add(new FlowEdge(id, next));
+            next = id;
+        }
+        return next;    }
 
     private void MarkDisconnectedPaths(string start)
     {
@@ -185,18 +213,18 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         return next;
     }
 
-    private string Branch(string from, string suffix, string outcome, string label, StatementSyntax body,
+    private string Branch(string from, string suffix, string outcome, StatementSyntax body,
         string next, string? breakTo, string? continueTo, int scriptSlot, bool unfoldMixedLoop = false, bool allowConditionalData = false)
     {
         var span = document.OriginalSpan(body.Span);
         var id = from + "_" + suffix;
-        var source = document.Range(span.Start, span.Length);
+        var skippedOutput = false;
         if (body is BlockSyntax block && !block.OpenBraceToken.IsMissing && !block.CloseBraceToken.IsMissing)
         {
             var interior = document.OriginalSpan(TextSpan.FromBounds(block.OpenBraceToken.Span.End, block.CloseBraceToken.SpanStart));
             var statements = block.Statements.Where(statement => statement is not EmptyStatementSyntax).ToArray();
             if (statements.Length == 0)
-                DescribeOutput(interior, id, ref label, ref source, scriptSlot, unfoldMixedLoop, allowConditionalData);
+                next = OutputNode(interior, next, id, scriptSlot, unfoldMixedLoop, allowConditionalData);
             else
             {
                 // Sibling output may alter the JavaScript scope or the statement around a nested control.
@@ -206,19 +234,32 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
                 {
                     var statement = statements[index];
                     var child = document.OriginalSpan(statement.Span);
-                    next = OutputNode(TextSpan.FromBounds(child.End, end), next);
+                    next = SplitOutput(TextSpan.FromBounds(child.End, end), next);
                     next = Visit(statement, next, breakTo, continueTo, slot);
                     end = child.Start;
                 }
-                next = OutputNode(TextSpan.FromBounds(interior.Start, end), next);
+                next = SplitOutput(TextSpan.FromBounds(interior.Start, end), next, prefix: true);
             }
         }
         else next = Visit(body, next, breakTo, continueTo, scriptSlot);
-        nodes.Add(new FlowNode(id, NodeKind.Junction, label, source));
-        bodies.Add((span, id));
-        edges.Add(new FlowEdge(from, id, outcome));
-        edges.Add(new FlowEdge(id, next));
-        return id;
+        if (skippedOutput)
+        {
+            // Preserve the rendering scope for events even when some output nodes hit the display cap.
+            nodes.Add(new FlowNode(id, NodeKind.Junction, "描画", document.Range(span.Start, span.Length)));
+            bodies.Add((span, id));
+            edges.Add(new FlowEdge(id, next));
+            next = id;
+        }
+        edges.Add(new FlowEdge(from, next, outcome));
+        return next;
+
+        string SplitOutput(TextSpan part, string continuation, bool prefix = false)
+        {
+            if (outputNodes < MaxOutputNodes)
+                return OutputNode(part, continuation, controlStart: prefix ? scriptSlot : null, splitPrefix: prefix);
+            skippedOutput |= document.RenderedOutput(part) is not null;
+            return continuation;
+        }
     }
 
     private bool IsOnlyOutput(StatementSyntax statement, TextSpan interior)
@@ -229,67 +270,54 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             && document.RenderedOutput(TextSpan.FromBounds(nested.End, interior.End)) is null;
     }
 
-    private string OutputNode(TextSpan span, string next)
+    private string OutputNode(TextSpan span, string next, string? id = null, int? controlStart = null,
+        bool unfoldMixedLoop = false, bool allowConditionalData = false, bool splitPrefix = false)
     {
-        if (outputNodes >= MaxOutputNodes) return next;
-        var id = $"render_output{span.Start}";
-        var label = "描画";
-        var source = document.Range(span.Start, span.Length);
-        if (!DescribeOutput(span, id, ref label, ref source)) return next;
-        outputNodes++;
-        nodes.Add(new FlowNode(id, NodeKind.Transfer, label, source));
+        if (document.RenderedOutput(span) is not { } rendered) return next;
+        var (range, dynamic) = rendered;
+        var splitOutput = id is null;
+        id ??= $"render_output{span.Start}";
+        var source = document.Range(range.Start, range.Length);
+        var scriptOutput = scripts.Any(script => script.Source.Offset <= range.Start
+            && range.End <= script.Source.Offset + script.Source.Length);
+        var label = scriptOutput ? "生成JS（未確定）" : MarkupLabel(range, dynamic);
+        if (scriptOutput && controlStart is int start && outputNodes < MaxOutputNodes
+            && (range.Length <= MaxGeneratedScriptLength || dynamic && unfoldMixedLoop)
+            && (!dynamic || !splitPrefix && (unfoldMixedLoop || allowConditionalData
+                || document.Html.AsSpan(range.Start, range.Length).Contains("bind", StringComparison.Ordinal))))
+        {
+            var remaining = MaxOutputNodes - outputNodes - (splitOutput ? 1 : 0);
+            var hasIterationLineBreak = unfoldMixedLoop
+                && (document.HasRenderedLineBreak(span.Start, range.Start) || document.HasRenderedLineBreak(range.End, span.End));
+            var branch = dynamic
+                ? javaScript.AnalyzeGeneratedBranch(start,
+                    document.ProjectJavaScript(range.Start, Math.Min(range.Length, MaxGeneratedScriptLength)), source,
+                    remaining, token, document, unfoldMixedLoop, hasIterationLineBreak, allowConditionalData)
+                : javaScript.AnalyzeGeneratedBranch(start, document.Html.Substring(range.Start, range.Length), source,
+                    remaining, token, splitPrefix: splitPrefix);
+            if (branch?.ClientFlow is { } graph && graph.Nodes.Count <= remaining)
+            {
+                AddClientAlternative(id, graph);
+                if (!dynamic && !graph.IsPartial) label = "生成JS";
+            }
+            else if (branch is { ClientFlow: null, IsUncertain: false })
+                label = "生成JS";
+        }
+        if (splitOutput) outputNodes++;
+        nodes.Add(new FlowNode(id, NodeKind.Junction, label, source));
+        bodies.Add((span, id));
         edges.Add(new FlowEdge(id, next));
         return id;
     }
 
-    private bool DescribeOutput(TextSpan span, string id, ref string label, ref SourceRange source, int? controlStart = null,
-        bool unfoldMixedLoop = false, bool allowConditionalData = false)
+    private string MarkupLabel(TextSpan range, bool dynamic)
     {
-        if (document.RenderedOutput(span) is not { } rendered) return false;
-        var (range, dynamic) = rendered;
-        var (offset, end) = (range.Start, range.End);
-        var length = range.Length;
-        var output = document.Html.AsSpan(offset, length);
-        var script = scripts.Any(script => script.Source.Offset <= offset && end <= script.Source.Offset + script.Source.Length);
-        source = document.Range(offset, length);
-        if (script) label += " · 生成JS";
-        string? analyzedPreview = null;
-        if (script && controlStart is int start && outputNodes < MaxOutputNodes
-            && (length <= MaxGeneratedScriptLength || dynamic && unfoldMixedLoop)
-            && (!dynamic || unfoldMixedLoop || allowConditionalData || output.Contains("bind", StringComparison.Ordinal)))
-        {
-            var remaining = MaxOutputNodes - outputNodes;
-            var hasIterationLineBreak = unfoldMixedLoop
-                && (document.HasRenderedLineBreak(span.Start, offset) || document.HasRenderedLineBreak(end, span.End));
-            var branch = dynamic
-                ? javaScript.AnalyzeGeneratedBranch(start,
-                    document.ProjectJavaScript(offset, Math.Min(length, MaxGeneratedScriptLength)), source, remaining,
-                    token, document, unfoldMixedLoop, hasIterationLineBreak, allowConditionalData)
-                : javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, remaining, token);
-            analyzedPreview = branch?.Preview;
-            if (branch?.ClientFlow is { } graph && graph.Nodes.Count <= remaining)
-            {
-                AddClientAlternative(id, graph);
-                if (dynamic && unfoldMixedLoop)
-                {
-                    label += "（一部未確定）";
-                    return true;
-                }
-            }
-        }
-        if (script && dynamic && unfoldMixedLoop)
-        {
-            label += "（詳細未確定）";
-            return true;
-        }
-        if (analyzedPreview == "") return true;
-        var prefix = analyzedPreview ?? (dynamic ? document.SourcePreview(offset, Math.Min(180, length))
-            : output[..Math.Min(180, length)].ToString());
+        var length = Math.Min(180, range.Length);
+        var prefix = dynamic ? document.SourcePreview(range.Start, length) : document.Html.Substring(range.Start, length);
         var preview = Regex.Replace(prefix, @"\s+", " ").Trim();
-        if (preview.Length > 90 || analyzedPreview is null && length > 180)
+        if (preview.Length > 90 || range.Length > length)
             preview = preview[..Math.Min(89, preview.Length)] + "…";
-        label += (dynamic ? "（Razor式を含む原文）" : "") + ": " + preview;
-        return true;
+        return "描画: " + preview;
     }
 
     private void AddClientAlternative(string id, FlowDiagram graph)
@@ -301,7 +329,7 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
             nodes.Add(node with { Id = prefix + node.Id, Label = node.Kind == NodeKind.End ? "JS断片の終了" : node.Label });
         foreach (var edge in graph.Edges)
             edges.Add(edge.From == start.Id
-                ? new FlowEdge(id, prefix + edge.To, "生成後、このJSが実行される場合")
+                ? new FlowEdge(id, prefix + edge.To, "生成JS（候補）")
                 : edge with { From = prefix + edge.From, To = prefix + edge.To });
     }
 

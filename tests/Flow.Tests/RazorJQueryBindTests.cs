@@ -30,7 +30,7 @@ public sealed class RazorJQueryBindTests
         Assert.AreEqual(page.Text.IndexOf(anonymous ? "reload();" : "reload);", StringComparison.Ordinal), call.Source.Offset);
 
         var branchEntry = graph.Edges.Single(edge => edge.To == registration.Id);
-        Assert.AreEqual("生成後、このJSが実行される場合", branchEntry.Label);
+        Assert.AreEqual("生成JS（候補）", branchEntry.Label);
         var continuation = graph.Nodes.Single(node => node.Id == graph.Edges.Single(edge =>
             edge.From == registration.Id && edge.Label is null).To);
         Assert.AreEqual("JS断片の終了", continuation.Label);

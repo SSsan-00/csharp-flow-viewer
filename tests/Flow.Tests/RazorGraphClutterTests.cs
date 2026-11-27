@@ -88,9 +88,9 @@ public sealed class RazorGraphClutterTests
             """);
         var handler = ByLabel(page.Analyze(-1), "onchange → reload()");
         var graph = page.Analyze(handler.TargetMethod!.Value);
-        var server = ByLabel(graph, "描画条件: Model.Ready");
+        var server = ByLabel(graph, "Model.Ready");
         var renderBranch = Next(graph, server, "True");
-        var client = Next(graph, renderBranch, "生成後、このJSが実行される場合");
+        var client = Next(graph, renderBranch, "生成JS（候補）");
         Assert.AreEqual((NodeKind.Condition, "document.getElementById('target')"), (client.Kind, client.Label));
         var call = Next(graph, client, "True");
         Assert.AreEqual("render()", call.Label);
@@ -133,7 +133,7 @@ public sealed class RazorGraphClutterTests
             <script>function reload() { return 42; }</script>
             """);
         var graph = page.Analyze(-1);
-        Assert.AreEqual(NodeKind.Condition, ByLabel(graph, "描画条件: value == 2").Kind);
+        Assert.AreEqual(NodeKind.Condition, ByLabel(graph, "value == 2").Kind);
         Assert.DoesNotContain(node => node.Label is "var value = 1" or "value = 2" or "value = 3", graph.Nodes);
         var reload = page.Entries.Single(entry => entry.Name == "reload");
         var handler = ByLabel(graph, "onclick → reload()");
@@ -208,11 +208,11 @@ public sealed class RazorGraphClutterTests
             </script>
             """);
         var graph = Analyze(page, "run");
-        var guard = ByLabel(graph, "描画条件: Model.Ready");
+        var guard = ByLabel(graph, "Model.Ready");
         var housekeeping = Next(graph, guard, "True");
-        Assert.AreEqual("条件成立時に描画 · 生成JS", housekeeping.Label);
+        Assert.AreEqual("生成JS", housekeeping.Label);
         StringAssert.Contains(page.Text.Substring(housekeeping.Source!.Offset, housekeeping.Source.Length), "++i;");
-        Assert.AreEqual("条件不成立時に描画 · 生成JS: load()", Next(graph, guard, "False").Label);
+        Assert.AreEqual("生成JS", Next(graph, guard, "False").Label);
         Assert.AreEqual("Razor側の生成終了", Next(graph, housekeeping).Label);
     }
 
@@ -325,9 +325,9 @@ public sealed class RazorGraphClutterTests
             """);
 
         var graph = Analyze(page, "run");
-        var output = Next(graph, ByLabel(graph, "描画条件: Model.Ready"), "True");
-        Assert.AreEqual("条件成立時に描画 · 生成JS: prepare() · finish()", output.Label);
-        var preparation = Next(graph, output, "生成後、このJSが実行される場合");
+        var output = Next(graph, ByLabel(graph, "Model.Ready"), "True");
+        Assert.AreEqual("生成JS", output.Label);
+        var preparation = Next(graph, output, "生成JS（候補）");
         Assert.AreEqual(page.Entries.Single(entry => entry.Name == "prepare").Id, preparation.TargetMethod);
         Assert.AreEqual("finish()", Next(graph, preparation).Label);
         Assert.HasCount(2, Analyze(page, "own").Nodes.Where(n => n.Kind == NodeKind.Call && n.Label == "obj.focus()"));

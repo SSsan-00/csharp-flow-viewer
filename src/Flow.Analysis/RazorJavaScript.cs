@@ -343,14 +343,14 @@ public sealed class RazorJavaScript
         return new RazorJavaScriptProjector(this, entry, token, omitBrowserDetails);
     }
 
-    internal sealed record GeneratedBranch(FlowDiagram? ClientFlow, string? Preview);
+    internal sealed record GeneratedBranch(FlowDiagram? ClientFlow, bool IsUncertain);
 
     internal GeneratedBranch? AnalyzeGeneratedBranch(int controlStart, string text, SourceRange source, int maxNodes,
         CancellationToken token, RazorMarkupDocument? dynamicOutput = null, bool unfoldMixedLoop = false,
-        bool hasIterationLineBreak = false, bool allowConditionalData = false)
+        bool hasIterationLineBreak = false, bool allowConditionalData = false, bool splitPrefix = false)
     {
         if (!generatedStatementScopes.TryGetValue(controlStart, out var scope)
-            || unfoldMixedLoop && scope is null) return null;
+            || (unfoldMixedLoop || splitPrefix) && scope is null) return null;
         var owner = scope is not null ? data[scope.OwnerEntryId] : null;
         var insideFunction = owner is not null && owner.Body is not JsProgram;
         JsProgram? parsed = null;
@@ -390,7 +390,7 @@ public sealed class RazorJavaScript
                 }).ToArray()
             : [];
         // Opaque generated code can change the outer bindings even when the surrounding JS parses.
-        var blocked = unresolvedTail is null && scope is { HasDynamicBinding: false }
+        var blocked = !splitPrefix && unresolvedTail is null && scope is { HasDynamicBinding: false }
             && (!unfoldMixedLoop || OnlyQuotedValues(root))
             ? RazorGeneratedBindings.Changes(root, token) : null;
         var changeHandlers = new Dictionary<SourceRange, (Expression Handler, bool DynamicSelector)>();
@@ -406,7 +406,20 @@ public sealed class RazorJavaScript
             && (text[statements[^1].End - 1] == ';' || hasIterationLineBreak && CanEndAtOwningScriptBoundary(owner, controlStart))
             && text[statements[0].Start] is not ('(' or '[' or '`' or '/' or '+' or '-' or '.')
             && graph.Nodes.Any(node => node.Kind is NodeKind.Call or NodeKind.Transfer);
-        return new((conditions && unresolvedTail is null || standalone) ? graph : null, Preview());
+        if (splitPrefix && !IsCompletePrefix()) return null;
+        var flow = conditions && unresolvedTail is null || standalone ? graph : null;
+        return new(flow, graph.IsPartial || flow is null && !root.Body.All(IsBookkeeping));
+
+        bool IsCompletePrefix()
+        {
+            if (graph.IsPartial || root.Body.Count == 0 || text[root.Body[0].Start] is '(' or '[' or '`' or '/' or '+' or '-' or '.')
+                return false;
+            var last = root.Body[^1];
+            // An unbraced if could absorb an else from the following output.
+            return last is IfStatement { Consequent: BlockStatement, Alternate: BlockStatement }
+                || last is (ExpressionStatement or VariableDeclaration or ReturnStatement or ThrowStatement)
+                    && text[last.End - 1] == ';';
+        }
 
         static bool CanEndAtOwningScriptBoundary(EntryData? owner, int start)
         {
@@ -445,23 +458,6 @@ public sealed class RazorJavaScript
                 return null;
             return dynamicOutput!.CoverGeneratedExpressions(Range(unit, expression));
         }
-
-        string? Preview()
-        {
-            if (graph.IsPartial || root.Body.Any(DeclaresFunction)) return null;
-            var relevant = graph.Nodes.Where(node => node.Kind is not (NodeKind.Start or NodeKind.End or NodeKind.Junction)
-                    && node.Source is not null)
-                .OrderBy(node => node.Source!.Offset)
-                .Select(node => node.Kind == NodeKind.Condition ? $"条件: {node.Label}" : node.Label)
-                .Distinct(StringComparer.Ordinal).Take(4).ToArray();
-            if (relevant.Length > 0)
-                return string.Join(" · ", relevant.Take(3)) + (relevant.Length > 3 ? "…" : "");
-            return root.Body.All(IsBookkeeping) ? "" : null;
-        }
-
-        static bool DeclaresFunction(Statement node) => node is FunctionDeclaration
-            || node is VariableDeclaration declaration && declaration.Declarations.Any(variable => variable.Init is IFunction)
-            || node is ExpressionStatement { Expression: AssignmentExpression { Right: IFunction } };
 
         bool IsBookkeeping(Node node) => node switch
         {
