@@ -121,6 +121,46 @@ internal static class RazorScriptBoundaries
         }
     }
 
+    public static (JsProgram Root, int End)? ReadExplicitPrefix(string projected, bool allowReturn, CancellationToken token)
+    {
+        var depth = 0;
+        var lastTerminator = 0;
+        var parser = new Parser(new ParserOptions
+        {
+            AllowReturnOutsideFunction = allowReturn,
+            OnToken = (in Token current) =>
+            {
+                token.ThrowIfCancellationRequested();
+                if (current.Kind != TokenKind.Punctuator) return;
+                switch (current.Value)
+                {
+                    case "(" or "[" or "{" or "${": depth++; break;
+                    case ")" or "]" or "}": depth--; break;
+                    case ";" when depth == 0: lastTerminator = current.End; break;
+                }
+            }
+        });
+        try { parser.ParseScript(projected); }
+        catch (ParseErrorException) { }
+        if (lastTerminator == 0) return null;
+        var plainParser = new Parser(new ParserOptions { AllowReturnOutsideFunction = allowReturn });
+        try
+        {
+            var prefix = plainParser.ParseScript(projected[..lastTerminator]);
+            for (var i = prefix.Body.Count - 1; i >= 0; i--)
+            {
+                // A dangling else or an unbraced control body is not an independent boundary.
+                var statement = prefix.Body[i];
+                if (statement is not (ExpressionStatement or VariableDeclaration or EmptyStatement or ReturnStatement or ThrowStatement)
+                    || projected[statement.End - 1] != ';') continue;
+                var end = statement.End;
+                return (end == lastTerminator ? prefix : plainParser.ParseScript(projected[..end]), end);
+            }
+        }
+        catch (ParseErrorException) { }
+        return null;
+    }
+
     public static IEnumerable<(string Name, SourceRange? Source)> SourcesOutsideUnresolvedSlots(
         RazorJavaScriptFragment fragment, JsProgram root, IReadOnlyDictionary<int, SourceRange> slots,
         IReadOnlySet<int> independent, CancellationToken token, IReadOnlySet<int>? generatedValues = null)

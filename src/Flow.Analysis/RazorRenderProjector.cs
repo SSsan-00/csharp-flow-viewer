@@ -199,8 +199,8 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
                 DescribeOutput(interior, id, ref label, ref source, scriptSlot, unfoldMixedLoop);
             else
             {
-                // A nested if can share the script insertion point only if nothing else is emitted on this arm.
-                var slot = statements is [IfStatementSyntax only] && IsOnlyOutput(only, interior) ? scriptSlot : (int?)null;
+                // Sibling output may alter the JavaScript scope or the statement around a nested control.
+                var slot = statements is [var only] && IsControl(only) && IsOnlyOutput(only, interior) ? scriptSlot : (int?)null;
                 var end = interior.End;
                 for (var index = statements.Length - 1; index >= 0; index--)
                 {
@@ -254,13 +254,17 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
         source = document.Range(offset, length);
         if (script) label += " · 生成JS";
         string? analyzedPreview = null;
-        if (script && controlStart is int start && length <= MaxGeneratedScriptLength && outputNodes < MaxOutputNodes
+        if (script && controlStart is int start && outputNodes < MaxOutputNodes
+            && (length <= MaxGeneratedScriptLength || dynamic && unfoldMixedLoop)
             && (!dynamic || unfoldMixedLoop || output.Contains("bind", StringComparison.Ordinal)))
         {
             var remaining = MaxOutputNodes - outputNodes;
+            var hasIterationLineBreak = unfoldMixedLoop
+                && (document.HasRenderedLineBreak(span.Start, offset) || document.HasRenderedLineBreak(end, span.End));
             var branch = dynamic
-                ? javaScript.AnalyzeGeneratedBranch(start, document.ProjectJavaScript(offset, length), source, remaining,
-                    token, document, unfoldMixedLoop)
+                ? javaScript.AnalyzeGeneratedBranch(start,
+                    document.ProjectJavaScript(offset, Math.Min(length, MaxGeneratedScriptLength)), source, remaining,
+                    token, document, unfoldMixedLoop, hasIterationLineBreak)
                 : javaScript.AnalyzeGeneratedBranch(start, output.ToString(), source, remaining, token);
             analyzedPreview = branch?.Preview;
             if (branch?.ClientFlow is { } graph && graph.Nodes.Count <= remaining)
@@ -272,6 +276,11 @@ internal sealed class RazorRenderProjector(RazorMarkupDocument document, IReadOn
                     return true;
                 }
             }
+        }
+        if (script && dynamic && unfoldMixedLoop)
+        {
+            label += "（詳細未確定）";
+            return true;
         }
         if (analyzedPreview == "") return true;
         var prefix = analyzedPreview ?? (dynamic ? document.SourcePreview(offset, Math.Min(180, length))

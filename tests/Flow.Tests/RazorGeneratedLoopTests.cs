@@ -97,30 +97,142 @@ public sealed class RazorGeneratedLoopTests
     }
 
     [TestMethod]
-    public void MixedLoopRespectsTheExistingGeneratedOutputLengthCap()
+    [DataRow("\n")]
+    [DataRow("\r\n")]
+    public void SemicolonlessOutputCanEndAtTheReadyBodyBoundary(string newline)
     {
-        var page = Page("<text>prepare();" + new string(' ', 8200) + "@(Model.Code); finish();</text>");
+        var page = Page("""
+            <text>
+                prepare()
+                const label = "@(Model.Title)"
+                finish()
+            </text>
+            """, newline);
         var graph = Ready(page);
-        Assert.DoesNotContain(edge => edge.Label == Execute, graph.Edges);
-        var summary = Assert.ContainsSingle(graph.Nodes.Where(node => node.Label.Contains("Razor式を含む原文", StringComparison.Ordinal)));
-        Assert.IsLessThan(150, summary.Label.Length);
+        var start = CandidateStart(graph);
+        Assert.AreEqual("prepare()", start.Label);
+        Assert.AreEqual(page.Text.IndexOf("prepare()", page.Text.IndexOf("<text>", StringComparison.Ordinal), StringComparison.Ordinal),
+            start.Source!.Offset);
+        var finish = Next(graph, start);
+        Assert.AreEqual("finish()", finish.Label);
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "finish").Id, finish.TargetMethod);
+        Assert.AreEqual("JS断片の終了", Next(graph, finish).Label);
+        Assert.IsTrue(graph.IsPartial);
     }
 
     [TestMethod]
-    public void UnparseableShellDoesNotManufactureStatementBoundaries()
+    [DataRow("<text>prepare(); const label = \"@(Model.Title)\"; finish()</text>", "")]
+    [DataRow("<text>prepare()\nconst label = \"@(Model.Title)\"\nfinish()\n</text>", "(apply());")]
+    public void SemicolonlessOutputDoesNotAssumeAnUnsafeContinuation(string emitted, string continuation)
     {
-        var graph = Ready(Page("""
+        var graph = Ready(Page(emitted, continuation: continuation));
+        Assert.DoesNotContain(edge => edge.Label == Execute, graph.Edges);
+        Assert.AreEqual("ループ本体を描画 · 生成JS（詳細未確定）", LoopBody(graph).Label);
+    }
+
+    [TestMethod]
+    public void MixedLoopRecoversOnlyTheBoundedPrefix()
+    {
+        var page = Page("<text>prepare();" + new string(' ', 8200) + "@(Model.Code); finish();</text>");
+        AssertPrefixAndTail(page, "prepare()");
+    }
+
+    [TestMethod]
+    public void UnparseableShellKeepsCompleteStatementsBeforeTheInvalidSuffix()
+    {
+        var page = Page("""
             <text>
-            prepare();
+            prepare("value; still one argument");
             @(Model.Code) incomplete(
             finish();
             </text>
-            """));
-        Assert.DoesNotContain(edge => edge.Label == Execute, graph.Edges);
-        Assert.Contains(node => node.Label.Contains("Razor式を含む原文", StringComparison.Ordinal), graph.Nodes);
+            """);
+        AssertPrefixAndTail(page, "prepare(\"value; still one argument\")");
     }
 
-    private static RazorSourceFile Page(string emitted, string newline = "\n")
+    [TestMethod]
+    public void APartialPrefixDoesNotInventTheEndOfAnIfOrAJumpPastIt()
+    {
+        var page = Page("""
+            <text>
+            prepare();
+            if (enabled) apply(); else @(Model.Code) incomplete(
+            finish();
+            </text>
+            """);
+        AssertPrefixAndTail(page, "prepare()");
+        var graph = Ready(page);
+        Assert.DoesNotContain(node => node.Label is "apply()" or "enabled", graph.Nodes);
+    }
+
+    [TestMethod]
+    public void AdjacentTextAndRazorLineOutputsStillHaveOneCandidateSequence()
+    {
+        var page = Page("<text>prepare();</text><text>const label = \"@(Model.Title)\";</text>\n@:finish();");
+        var graph = Ready(page);
+        var start = CandidateStart(graph);
+        Assert.AreEqual("prepare()", start.Label);
+        var finish = Next(graph, start);
+        Assert.AreEqual("finish()", finish.Label);
+        Assert.AreEqual(page.Entries.Single(entry => entry.Name == "finish").Id, finish.TargetMethod);
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public void NestedLoopOnlySharesTheScopeWhenItIsTheOnlyOutput(bool hasSiblingOutput)
+    {
+        var sibling = hasSiblingOutput ? "<text>apply = other;</text>" : "";
+        var page = Page($$"""
+            {{sibling}}
+            @for (var j = 0; j < 2; j++) {
+                <text>
+                    const label = "@(Model.Title)";
+                    apply();
+                </text>
+            }
+            """);
+        var graph = Ready(page);
+        var inner = graph.Nodes.Single(node => node.Label == "描画条件: for (j < 2)");
+        var output = Next(graph, inner, "True");
+        Assert.AreEqual(inner, Next(graph, output));
+        if (!hasSiblingOutput)
+        {
+            var apply = Next(graph, output, Execute);
+            Assert.AreEqual("apply()", apply.Label);
+            Assert.AreEqual(page.Entries.Single(entry => entry.Name == "apply").Id, apply.TargetMethod);
+        }
+        else
+        {
+            Assert.DoesNotContain(edge => edge.From == output.Id && edge.Label == Execute, graph.Edges);
+            Assert.AreEqual("ループ本体を描画 · 生成JS（詳細未確定）", output.Label);
+        }
+    }
+
+    private static void AssertPrefixAndTail(RazorSourceFile page, string label)
+    {
+        var graph = Ready(page);
+        var body = LoopBody(graph);
+        Assert.AreEqual("ループ本体を描画 · 生成JS（一部未確定）", body.Label);
+        Assert.AreEqual("描画条件: for (i < 3)", Next(graph, body).Label);
+        var first = CandidateStart(graph);
+        Assert.AreEqual(label, first.Label);
+        Assert.IsNull(first.TargetMethod);
+        var rest = Next(graph, first);
+        Assert.AreEqual((NodeKind.Exception, "残りの生成JS（未確定）"), (rest.Kind, rest.Label));
+        var afterFirst = page.Text.IndexOf(label + ";", StringComparison.Ordinal) + label.Length + 1;
+        Assert.AreEqual(afterFirst, rest.Source!.Offset);
+        Assert.IsTrue(page.Text.Substring(rest.Source.Offset, rest.Source.Length).Contains("finish();", StringComparison.Ordinal));
+        Assert.DoesNotContain(node => node.Label == "finish()", graph.Nodes);
+        Assert.AreEqual("JS断片の終了", Next(graph, rest, "続行する場合").Label);
+    }
+
+    private static FlowNode LoopBody(FlowDiagram graph) =>
+        Next(graph, graph.Nodes.Single(node => node.Label == "描画条件: for (i < 3)"), "True");
+
+    private static FlowNode CandidateStart(FlowDiagram graph) => Next(graph, LoopBody(graph), Execute);
+
+    private static RazorSourceFile Page(string emitted, string newline = "\n", string continuation = "")
     {
         var source = $$"""
             <script>
@@ -132,6 +244,7 @@ public sealed class RazorGeneratedLoopTests
                 @for (var i = 0; i < 3; i++) {
                     {{emitted}}
                 }
+                {{continuation}}
             });
             </script>
             """;
